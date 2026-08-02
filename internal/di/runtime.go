@@ -64,7 +64,7 @@ func provideStreams(
 	// работает в режиме наблюдения, а не падает: это штатный сценарий до
 	// открытия счёта.
 	if wallet == nil {
-		log.Info("пользовательские каналы отключены: кошелёк не задан")
+		log.Info("user channels disabled: no wallet configured")
 		return streams
 	}
 
@@ -111,11 +111,11 @@ func registerRunnables(lc fx.Lifecycle, log *slog.Logger, runnables []ports.Runn
 	for _, r := range runnables {
 		lc.Append(fx.Hook{
 			OnStart: func(ctx context.Context) error {
-				log.Debug("запуск компонента", "name", r.Name())
+				log.Debug("starting component", "name", r.Name())
 				return r.Start(ctx)
 			},
 			OnStop: func(ctx context.Context) error {
-				log.Debug("остановка компонента", "name", r.Name())
+				log.Debug("stopping component", "name", r.Name())
 				return r.Stop(ctx)
 			},
 		})

@@ -24,12 +24,12 @@ import (
 const shutdownTimeout = 15 * time.Second
 
 func main() {
-	configPath := flag.String("config", "config.yaml", "путь к файлу конфигурации")
+	configPath := flag.String("config", "config.yaml", "path to the configuration file")
 	flag.Parse()
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "конфигурация не загружена:\n%v\n", err)
+		fmt.Fprintf(os.Stderr, "failed to load configuration:\n%v\n", err)
 		os.Exit(1)
 	}
 

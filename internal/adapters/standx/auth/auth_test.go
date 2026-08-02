@@ -15,22 +15,37 @@ import (
 // поэтому она годится как якорь для проверки вывода адреса.
 const (
 	knownPrivateKey = "4646464646464646464646464646464646464646464646464646464646464646"
-	knownAddress    = "0x9d8a62f656a8d1615c1294fd71e9cfb3e4855a4f"
+	knownAddress    = "0x9d8A62f656a8d1615C1294fd71e9CFb3E4855A4F"
 )
 
 func TestWalletDerivesKnownAddress(t *testing.T) {
 	for _, key := range []string{knownPrivateKey, "0x" + knownPrivateKey} {
 		w, err := NewWallet(secret.New(key))
 		require.NoError(t, err)
-		require.Equal(t, knownAddress, strings.ToLower(w.Address().String()))
+		require.Equal(t, knownAddress, w.Address().String())
+	}
+}
+
+// StandX подставляет адрес в сообщение SIWE дословно, а EIP-4361 требует
+// форму EIP-55. Адрес в нижнем регистре приводил к отказу на входе.
+func TestAddressUsesEIP55Checksum(t *testing.T) {
+	// Официальные векторы EIP-55.
+	cases := map[string]string{
+		"5aaeb6053f3e94c9b9a09f33669435e7ef1beaed": "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+		"fb6916095ca1df60bb79ce92ce3ea74c37c5d359": "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359",
+		"dbf03b407c01e7cd3cbea99509d93f8dddc8c6fb": "0xdbF03B407c01E7cD3CBea99509d93f8DDDC8C6FB",
+		"d1220a0cf47c7b9be7a2e6ba89f429762e7b9adb": "0xD1220A0cf47c7B9Be7A2E6BA89F429762e7b9aDb",
+	}
+	for lower, want := range cases {
+		require.Equal(t, want, toChecksumAddress(lower))
 	}
 }
 
 func TestWalletRejectsMalformedKeys(t *testing.T) {
 	cases := map[string]string{
-		"пустой":           "",
-		"не hex":           "0xZZZZ",
-		"слишком короткий": "0x4646",
+		"empty":     "",
+		"not hex":   "0xZZZZ",
+		"too short": "0x4646",
 	}
 	for name, key := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -50,7 +65,7 @@ func TestSignPersonalRecoversToSigner(t *testing.T) {
 		"",
 		"hello",
 		"standx.com wants you to sign in with your Ethereum account:\n0x9d8A...",
-		strings.Repeat("длинное сообщение с юникодом ", 40),
+		strings.Repeat("a long message with unicode \u00e9\u00fc\u4e2d ", 40),
 	}
 
 	for _, msg := range messages {
@@ -62,7 +77,7 @@ func TestSignPersonalRecoversToSigner(t *testing.T) {
 
 		raw, err := hex.DecodeString(strings.TrimPrefix(sig, "0x"))
 		require.NoError(t, err)
-		require.Contains(t, []byte{27, 28}, raw[64], "v должно быть 27 или 28")
+		require.Contains(t, []byte{27, 28}, raw[64], "v must be 27 or 28")
 
 		recovered, err := RecoverPersonal(msg, sig)
 		require.NoError(t, err)
@@ -87,10 +102,10 @@ func TestRecoverPersonalRejectsTamperedMessage(t *testing.T) {
 	w, err := NewWallet(secret.New(knownPrivateKey))
 	require.NoError(t, err)
 
-	sig, err := w.SignPersonal("оригинал")
+	sig, err := w.SignPersonal("original")
 	require.NoError(t, err)
 
-	recovered, err := RecoverPersonal("подмена", sig)
+	recovered, err := RecoverPersonal("tampered", sig)
 	// Восстановление математически возможно, но даёт чужой адрес.
 	if err == nil {
 		require.NotEqual(t, strings.ToLower(w.Address().String()), strings.ToLower(recovered.String()))
@@ -114,7 +129,7 @@ func TestSessionSignsAndVerifies(t *testing.T) {
 
 	require.Equal(t, "v1", headers.Version)
 	require.Equal(t, fixedNow, headers.Timestamp)
-	require.Len(t, headers.RequestID, 36, "x-request-id должен быть UUID")
+	require.Len(t, headers.RequestID, 36, "x-request-id must be a UUID")
 	require.True(t, VerifySignature(s.PublicKey(), headers, body))
 
 	// Подпись обязана ломаться при изменении любого компонента сообщения.
@@ -143,9 +158,9 @@ func TestNewUUIDv4Format(t *testing.T) {
 		id, err := newUUIDv4()
 		require.NoError(t, err)
 		require.Len(t, id, 36)
-		require.Equal(t, byte('4'), id[14], "версия UUID должна быть 4")
-		require.Contains(t, "89ab", string(id[19]), "вариант должен быть RFC 4122")
-		require.False(t, seen[id], "UUID должны быть уникальны")
+		require.Equal(t, byte('4'), id[14], "UUID version must be 4")
+		require.Contains(t, "89ab", string(id[19]), "variant must be RFC 4122")
+		require.False(t, seen[id], "UUIDs must be unique")
 		seen[id] = true
 	}
 }

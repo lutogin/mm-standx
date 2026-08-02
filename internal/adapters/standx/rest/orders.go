@@ -51,7 +51,7 @@ func (c *Client) Place(ctx context.Context, req ports.PlaceRequest) error {
 		return fmt.Errorf("place order %s: %w", req.ClOrdID, err)
 	}
 	if envelope.Code != 0 {
-		return fmt.Errorf("place order %s: биржа отклонила заявку: code %d: %s",
+		return fmt.Errorf("place order %s: exchange rejected the request: code %d: %s",
 			req.ClOrdID, envelope.Code, envelope.Message)
 	}
 	return nil
@@ -91,7 +91,8 @@ func (c *Client) CancelBatch(ctx context.Context, ids []trading.ClOrdID, p ports
 		list = append(list, id.String())
 	}
 
-	var envelope dto.Envelope
+	// Ответ приходит массивом конвертов, по одному на ордер.
+	var envelopes dto.BatchEnvelope
 	err := c.do(ctx, request{
 		method:   http.MethodPost,
 		path:     "/api/cancel_orders",
@@ -99,12 +100,12 @@ func (c *Client) CancelBatch(ctx context.Context, ids []trading.ClOrdID, p ports
 		auth:     true,
 		signed:   true,
 		priority: p,
-	}, &envelope)
+	}, &envelopes)
 	if err != nil {
 		return fmt.Errorf("cancel %d orders: %w", len(ids), err)
 	}
-	if envelope.Code != 0 {
-		return fmt.Errorf("cancel %d orders: code %d: %s", len(ids), envelope.Code, envelope.Message)
+	if failed := envelopes.FirstError(); failed != nil {
+		return fmt.Errorf("cancel %d orders: code %d: %s", len(ids), failed.Code, failed.Message)
 	}
 	return nil
 }

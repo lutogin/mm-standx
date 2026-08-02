@@ -1,0 +1,33 @@
+---
+description: All user-facing interfaces must be in English
+alwaysApply: true
+---
+
+# Language policy
+
+**Every string the program emits must be written in English.** This applies to:
+
+- error messages and wrapped error text
+- log messages and structured log field names
+- CLI output, usage text, and flag descriptions
+- configuration validation messages
+- metric names, labels, and help strings
+- test names and assertion failure messages
+- commit messages and pull request descriptions
+
+There are no exceptions. A message written in any other language is a defect,
+regardless of who is expected to read it.
+
+## Code comments
+
+Comments are currently exempt and may remain as they are. This includes comments
+in `config.yaml`, `.env.example`, and other configuration templates. Do not
+translate existing comments unless explicitly asked.
+
+New comments should be written in English so the codebase converges over time.
+
+## Rationale
+
+Error text and log output travel far beyond the person who wrote them: into
+tickets, dashboards, alerting rules, search queries, and other people's terminals.
+A single language keeps that surface searchable and reviewable.

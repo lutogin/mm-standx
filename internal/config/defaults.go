@@ -21,6 +21,7 @@ func defaults() *Config {
 			HeartbeatPath: "data/mmbot.hb",
 			RecordingDir:  "recordings",
 			StatsInterval: 30 * time.Second,
+			SessionPath:   "data/session.json",
 		},
 		Exchange: Exchange{
 			AuthBaseURL:      "https://api.standx.com",

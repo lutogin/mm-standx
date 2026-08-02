@@ -38,14 +38,14 @@ type Wallet struct {
 func NewWallet(privateKey secret.Secret) (*Wallet, error) {
 	raw := strings.TrimPrefix(strings.TrimSpace(privateKey.Reveal()), "0x")
 	if raw == "" {
-		return nil, fmt.Errorf("wallet: приватный ключ не задан")
+		return nil, fmt.Errorf("wallet: private key is not set")
 	}
 	b, err := hex.DecodeString(raw)
 	if err != nil {
-		return nil, fmt.Errorf("wallet: приватный ключ не является hex-строкой: %w", err)
+		return nil, fmt.Errorf("wallet: private key is not a hex string: %w", err)
 	}
 	if len(b) != 32 {
-		return nil, fmt.Errorf("wallet: ожидалось 32 байта приватного ключа, получено %d", len(b))
+		return nil, fmt.Errorf("wallet: want 32 bytes of private key, got %d", len(b))
 	}
 
 	priv := secp256k1.PrivKeyFromBytes(b)
@@ -67,7 +67,7 @@ func (w *Wallet) SignPersonal(message string) (string, error) {
 	// для несжатого ключа. Ethereum ожидает обратный порядок: R‖S‖v.
 	compact := ecdsa.SignCompact(w.priv, hash, false)
 	if len(compact) != 65 {
-		return "", fmt.Errorf("wallet: неожиданная длина подписи %d", len(compact))
+		return "", fmt.Errorf("wallet: unexpected signature length %d", len(compact))
 	}
 
 	var sig [65]byte
@@ -84,10 +84,10 @@ func (w *Wallet) SignPersonal(message string) (string, error) {
 func RecoverPersonal(message, signature string) (Address, error) {
 	raw, err := hex.DecodeString(strings.TrimPrefix(signature, "0x"))
 	if err != nil {
-		return "", fmt.Errorf("recover: подпись не является hex-строкой: %w", err)
+		return "", fmt.Errorf("recover: signature is not a hex string: %w", err)
 	}
 	if len(raw) != 65 {
-		return "", fmt.Errorf("recover: ожидалось 65 байт подписи, получено %d", len(raw))
+		return "", fmt.Errorf("recover: want 65 bytes of signature, got %d", len(raw))
 	}
 
 	// Обратное преобразование R‖S‖v → recoveryCode‖R‖S.
@@ -117,5 +117,37 @@ func addressFromPubKey(pub *secp256k1.PublicKey) Address {
 	uncompressed := pub.SerializeUncompressed()
 	h := sha3.NewLegacyKeccak256()
 	h.Write(uncompressed[1:])
-	return Address("0x" + hex.EncodeToString(h.Sum(nil)[12:]))
+	return Address(toChecksumAddress(hex.EncodeToString(h.Sum(nil)[12:])))
+}
+
+// toChecksumAddress применяет контрольную сумму EIP-55.
+//
+// Регистр здесь не косметика. StandX подставляет присланный адрес в сообщение
+// SIWE дословно, а EIP-4361 требует адрес в форме EIP-55. Адрес в нижнем
+// регистре порождает сообщение, которое сервер затем сам же отвергает
+// на входе с ошибкой "Invalid SIWE message format".
+//
+// Правило: буква поднимается в верхний регистр, если соответствующий ей полубайт
+// keccak256 от строки адреса в нижнем регистре не меньше восьми.
+func toChecksumAddress(lowerHex string) string {
+	h := sha3.NewLegacyKeccak256()
+	h.Write([]byte(lowerHex))
+	hash := h.Sum(nil)
+
+	out := []byte(lowerHex)
+	for i, c := range out {
+		if c < 'a' || c > 'f' {
+			continue
+		}
+		nibble := hash[i/2]
+		if i%2 == 0 {
+			nibble >>= 4
+		} else {
+			nibble &= 0x0f
+		}
+		if nibble >= 8 {
+			out[i] = c - ('a' - 'A')
+		}
+	}
+	return "0x" + string(out)
 }

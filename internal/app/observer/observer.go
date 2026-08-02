@@ -86,7 +86,7 @@ func (o *Observer) Stop(ctx context.Context) error {
 	case <-o.done:
 		return nil
 	case <-ctx.Done():
-		return fmt.Errorf("observer: не остановился вовремя: %w", ctx.Err())
+		return fmt.Errorf("observer: did not stop in time: %w", ctx.Err())
 	}
 }
 
@@ -159,7 +159,7 @@ func (o *Observer) report() {
 	o.mu.Unlock()
 
 	if len(snapshot) == 0 {
-		o.log.Warn("за интервал не получено ни одного обновления")
+		o.log.Warn("no updates received during the interval")
 		return
 	}
 
@@ -178,7 +178,7 @@ func (o *Observer) report() {
 		if drift, err := money.RelativeBps(s.firstMark, s.lastMark); err == nil {
 			attrs = append(attrs, "drift", drift)
 		}
-		o.log.Info("сводка рынка", attrs...)
+		o.log.Info("market summary", attrs...)
 	}
 }
 

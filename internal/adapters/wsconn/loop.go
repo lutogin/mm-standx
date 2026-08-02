@@ -44,7 +44,7 @@ const (
 
 // ErrNotConnected возвращается при попытке отправить сообщение в отсутствие
 // установленного соединения.
-var ErrNotConnected = errors.New("wsconn: соединение не установлено")
+var ErrNotConnected = errors.New("wsconn: connection is not established")
 
 // Sender отправляет сообщения в конкретное соединение.
 //
@@ -142,7 +142,7 @@ func (l *Loop) Stop(ctx context.Context) error {
 	case <-l.done:
 		return nil
 	case <-ctx.Done():
-		return fmt.Errorf("wsconn %s: не остановился вовремя: %w", l.name, ctx.Err())
+		return fmt.Errorf("wsconn %s: did not stop in time: %w", l.name, ctx.Err())
 	}
 }
 
@@ -170,7 +170,7 @@ func (l *Loop) Send(ctx context.Context, payload []byte) error {
 func (l *Loop) SendJSON(ctx context.Context, v any) error {
 	payload, err := json.Marshal(v)
 	if err != nil {
-		return fmt.Errorf("wsconn %s: сериализация: %w", l.name, err)
+		return fmt.Errorf("wsconn %s: marshal: %w", l.name, err)
 	}
 	return l.Send(ctx, payload)
 }
@@ -195,7 +195,7 @@ func (l *Loop) run(ctx context.Context) {
 		if l.clock.Now().Sub(start) > healthyAfter {
 			delay = l.cfg.WSReconnectMin
 		}
-		l.log.Warn("соединение разорвано, переподключаемся", "error", err, "delay", delay)
+		l.log.Warn("connection lost, reconnecting", "error", err, "delay", delay)
 
 		if sleepErr := l.clock.Sleep(ctx, withJitter(delay)); sleepErr != nil {
 			return
@@ -213,7 +213,7 @@ func (l *Loop) session(parent context.Context) error {
 
 	conn, _, err := websocket.Dial(ctx, l.url, nil)
 	if err != nil {
-		return fmt.Errorf("подключение: %w", err)
+		return fmt.Errorf("dial: %w", err)
 	}
 	defer conn.CloseNow()
 	conn.SetReadLimit(readLimit)
@@ -221,7 +221,7 @@ func (l *Loop) session(parent context.Context) error {
 	// Рукопожатие пишет напрямую в новое соединение: до его завершения канал
 	// закрыт для остальных отправителей, иначе ордер мог бы уйти раньше авторизации.
 	if err := l.handler.OnConnect(ctx, &boundSender{conn: conn}); err != nil {
-		return fmt.Errorf("рукопожатие: %w", err)
+		return fmt.Errorf("handshake: %w", err)
 	}
 
 	l.mu.Lock()
@@ -234,7 +234,7 @@ func (l *Loop) session(parent context.Context) error {
 	}()
 
 	events.Publish(l.bus, ctx, events.StreamConnected{Stream: l.name, At: l.clock.Now()})
-	l.log.Info("соединение установлено")
+	l.log.Info("connection established")
 
 	if beater, ok := l.handler.(Heartbeater); ok {
 		beatCtx, stopBeat := context.WithCancel(ctx)
@@ -259,7 +259,7 @@ func (l *Loop) keepAlive(ctx context.Context, beater Heartbeater, s Sender) {
 			return
 		case <-ticker.C():
 			if err := beater.Heartbeat(ctx, s); err != nil && ctx.Err() == nil {
-				l.log.Warn("heartbeat не отправлен", "error", err)
+				l.log.Warn("failed to send heartbeat", "error", err)
 			}
 		}
 	}
@@ -276,9 +276,9 @@ func (l *Loop) readLoop(ctx context.Context, conn *websocket.Conn) error {
 			// Отличаем молчание собеседника от штатной остановки: в первом
 			// случае истёк наш дедлайн, во втором закрыт родительский контекст.
 			if ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
-				return fmt.Errorf("нет сообщений дольше %s", l.cfg.WSIdleTimeout)
+				return fmt.Errorf("no messages for longer than %s", l.cfg.WSIdleTimeout)
 			}
-			return fmt.Errorf("чтение: %w", err)
+			return fmt.Errorf("read: %w", err)
 		}
 		if typ != websocket.MessageText {
 			continue
@@ -297,7 +297,7 @@ func (b *boundSender) Send(ctx context.Context, payload []byte) error {
 func (b *boundSender) SendJSON(ctx context.Context, v any) error {
 	payload, err := json.Marshal(v)
 	if err != nil {
-		return fmt.Errorf("wsconn: сериализация: %w", err)
+		return fmt.Errorf("wsconn: marshal: %w", err)
 	}
 	return b.Send(ctx, payload)
 }

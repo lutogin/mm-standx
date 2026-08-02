@@ -19,7 +19,7 @@ func TestParsePreservesPrecision(t *testing.T) {
 }
 
 func TestParseRejectsGarbage(t *testing.T) {
-	_, err := ParsePrice("не число")
+	_, err := ParsePrice("not a number")
 	require.Error(t, err)
 	_, err = ParseQty("")
 	require.Error(t, err)

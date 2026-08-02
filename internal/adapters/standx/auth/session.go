@@ -33,7 +33,7 @@ type Session struct {
 func NewSession(nowMillis func() int64) (*Session, error) {
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		return nil, fmt.Errorf("session: генерация ключа ed25519: %w", err)
+		return nil, fmt.Errorf("session: generate ed25519 key: %w", err)
 	}
 	return &Session{
 		priv:      priv,
@@ -47,7 +47,7 @@ func NewSession(nowMillis func() int64) (*Session, error) {
 // Предназначена исключительно для тестов с воспроизводимыми подписями.
 func NewSessionFromSeed(seed []byte, nowMillis func() int64) (*Session, error) {
 	if len(seed) != ed25519.SeedSize {
-		return nil, fmt.Errorf("session: ожидалось %d байт зерна, получено %d", ed25519.SeedSize, len(seed))
+		return nil, fmt.Errorf("session: want %d bytes of seed, got %d", ed25519.SeedSize, len(seed))
 	}
 	priv := ed25519.NewKeyFromSeed(seed)
 	pub := priv.Public().(ed25519.PublicKey)
@@ -63,6 +63,13 @@ func (s *Session) RequestID() string { return s.requestID }
 // PublicKey возвращает публичный ключ сессии.
 func (s *Session) PublicKey() ed25519.PublicKey { return s.pub }
 
+// Seed возвращает зерно ключа сессии для сохранения в кэше.
+//
+// Значение чувствительно: вместе с действующим токеном оно позволяет подписывать
+// торговые запросы. Единственный допустимый получатель — SessionStore,
+// пишущий файл с правами 0600.
+func (s *Session) Seed() []byte { return s.priv.Seed() }
+
 // Sign подписывает тело запроса и возвращает заголовки подписи.
 //
 // Подписывается ровно тот байтовый срез, который уйдёт в сеть: повторная
@@ -70,7 +77,7 @@ func (s *Session) PublicKey() ed25519.PublicKey { return s.pub }
 func (s *Session) Sign(body []byte) (ports.SignatureHeaders, error) {
 	requestID, err := newUUIDv4()
 	if err != nil {
-		return ports.SignatureHeaders{}, fmt.Errorf("session: генерация x-request-id: %w", err)
+		return ports.SignatureHeaders{}, fmt.Errorf("session: generate x-request-id: %w", err)
 	}
 	timestamp := s.now()
 

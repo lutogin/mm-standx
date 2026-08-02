@@ -1,0 +1,22 @@
+# 2026/08/02 23:30:02.214514 [TestDangerZoneAlwaysCancelsFirst] [rapid] draw distance: 2.5
+# 2026/08/02 23:30:02.214541 [TestDangerZoneAlwaysCancelsFirst] 
+# 	Error Trace:	/Users/nd/projects/my/crypto/mm-standx/internal/domain/policy/policy_test.go:81
+# 	            				/Users/nd/go/pkg/mod/pgregory.net/rapid@v1.3.0/engine.go:458
+# 	            				/Users/nd/go/pkg/mod/pgregory.net/rapid@v1.3.0/engine.go:467
+# 	            				/Users/nd/go/pkg/mod/pgregory.net/rapid@v1.3.0/engine.go:292
+# 	            				/Users/nd/go/pkg/mod/pgregory.net/rapid@v1.3.0/engine.go:207
+# 	            				/Users/nd/projects/my/crypto/mm-standx/internal/domain/policy/policy_test.go:77
+# 	Error:      	Not equal: 
+# 	            	expected: 0x1
+# 	            	actual  : 0x0
+# 	Test:       	TestDangerZoneAlwaysCancelsFirst
+# 	Messages:   	distance 2.50bps must cancel first
+# 
+v0.4.8#11675729011785315355
+0x0
+0x0
+0x0
+0x1
+0x0
+0x0
+0x0

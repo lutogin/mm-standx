@@ -40,18 +40,18 @@ type message struct {
 func (h *handler) OnMessage(ctx context.Context, payload []byte, received time.Time) {
 	if h.recorder != nil {
 		if err := h.recorder.Record(h.name, received, payload); err != nil {
-			h.log.Error("не удалось записать сообщение", "error", err)
+			h.log.Error("failed to record message", "error", err)
 		}
 	}
 
 	var msg message
 	if err := json.Unmarshal(payload, &msg); err != nil {
-		h.log.Error("не удалось разобрать сообщение", "error", err, "payload", truncate(payload))
+		h.log.Error("failed to parse message", "error", err, "payload", truncate(payload))
 		return
 	}
 
 	if msg.Channel == "" && msg.Code != 0 {
-		h.log.Error("ошибка потока", "code", msg.Code, "message", msg.Message)
+		h.log.Error("stream error", "code", msg.Code, "message", msg.Message)
 		return
 	}
 	h.checkSequence(msg)
@@ -72,7 +72,7 @@ func (h *handler) OnMessage(ctx context.Context, payload []byte, received time.T
 	case channelAuth:
 		h.handleAuth(msg)
 	default:
-		h.log.Debug("неизвестный канал", "channel", msg.Channel)
+		h.log.Debug("unknown channel", "channel", msg.Channel)
 	}
 }
 
@@ -89,7 +89,7 @@ func (h *handler) checkSequence(msg message) {
 	defer h.seqMu.Unlock()
 
 	if h.lastSeq != 0 && msg.Seq > h.lastSeq+1 {
-		h.log.Warn("пропуск в нумерации сообщений",
+		h.log.Warn("gap in message sequence",
 			"expected", h.lastSeq+1, "got", msg.Seq, "lost", msg.Seq-h.lastSeq-1)
 	}
 	if msg.Seq > h.lastSeq {
@@ -100,12 +100,12 @@ func (h *handler) checkSequence(msg message) {
 func (h *handler) handlePrice(ctx context.Context, msg message, received time.Time) {
 	var d dto.SymbolPrice
 	if err := json.Unmarshal(msg.Data, &d); err != nil {
-		h.log.Error("разбор price", "error", err)
+		h.log.Error("failed to parse price", "error", err)
 		return
 	}
 	mark, err := mapper.MarkPrice(d, received)
 	if err != nil {
-		h.log.Error("маппинг mark price", "error", err, "symbol", d.Symbol)
+		h.log.Error("failed to map mark price", "error", err, "symbol", d.Symbol)
 		return
 	}
 	events.Publish(h.bus, ctx, events.MarkPriceUpdated{Mark: mark})
@@ -114,7 +114,7 @@ func (h *handler) handlePrice(ctx context.Context, msg message, received time.Ti
 func (h *handler) handleDepthBook(ctx context.Context, msg message, received time.Time) {
 	var d dto.DepthBook
 	if err := json.Unmarshal(msg.Data, &d); err != nil {
-		h.log.Error("разбор depth_book", "error", err)
+		h.log.Error("failed to parse depth_book", "error", err)
 		return
 	}
 	if d.Symbol == "" {
@@ -122,7 +122,7 @@ func (h *handler) handleDepthBook(ctx context.Context, msg message, received tim
 	}
 	book, err := mapper.Book(d, received)
 	if err != nil {
-		h.log.Error("маппинг стакана", "error", err, "symbol", d.Symbol)
+		h.log.Error("failed to map order book", "error", err, "symbol", d.Symbol)
 		return
 	}
 	events.Publish(h.bus, ctx, events.BookUpdated{Book: book})
@@ -131,12 +131,12 @@ func (h *handler) handleDepthBook(ctx context.Context, msg message, received tim
 func (h *handler) handleOrder(ctx context.Context, msg message) {
 	var d dto.Order
 	if err := json.Unmarshal(msg.Data, &d); err != nil {
-		h.log.Error("разбор order", "error", err)
+		h.log.Error("failed to parse order", "error", err)
 		return
 	}
 	order, err := mapper.Order(d)
 	if err != nil {
-		h.log.Error("маппинг ордера", "error", err)
+		h.log.Error("failed to map order", "error", err)
 		return
 	}
 	events.Publish(h.bus, ctx, events.OrderUpdated{Order: order})
@@ -145,12 +145,12 @@ func (h *handler) handleOrder(ctx context.Context, msg message) {
 func (h *handler) handlePosition(ctx context.Context, msg message) {
 	var d dto.Position
 	if err := json.Unmarshal(msg.Data, &d); err != nil {
-		h.log.Error("разбор position", "error", err)
+		h.log.Error("failed to parse position", "error", err)
 		return
 	}
 	position, err := mapper.Position(d)
 	if err != nil {
-		h.log.Error("маппинг позиции", "error", err)
+		h.log.Error("failed to map position", "error", err)
 		return
 	}
 	events.Publish(h.bus, ctx, events.PositionUpdated{Position: position})
@@ -159,7 +159,7 @@ func (h *handler) handlePosition(ctx context.Context, msg message) {
 func (h *handler) handleBalance(ctx context.Context, msg message, received time.Time) {
 	var d dto.WalletBalance
 	if err := json.Unmarshal(msg.Data, &d); err != nil {
-		h.log.Error("разбор balance", "error", err)
+		h.log.Error("failed to parse balance", "error", err)
 		return
 	}
 	balance := mapper.WalletBalance(d)
@@ -170,12 +170,12 @@ func (h *handler) handleBalance(ctx context.Context, msg message, received time.
 func (h *handler) handleTrade(ctx context.Context, msg message) {
 	var d dto.Trade
 	if err := json.Unmarshal(msg.Data, &d); err != nil {
-		h.log.Error("разбор trade", "error", err)
+		h.log.Error("failed to parse trade", "error", err)
 		return
 	}
 	trade, err := mapper.Trade(d)
 	if err != nil {
-		h.log.Error("маппинг сделки", "error", err)
+		h.log.Error("failed to map trade", "error", err)
 		return
 	}
 	events.Publish(h.bus, ctx, events.TradeExecuted{Trade: trade})
@@ -187,14 +187,17 @@ func (h *handler) handleAuth(msg message) {
 		Msg  string `json:"msg"`
 	}
 	if err := json.Unmarshal(msg.Data, &d); err != nil {
-		h.log.Error("разбор ответа авторизации", "error", err)
+		h.log.Error("failed to parse auth response", "error", err)
 		return
 	}
-	if d.Code != 200 {
-		h.log.Error("авторизация потока отклонена", "code", d.Code, "message", d.Msg)
+	// Документация обещает code 200, а сервер отвечает нулём. Считаем успехом
+	// обе формы: провал распознаётся по коду ошибки, а не по отсутствию 200,
+	// иначе исправная авторизация каждый раз выглядит как отказ.
+	if d.Code != 0 && d.Code != 200 {
+		h.log.Error("stream authentication rejected", "code", d.Code, "message", d.Msg)
 		return
 	}
-	h.log.Info("поток авторизован")
+	h.log.Info("stream authenticated")
 }
 
 func truncate(b []byte) string {

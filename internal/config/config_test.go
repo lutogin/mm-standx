@@ -176,7 +176,7 @@ symbols:
       ladderSpreadBps: 2.0
 `))
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "лесенка")
+	require.Contains(t, err.Error(), "ladder")
 }
 
 func TestValidationRejectsEnabledSymbolWithoutAllocation(t *testing.T) {

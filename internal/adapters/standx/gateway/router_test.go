@@ -64,7 +64,7 @@ func TestPlacePrefersWebSocket(t *testing.T) {
 	require.NoError(t, newRouter(ws, rest).Place(context.Background(), placeRequest()))
 
 	require.Equal(t, []trading.ClOrdID{orderID}, ws.placed)
-	require.Empty(t, rest.placed, "REST не должен привлекаться при живом торговом канале")
+	require.Empty(t, rest.placed, "REST must not be used while the trading channel is alive")
 }
 
 func TestPlaceUsesRestWhenWebSocketDown(t *testing.T) {
@@ -82,12 +82,12 @@ func TestPlaceUsesRestWhenWebSocketDown(t *testing.T) {
 func TestPlaceFallsBackOnlyWhenCommandWasNotSent(t *testing.T) {
 	ws := &stubGateway{
 		connected: true,
-		placeErr:  errors.Join(errors.New("сокет закрыт"), wsapi.ErrNotSent),
+		placeErr:  errors.Join(errors.New("socket closed"), wsapi.ErrNotSent),
 	}
 	rest := &stubGateway{}
 
 	require.NoError(t, newRouter(ws, rest).Place(context.Background(), placeRequest()))
-	require.Equal(t, []trading.ClOrdID{orderID}, rest.placed, "не отправленную команду можно повторить")
+	require.Equal(t, []trading.ClOrdID{orderID}, rest.placed, "a command that was never sent is safe to retry")
 }
 
 // Неподтверждённая заявка могла дойти до биржи: повтор создал бы второй ордер
@@ -99,7 +99,7 @@ func TestPlaceDoesNotRetryAfterAckTimeout(t *testing.T) {
 	err := newRouter(ws, rest).Place(context.Background(), placeRequest())
 
 	require.ErrorIs(t, err, wsapi.ErrAckTimeout)
-	require.Empty(t, rest.placed, "повтор мог бы удвоить ордер")
+	require.Empty(t, rest.placed, "a retry could duplicate the order")
 }
 
 // Явное отклонение означает, что заявка дошла и была рассмотрена. Повторять её
@@ -128,9 +128,9 @@ func TestPlaceReportsBothFailures(t *testing.T) {
 // потерять возможность снять котировку опаснее лишнего запроса.
 func TestCancelFallsBackOnAnyError(t *testing.T) {
 	for name, wsErr := range map[string]error{
-		"не отправлено":     wsapi.ErrNotSent,
-		"нет подтверждения": wsapi.ErrAckTimeout,
-		"произвольная":      errors.New("что-то пошло не так"),
+		"not sent":       wsapi.ErrNotSent,
+		"no acknowledge": wsapi.ErrAckTimeout,
+		"arbitrary":      errors.New("something went wrong"),
 	} {
 		t.Run(name, func(t *testing.T) {
 			ws := &stubGateway{connected: true, cancelErr: wsErr}

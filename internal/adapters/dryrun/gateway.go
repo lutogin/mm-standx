@@ -24,7 +24,7 @@ func New(log *slog.Logger) *Gateway {
 }
 
 func (g *Gateway) Place(_ context.Context, req ports.PlaceRequest) error {
-	g.log.Info("ордер не отправлен (dry_run)",
+	g.log.Info("order not sent (dry_run)",
 		"cl_ord_id", req.ClOrdID,
 		"symbol", req.Symbol,
 		"side", req.Side,
@@ -38,12 +38,12 @@ func (g *Gateway) Place(_ context.Context, req ports.PlaceRequest) error {
 }
 
 func (g *Gateway) Cancel(_ context.Context, id trading.ClOrdID, p ports.Priority) error {
-	g.log.Info("отмена не отправлена (dry_run)", "cl_ord_id", id, "priority", p)
+	g.log.Info("cancel not sent (dry_run)", "cl_ord_id", id, "priority", p)
 	return nil
 }
 
 func (g *Gateway) CancelBatch(_ context.Context, ids []trading.ClOrdID, p ports.Priority) error {
-	g.log.Info("пакетная отмена не отправлена (dry_run)", "count", len(ids), "priority", p)
+	g.log.Info("batch cancel not sent (dry_run)", "count", len(ids), "priority", p)
 	return nil
 }
 

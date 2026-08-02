@@ -59,7 +59,7 @@ func (c *Client) SymbolSpec(ctx context.Context, s market.Symbol) (market.Symbol
 		return market.SymbolSpec{}, fmt.Errorf("symbol info %s: %w", s, err)
 	}
 	if len(out) == 0 {
-		return market.SymbolSpec{}, fmt.Errorf("symbol info %s: биржа вернула пустой ответ", s)
+		return market.SymbolSpec{}, fmt.Errorf("symbol info %s: exchange returned an empty response", s)
 	}
 	return mapper.SymbolSpec(out[0])
 }

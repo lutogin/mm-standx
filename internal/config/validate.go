@@ -33,7 +33,7 @@ func (c *Config) Validate() error {
 		errs = append(errs, sym.validate(name, c.Reward.BandBps)...)
 	}
 	if enabled == 0 && c.IsLive() {
-		errs = append(errs, errors.New("runtime.mode=live, но ни один символ не включён"))
+		errs = append(errs, errors.New("runtime.mode=live but no symbol is enabled"))
 	}
 
 	return errors.Join(errs...)
@@ -42,18 +42,18 @@ func (c *Config) Validate() error {
 func (r Runtime) validate() []error {
 	var errs []error
 	if r.Mode != ModeDryRun && r.Mode != ModeLive {
-		errs = append(errs, fmt.Errorf("runtime.mode: ожидалось %q или %q, получено %q", ModeDryRun, ModeLive, r.Mode))
+		errs = append(errs, fmt.Errorf("runtime.mode: want %q or %q, got %q", ModeDryRun, ModeLive, r.Mode))
 	}
 	switch strings.ToLower(r.LogLevel) {
 	case "debug", "info", "warn", "error":
 	default:
-		errs = append(errs, fmt.Errorf("runtime.logLevel: недопустимое значение %q", r.LogLevel))
+		errs = append(errs, fmt.Errorf("runtime.logLevel: unsupported value %q", r.LogLevel))
 	}
 	if r.LogFormat != "json" && r.LogFormat != "text" {
-		errs = append(errs, fmt.Errorf("runtime.logFormat: ожидалось json или text, получено %q", r.LogFormat))
+		errs = append(errs, fmt.Errorf("runtime.logFormat: want json or text, got %q", r.LogFormat))
 	}
 	if r.StatsInterval <= 0 {
-		errs = append(errs, errors.New("runtime.statsInterval должен быть положительным"))
+		errs = append(errs, errors.New("runtime.statsInterval must be positive"))
 	}
 	return errs
 }
@@ -69,42 +69,42 @@ func (e Exchange) validate(live bool) []error {
 	} {
 		u, err := url.Parse(raw)
 		if err != nil || u.Host == "" {
-			errs = append(errs, fmt.Errorf("%s: некорректный URL %q", name, raw))
+			errs = append(errs, fmt.Errorf("%s: malformed URL %q", name, raw))
 			continue
 		}
 		switch u.Scheme {
 		case "http", "https", "ws", "wss":
 		default:
-			errs = append(errs, fmt.Errorf("%s: недопустимая схема %q", name, u.Scheme))
+			errs = append(errs, fmt.Errorf("%s: unsupported scheme %q", name, u.Scheme))
 		}
 	}
 
 	if e.Chain != "bsc" && e.Chain != "solana" {
-		errs = append(errs, fmt.Errorf("exchange.chain: ожидалось bsc или solana, получено %q", e.Chain))
+		errs = append(errs, fmt.Errorf("exchange.chain: want bsc or solana, got %q", e.Chain))
 	}
 	if live && e.WalletPrivateKey.IsEmpty() {
-		errs = append(errs, errors.New("переменная окружения STANDX_WALLET_PK обязательна в режиме live"))
+		errs = append(errs, errors.New("environment variable STANDX_WALLET_PK is required in live mode"))
 	}
 	if e.TokenRefreshLead >= e.TokenTTL {
-		errs = append(errs, fmt.Errorf("exchange.tokenRefreshLead (%s) должен быть меньше tokenTtl (%s)", e.TokenRefreshLead, e.TokenTTL))
+		errs = append(errs, fmt.Errorf("exchange.tokenRefreshLead (%s) must be less than tokenTtl (%s)", e.TokenRefreshLead, e.TokenTTL))
 	}
 	// Биржа принудительно рвёт соединение на 24-м часе — ротируемся заведомо раньше.
 	if e.WSRotateAfter <= 0 || e.WSRotateAfter >= 24*time.Hour {
-		errs = append(errs, fmt.Errorf("exchange.wsRotateAfter (%s) должен быть в диапазоне (0, 24h)", e.WSRotateAfter))
+		errs = append(errs, fmt.Errorf("exchange.wsRotateAfter (%s) must be within (0, 24h)", e.WSRotateAfter))
 	}
 	if e.WSReconnectMin <= 0 || e.WSReconnectMin > e.WSReconnectMax {
-		errs = append(errs, errors.New("exchange.wsReconnectMin должен быть положительным и не больше wsReconnectMax"))
+		errs = append(errs, errors.New("exchange.wsReconnectMin must be positive and not greater than wsReconnectMax"))
 	}
 	if e.RequestTimeout <= 0 {
-		errs = append(errs, errors.New("exchange.requestTimeout должен быть положительным"))
+		errs = append(errs, errors.New("exchange.requestTimeout must be positive"))
 	}
 	if e.WSIdleTimeout <= 0 {
-		errs = append(errs, errors.New("exchange.wsIdleTimeout должен быть положительным"))
+		errs = append(errs, errors.New("exchange.wsIdleTimeout must be positive"))
 	}
 	// Heartbeat обязан успеть вызвать ответ до истечения дедлайна молчания,
 	// иначе молчащий канал будет переподключаться бесконечно.
 	if e.WSHeartbeatInterval <= 0 || e.WSHeartbeatInterval >= e.WSIdleTimeout {
-		errs = append(errs, fmt.Errorf("exchange.wsHeartbeatInterval (%s) должен быть в диапазоне (0, wsIdleTimeout=%s)",
+		errs = append(errs, fmt.Errorf("exchange.wsHeartbeatInterval (%s) must be within (0, wsIdleTimeout=%s)",
 			e.WSHeartbeatInterval, e.WSIdleTimeout))
 	}
 	return errs
@@ -114,13 +114,13 @@ func (r RateLimit) validate() []error {
 	var errs []error
 	// Биржевой предел ~22 rps на аккаунт; выше настраивать бессмысленно и вредно.
 	if r.SustainedRPS <= 0 || r.SustainedRPS > 22 {
-		errs = append(errs, fmt.Errorf("rateLimit.sustainedRps (%.2f) должен быть в диапазоне (0, 22]", r.SustainedRPS))
+		errs = append(errs, fmt.Errorf("rateLimit.sustainedRps (%.2f) must be within (0, 22]", r.SustainedRPS))
 	}
 	if r.Burst <= 0 || r.Burst > 20 {
-		errs = append(errs, fmt.Errorf("rateLimit.burst (%d) должен быть в диапазоне (0, 20]", r.Burst))
+		errs = append(errs, fmt.Errorf("rateLimit.burst (%d) must be within (0, 20]", r.Burst))
 	}
 	if r.SafetyReservePct < 0 || r.SafetyReservePct >= 100 {
-		errs = append(errs, fmt.Errorf("rateLimit.safetyReservePct (%.1f) должен быть в диапазоне [0, 100)", r.SafetyReservePct))
+		errs = append(errs, fmt.Errorf("rateLimit.safetyReservePct (%.1f) must be within [0, 100)", r.SafetyReservePct))
 	}
 	return errs
 }
@@ -128,27 +128,27 @@ func (r RateLimit) validate() []error {
 func (r Reward) validate() []error {
 	var errs []error
 	if r.BandBps <= 0 {
-		errs = append(errs, fmt.Errorf("reward.bandBps (%s) должен быть положительным", r.BandBps))
+		errs = append(errs, fmt.Errorf("reward.bandBps (%s) must be positive", r.BandBps))
 	}
 	if r.MaxWeightPct < r.MinWeightPct {
-		errs = append(errs, fmt.Errorf("reward.maxWeightPct (%.1f) не может быть меньше minWeightPct (%.1f)", r.MaxWeightPct, r.MinWeightPct))
+		errs = append(errs, fmt.Errorf("reward.maxWeightPct (%.1f) must not be less than minWeightPct (%.1f)", r.MaxWeightPct, r.MinWeightPct))
 	}
 	if r.MinWeightPct < 0 {
-		errs = append(errs, errors.New("reward.minWeightPct не может быть отрицательным"))
+		errs = append(errs, errors.New("reward.minWeightPct must not be negative"))
 	}
 	if len(r.UptimeTiers) == 0 {
-		errs = append(errs, errors.New("reward.uptimeTiers: нужен хотя бы один порог"))
+		errs = append(errs, errors.New("reward.uptimeTiers: at least one tier is required"))
 	}
 	// Пороги идут по убыванию: первым проверяется самый выгодный.
 	for i, t := range r.UptimeTiers {
 		if t.ThresholdPct <= 0 || t.ThresholdPct > 100 {
-			errs = append(errs, fmt.Errorf("reward.uptimeTiers[%d].thresholdPct (%.1f) должен быть в диапазоне (0, 100]", i, t.ThresholdPct))
+			errs = append(errs, fmt.Errorf("reward.uptimeTiers[%d].thresholdPct (%.1f) must be within (0, 100]", i, t.ThresholdPct))
 		}
 		if t.Multiplier <= 0 {
-			errs = append(errs, fmt.Errorf("reward.uptimeTiers[%d].multiplier (%.2f) должен быть положительным", i, t.Multiplier))
+			errs = append(errs, fmt.Errorf("reward.uptimeTiers[%d].multiplier (%.2f) must be positive", i, t.Multiplier))
 		}
 		if i > 0 && t.ThresholdPct >= r.UptimeTiers[i-1].ThresholdPct {
-			errs = append(errs, fmt.Errorf("reward.uptimeTiers должны идти по убыванию порога: [%d]=%.1f ≥ [%d]=%.1f",
+			errs = append(errs, fmt.Errorf("reward.uptimeTiers must be ordered by descending threshold: [%d]=%.1f >= [%d]=%.1f",
 				i, t.ThresholdPct, i-1, r.UptimeTiers[i-1].ThresholdPct))
 		}
 	}
@@ -158,24 +158,24 @@ func (r Reward) validate() []error {
 func (r Risk) validate() []error {
 	var errs []error
 	if r.MaxDailyLossUSD <= 0 {
-		errs = append(errs, errors.New("risk.maxDailyLossUsd должен быть положительным"))
+		errs = append(errs, errors.New("risk.maxDailyLossUsd must be positive"))
 	}
 	if r.MaxNotionalUSD <= 0 {
-		errs = append(errs, errors.New("risk.maxNotionalUsd должен быть положительным"))
+		errs = append(errs, errors.New("risk.maxNotionalUsd must be positive"))
 	}
 	if r.MaxFillsPerHour <= 0 {
-		errs = append(errs, errors.New("risk.maxFillsPerHour должен быть положительным"))
+		errs = append(errs, errors.New("risk.maxFillsPerHour must be positive"))
 	}
 	if r.MarginMode != trading.Cross && r.MarginMode != trading.Isolated {
-		errs = append(errs, fmt.Errorf("risk.marginMode: ожидалось cross или isolated, получено %q", r.MarginMode))
+		errs = append(errs, fmt.Errorf("risk.marginMode: want cross or isolated, got %q", r.MarginMode))
 	}
 	switch r.FlattenPolicy {
 	case "immediate_market", "passive_then_market", "hybrid":
 	default:
-		errs = append(errs, fmt.Errorf("risk.flattenPolicy: недопустимое значение %q", r.FlattenPolicy))
+		errs = append(errs, fmt.Errorf("risk.flattenPolicy: unsupported value %q", r.FlattenPolicy))
 	}
 	if r.FlattenDebounce < 0 {
-		errs = append(errs, errors.New("risk.flattenDebounce не может быть отрицательным"))
+		errs = append(errs, errors.New("risk.flattenDebounce must not be negative"))
 	}
 	return errs
 }
@@ -190,7 +190,7 @@ func (h Health) validate() []error {
 		"health.heartbeatInterval": int64(h.HeartbeatInterval),
 	} {
 		if d <= 0 {
-			errs = append(errs, fmt.Errorf("%s должен быть положительным", name))
+			errs = append(errs, fmt.Errorf("%s must be positive", name))
 		}
 	}
 	return errs
@@ -201,14 +201,14 @@ func (s Symbol) validate(name string, band money.Bps) []error {
 	prefix := "symbols." + name
 
 	if s.Enabled && s.AllocationUSD <= 0 {
-		errs = append(errs, fmt.Errorf("%s.allocationUsd должен быть положительным для включённого символа", prefix))
+		errs = append(errs, fmt.Errorf("%s.allocationUsd must be positive for an enabled symbol", prefix))
 	}
 	errs = append(errs, s.Quote.validate(prefix+".quote", band)...)
 	errs = append(errs, s.Uptime.validate(prefix+".uptime")...)
 	errs = append(errs, s.Volatility.validate(prefix+".volatility")...)
 
 	if s.SymbolRisk.Leverage < 1 {
-		errs = append(errs, fmt.Errorf("%s.risk.leverage должен быть не меньше 1", prefix))
+		errs = append(errs, fmt.Errorf("%s.risk.leverage must be at least 1", prefix))
 	}
 	return errs
 }
@@ -229,37 +229,37 @@ func (q Quote) validate(prefix string, band money.Bps) []error {
 		{"maxKeepBps", q.MaxKeepBps},
 	}
 	if q.PullBps < 0 {
-		errs = append(errs, fmt.Errorf("%s.pullBps не может быть отрицательным", prefix))
+		errs = append(errs, fmt.Errorf("%s.pullBps must not be negative", prefix))
 	}
 	for i := 1; i < len(ordered); i++ {
 		if ordered[i].val <= ordered[i-1].val {
-			errs = append(errs, fmt.Errorf("%s: требуется %s < %s, получено %s ≥ %s",
+			errs = append(errs, fmt.Errorf("%s: require %s < %s, got %s >= %s",
 				prefix, ordered[i-1].name, ordered[i].name, ordered[i-1].val, ordered[i].val))
 		}
 	}
 	if q.MaxKeepBps > band {
-		errs = append(errs, fmt.Errorf("%s.maxKeepBps (%s) выходит за полосу награды reward.bandBps (%s): ордер перестанет засчитываться",
+		errs = append(errs, fmt.Errorf("%s.maxKeepBps (%s) falls outside the reward band reward.bandBps (%s): orders would stop counting",
 			prefix, q.MaxKeepBps, band))
 	}
 
 	if q.LadderLayers < 1 {
-		errs = append(errs, fmt.Errorf("%s.ladderLayers должен быть не меньше 1", prefix))
+		errs = append(errs, fmt.Errorf("%s.ladderLayers must be at least 1", prefix))
 	}
 	if q.LadderLayers > 1 {
 		if q.LadderSpreadBps <= 0 {
-			errs = append(errs, fmt.Errorf("%s.ladderSpreadBps должен быть положительным при ladderLayers > 1", prefix))
+			errs = append(errs, fmt.Errorf("%s.ladderSpreadBps must be positive when ladderLayers > 1", prefix))
 		}
 		// Лесенка центрирована вокруг targetBps и обязана целиком помещаться
 		// в удерживаемый диапазон, иначе крайние ступени будут перекотировываться вечно.
 		half := money.Bps(float64(q.LadderLayers-1)) * q.LadderSpreadBps / 2
 		if q.TargetBps-half < q.MinKeepBps || q.TargetBps+half > q.MaxKeepBps {
 			errs = append(errs, fmt.Errorf(
-				"%s: лесенка %d×%s вокруг %s выходит за [%s, %s] — уменьшите ladderSpreadBps или расширьте диапазон",
+				"%s: ladder of %d x %s around %s does not fit within [%s, %s]; reduce ladderSpreadBps or widen the range",
 				prefix, q.LadderLayers, q.LadderSpreadBps, q.TargetBps, q.MinKeepBps, q.MaxKeepBps))
 		}
 	}
 	if q.MinRest < 0 || q.RequoteCooldown < 0 {
-		errs = append(errs, fmt.Errorf("%s: minRest и requoteCooldown не могут быть отрицательными", prefix))
+		errs = append(errs, fmt.Errorf("%s: minRest and requoteCooldown must not be negative", prefix))
 	}
 	return errs
 }
@@ -267,13 +267,13 @@ func (q Quote) validate(prefix string, band money.Bps) []error {
 func (u Uptime) validate(prefix string) []error {
 	var errs []error
 	if u.HardFloorPct <= 0 || u.HardFloorPct > 100 {
-		errs = append(errs, fmt.Errorf("%s.hardFloorPct (%.1f) должен быть в диапазоне (0, 100]", prefix, u.HardFloorPct))
+		errs = append(errs, fmt.Errorf("%s.hardFloorPct (%.1f) must be within (0, 100]", prefix, u.HardFloorPct))
 	}
 	if u.TargetPct < u.HardFloorPct || u.TargetPct > 100 {
-		errs = append(errs, fmt.Errorf("%s.targetPct (%.1f) должен быть в диапазоне [hardFloorPct, 100]", prefix, u.TargetPct))
+		errs = append(errs, fmt.Errorf("%s.targetPct (%.1f) must be within [hardFloorPct, 100]", prefix, u.TargetPct))
 	}
 	if u.ReservePct < 0 || u.ReservePct >= 100 {
-		errs = append(errs, fmt.Errorf("%s.reservePct (%.1f) должен быть в диапазоне [0, 100)", prefix, u.ReservePct))
+		errs = append(errs, fmt.Errorf("%s.reservePct (%.1f) must be within [0, 100)", prefix, u.ReservePct))
 	}
 	return errs
 }
@@ -281,20 +281,20 @@ func (u Uptime) validate(prefix string) []error {
 func (v Volatility) validate(prefix string) []error {
 	var errs []error
 	if v.EWMAHalfLife <= 0 {
-		errs = append(errs, fmt.Errorf("%s.ewmaHalfLife должен быть положительным", prefix))
+		errs = append(errs, fmt.Errorf("%s.ewmaHalfLife must be positive", prefix))
 	}
 	if v.WidenSigmaBps <= 0 {
-		errs = append(errs, fmt.Errorf("%s.widenSigmaBps должен быть положительным", prefix))
+		errs = append(errs, fmt.Errorf("%s.widenSigmaBps must be positive", prefix))
 	}
 	if v.PullSigmaBps <= v.WidenSigmaBps {
-		errs = append(errs, fmt.Errorf("%s: требуется widenSigmaBps < pullSigmaBps, получено %s ≥ %s",
+		errs = append(errs, fmt.Errorf("%s: require widenSigmaBps < pullSigmaBps, got %s >= %s",
 			prefix, v.WidenSigmaBps, v.PullSigmaBps))
 	}
 	if v.JumpBps <= 0 {
-		errs = append(errs, fmt.Errorf("%s.jumpBps должен быть положительным", prefix))
+		errs = append(errs, fmt.Errorf("%s.jumpBps must be positive", prefix))
 	}
 	if v.WidenFactorK < 0 {
-		errs = append(errs, fmt.Errorf("%s.widenFactorK не может быть отрицательным", prefix))
+		errs = append(errs, fmt.Errorf("%s.widenFactorK must not be negative", prefix))
 	}
 	return errs
 }

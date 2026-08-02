@@ -47,7 +47,7 @@ type FileRecorder struct {
 // NewFile создаёт рекордер, пишущий в указанный каталог.
 func NewFile(dir string, clock ports.Clock) (*FileRecorder, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("recorder: создание каталога %s: %w", dir, err)
+		return nil, fmt.Errorf("recorder: create directory %s: %w", dir, err)
 	}
 	return &FileRecorder{dir: dir, clock: clock}, nil
 }
@@ -68,10 +68,10 @@ func (r *FileRecorder) Record(stream string, received time.Time, payload []byte)
 	}
 	line, err := json.Marshal(entry)
 	if err != nil {
-		return fmt.Errorf("recorder: сериализация записи: %w", err)
+		return fmt.Errorf("recorder: marshal entry: %w", err)
 	}
 	if _, err := r.writer.Write(append(line, '\n')); err != nil {
-		return fmt.Errorf("recorder: запись: %w", err)
+		return fmt.Errorf("recorder: write: %w", err)
 	}
 
 	r.sinceFlush++
@@ -95,7 +95,7 @@ func (r *FileRecorder) rotate(at time.Time) error {
 	name := filepath.Join(r.dir, hour.Format("2006-01-02T15")+".ndjson")
 	file, err := os.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
-		return fmt.Errorf("recorder: открытие %s: %w", name, err)
+		return fmt.Errorf("recorder: open %s: %w", name, err)
 	}
 	r.file, r.writer, r.hour, r.sinceFlush = file, bufio.NewWriterSize(file, 64<<10), hour, 0
 	return nil
@@ -117,10 +117,10 @@ func (r *FileRecorder) closeCurrent() error {
 	r.file, r.writer = nil, nil
 
 	if flushErr != nil {
-		return fmt.Errorf("recorder: сброс буфера: %w", flushErr)
+		return fmt.Errorf("recorder: flush buffer: %w", flushErr)
 	}
 	if closeErr != nil {
-		return fmt.Errorf("recorder: закрытие файла: %w", closeErr)
+		return fmt.Errorf("recorder: close file: %w", closeErr)
 	}
 	return nil
 }

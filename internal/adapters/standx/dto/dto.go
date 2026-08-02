@@ -5,6 +5,11 @@
 // происходит в пакете mapper. Так ошибка формата отделена от ошибки смысла.
 package dto
 
+import (
+	"encoding/json"
+	"fmt"
+)
+
 // Envelope — общий конверт ответа торговых эндпойнтов.
 //
 // Code == 0 означает, что заявка принята к обработке, но не что она исполнена:
@@ -14,6 +19,38 @@ type Envelope struct {
 	Message   string `json:"message"`
 	RequestID string `json:"request_id"`
 	Status    string `json:"status"`
+}
+
+// BatchEnvelope — ответ пакетной отмены.
+//
+// Биржа отдаёт массив конвертов, по одному на ордер, хотя документация
+// показывает одиночный объект. Тип принимает обе формы: расхождение обнаружено
+// на живом счёте, и полагаться на то, что оно не изменится обратно, не стоит.
+type BatchEnvelope []Envelope
+
+func (b *BatchEnvelope) UnmarshalJSON(raw []byte) error {
+	var many []Envelope
+	if err := json.Unmarshal(raw, &many); err == nil {
+		*b = many
+		return nil
+	}
+
+	var one Envelope
+	if err := json.Unmarshal(raw, &one); err != nil {
+		return fmt.Errorf("batch response is neither an array nor an object: %w", err)
+	}
+	*b = BatchEnvelope{one}
+	return nil
+}
+
+// FirstError returns the first non-zero code reported for the batch.
+func (b BatchEnvelope) FirstError() *Envelope {
+	for i := range b {
+		if b[i].Code != 0 {
+			return &b[i]
+		}
+	}
+	return nil
 }
 
 // Page — постраничный ответ.

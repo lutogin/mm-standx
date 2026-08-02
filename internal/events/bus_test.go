@@ -91,14 +91,14 @@ func TestPanicIsIsolatedAndReported(t *testing.T) {
 	bus := New(func(topic string, r any) { reportedTopic, recovered = topic, r })
 
 	var reached bool
-	Subscribe(bus, "broken", func(context.Context, alpha) { panic("сломался") })
+	Subscribe(bus, "broken", func(context.Context, alpha) { panic("boom") })
 	Subscribe(bus, "healthy", func(context.Context, alpha) { reached = true })
 
 	require.NotPanics(t, func() { Publish(bus, context.Background(), alpha{}) })
 
-	require.True(t, reached, "исправный обработчик обязан получить событие")
+	require.True(t, reached, "a healthy handler must still receive the event")
 	require.Equal(t, "test.alpha→broken", reportedTopic)
-	require.Equal(t, "сломался", recovered)
+	require.Equal(t, "boom", recovered)
 }
 
 // Подписка во время доставки не должна портить обход: список копируется
@@ -112,7 +112,7 @@ func TestSubscribeDuringDeliveryIsSafe(t *testing.T) {
 	})
 
 	require.NotPanics(t, func() { Publish(bus, context.Background(), alpha{}) })
-	require.Equal(t, 0, late, "новый подписчик не получает событие, идущее прямо сейчас")
+	require.Equal(t, 0, late, "a new subscriber must not receive the event already in flight")
 
 	Publish(bus, context.Background(), alpha{})
 	require.Positive(t, late)
@@ -162,6 +162,6 @@ func TestContextIsPassedThrough(t *testing.T) {
 		seen, _ = ctx.Value(key{}).(string)
 	})
 
-	Publish(bus, context.WithValue(context.Background(), key{}, "значение"), alpha{})
-	require.Equal(t, "значение", seen)
+	Publish(bus, context.WithValue(context.Background(), key{}, "value"), alpha{})
+	require.Equal(t, "value", seen)
 }

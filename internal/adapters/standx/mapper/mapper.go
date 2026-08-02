@@ -177,7 +177,7 @@ func MarkPrice(d dto.SymbolPrice, received time.Time) (market.MarkPrice, error) 
 		return market.MarkPrice{}, fmt.Errorf("symbol %s: mark_price: %w", d.Symbol, err)
 	}
 	if !price.IsPositive() {
-		return market.MarkPrice{}, fmt.Errorf("symbol %s: неположительный mark_price %q", d.Symbol, d.MarkPrice)
+		return market.MarkPrice{}, fmt.Errorf("symbol %s: non-positive mark_price %q", d.Symbol, d.MarkPrice)
 	}
 	return market.MarkPrice{
 		Symbol:   market.Symbol(d.Symbol),

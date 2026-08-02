@@ -7,7 +7,6 @@ package di
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -68,6 +67,7 @@ func provideFxLogger(cfg *config.Config, log *slog.Logger) fxevent.Logger {
 var StandX = fx.Module("standx",
 	fx.Provide(
 		provideWallet,
+		provideSessionStore,
 		provideSession,
 		provideTokenProvider,
 		provideBodySigner,
@@ -106,10 +106,10 @@ func provideClock() ports.Clock { return clock.New() }
 func provideEventBus(log *slog.Logger, clk ports.Clock) *events.Bus {
 	var bus *events.Bus
 	bus = events.New(func(topic string, recovered any) {
-		log.Error("паника в обработчике события — аварийная остановка",
+		log.Error("panic in event handler, tripping kill switch",
 			"topic", topic, "recovered", recovered)
 		events.Publish(bus, context.Background(), events.KillSwitchTripped{
-			Reason: fmt.Sprintf("паника обработчика %s: %v", topic, recovered),
+			Reason: fmt.Sprintf("handler panic in %s: %v", topic, recovered),
 			At:     clk.Now(),
 		})
 	})
@@ -138,7 +138,7 @@ func provideHTTPClient(cfg *config.Config) *http.Client {
 func provideSessionID() (SessionID, error) {
 	id, err := auth.NewRequestID()
 	if err != nil {
-		return "", fmt.Errorf("генерация session_id: %w", err)
+		return "", fmt.Errorf("generate session_id: %w", err)
 	}
 	return SessionID(id), nil
 }
@@ -162,39 +162,56 @@ func provideRecorder(cfg *config.Config, clk ports.Clock, lc fx.Lifecycle) (port
 // что позволяет собирать рыночные данные и гонять dry-run до открытия счёта.
 func provideWallet(cfg *config.Config, log *slog.Logger) (*auth.Wallet, error) {
 	if cfg.Exchange.WalletPrivateKey.IsEmpty() {
-		log.Warn("STANDX_WALLET_PK не задан — доступны только публичные данные")
+		log.Warn("STANDX_WALLET_PK is not set, only public data is available")
 		return nil, nil
 	}
 	return auth.NewWallet(cfg.Exchange.WalletPrivateKey)
 }
 
-func provideSession(clk ports.Clock) (*auth.Session, error) {
-	return auth.NewSession(func() int64 { return clk.Now().UnixMilli() })
+func provideSessionStore(cfg *config.Config) auth.SessionStore {
+	if cfg.Runtime.SessionPath == "" {
+		return auth.NopStore{}
+	}
+	return auth.NewFileStore(cfg.Runtime.SessionPath)
+}
+
+// provideSession восстанавливает ключ сессии из сохранённой сессии либо
+// создаёт новый.
+//
+// Восстановление обязательно: биржа связывает выданный токен с публичным ключом
+// ed25519, предъявленным при входе, поэтому новый ключ обесценил бы сохранённый
+// токен и потребовал ключ кошелька при каждом запуске.
+func provideSession(store auth.SessionStore, clk ports.Clock, log *slog.Logger) (*auth.Session, error) {
+	nowMillis := func() int64 { return clk.Now().UnixMilli() }
+
+	cached, err := store.Load()
+	if err != nil {
+		log.Warn("failed to read cached session, generating a new key", "error", err)
+	} else if cached != nil && cached.SessionSeed != "" {
+		if seed, seedErr := cached.Seed(); seedErr == nil {
+			return auth.NewSessionFromSeed(seed, nowMillis)
+		}
+	}
+	return auth.NewSession(nowMillis)
 }
 
 func provideBodySigner(session *auth.Session) ports.BodySigner { return session }
 
+// provideTokenProvider собирает аутентификатор.
+//
+// Кошелёк может отсутствовать: при действующей сохранённой сессии токен берётся
+// из неё, и приватный ключ не нужен вовсе. Он требуется только чтобы выпустить
+// новый токен взамен истёкшего.
 func provideTokenProvider(
 	cfg *config.Config,
 	wallet *auth.Wallet,
 	session *auth.Session,
+	store auth.SessionStore,
 	httpClient *http.Client,
 	clk ports.Clock,
 	log *slog.Logger,
 ) ports.TokenProvider {
-	if wallet == nil {
-		return unavailableTokens{}
-	}
-	return auth.NewAuthenticator(cfg.Exchange, wallet, session, httpClient, clk, log)
-}
-
-// unavailableTokens подставляется вместо аутентификатора, когда кошелёк не задан.
-// Любая попытка обратиться к приватному эндпойнту завершится понятной ошибкой,
-// а не паникой на nil.
-type unavailableTokens struct{}
-
-func (unavailableTokens) Token(context.Context) (string, error) {
-	return "", errors.New("учётные данные не заданы: установите STANDX_WALLET_PK")
+	return auth.NewAuthenticator(cfg.Exchange, wallet, session, store, httpClient, clk, log)
 }
 
 func provideRESTClient(
@@ -247,7 +264,7 @@ func provideOrderGateway(
 	if !cfg.IsLive() {
 		return dryrun.New(log)
 	}
-	log.Warn("режим live: ордера уходят на биржу")
+	log.Warn("live mode: orders will be sent to the exchange")
 
 	// Присваивание через промежуточную переменную не косметика: nil-указатель,
 	// уложенный в интерфейс напрямую, дал бы интерфейс, не равный nil,

@@ -78,7 +78,7 @@ func (w *Watchdog) Stop(ctx context.Context) error {
 	case <-w.done:
 		return nil
 	case <-ctx.Done():
-		return fmt.Errorf("watchdog: не остановился вовремя: %w", ctx.Err())
+		return fmt.Errorf("watchdog: did not stop in time: %w", ctx.Err())
 	}
 }
 
@@ -95,7 +95,7 @@ func (w *Watchdog) onMarkPrice(ctx context.Context, e events.MarkPriceUpdated) {
 	w.mu.Unlock()
 
 	if recovered {
-		w.log.Info("справочная цена снова обновляется", "symbol", symbol)
+		w.log.Info("mark price is updating again", "symbol", symbol)
 	}
 	_ = ctx
 }
@@ -138,7 +138,7 @@ func (w *Watchdog) check(ctx context.Context) {
 
 	// Публикуем вне блокировки: обработчики могут обратиться к сторожу обратно.
 	for _, s := range found {
-		w.log.Error("справочная цена устарела", "symbol", s.symbol, "age", s.age)
+		w.log.Error("mark price is stale", "symbol", s.symbol, "age", s.age)
 		events.Publish(w.bus, ctx, events.MarkPriceStale{
 			Symbol: s.symbol,
 			Since:  s.since,

@@ -26,14 +26,14 @@ import (
 const shutdownTimeout = 10 * time.Second
 
 func main() {
-	configPath := flag.String("config", "config.yaml", "путь к файлу конфигурации")
-	outputDir := flag.String("out", "", "каталог для записей (по умолчанию runtime.recordingDir)")
-	duration := flag.Duration("duration", 0, "длительность записи; 0 — до сигнала завершения")
+	configPath := flag.String("config", "config.yaml", "path to the configuration file")
+	outputDir := flag.String("out", "", "output directory for recordings (defaults to runtime.recordingDir)")
+	duration := flag.Duration("duration", 0, "recording duration; 0 means run until terminated")
 	flag.Parse()
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "конфигурация не загружена:\n%v\n", err)
+		fmt.Fprintf(os.Stderr, "failed to load configuration:\n%v\n", err)
 		os.Exit(1)
 	}
 
@@ -41,7 +41,7 @@ func main() {
 		cfg.Runtime.RecordingDir = *outputDir
 	}
 	if cfg.Runtime.RecordingDir == "" {
-		fmt.Fprintln(os.Stderr, "не задан каталог записи: укажите -out или runtime.recordingDir")
+		fmt.Fprintln(os.Stderr, "no output directory: pass -out or set runtime.recordingDir")
 		os.Exit(1)
 	}
 
@@ -51,7 +51,7 @@ func main() {
 	cfg.Exchange.WalletPrivateKey = secret.New("")
 
 	if len(cfg.EnabledSymbols()) == 0 {
-		fmt.Fprintln(os.Stderr, "в конфигурации не включён ни один инструмент — записывать нечего")
+		fmt.Fprintln(os.Stderr, "no symbol is enabled in the configuration, nothing to record")
 		os.Exit(1)
 	}
 

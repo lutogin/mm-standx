@@ -29,8 +29,8 @@ func TestPriceAtDistanceSidePlacement(t *testing.T) {
 	bid := PriceAtDistance(mark, Buy, 8)
 	ask := PriceAtDistance(mark, Sell, 8)
 
-	require.True(t, bid.Lt(mark), "покупка обязана стоять ниже mark")
-	require.True(t, ask.Gt(mark), "продажа обязана стоять выше mark")
+	require.True(t, bid.Lt(mark), "a buy order must rest below mark")
+	require.True(t, ask.Gt(mark), "a sell order must rest above mark")
 	require.Equal(t, "99920", bid.String())
 	require.Equal(t, "100080", ask.String())
 }
@@ -75,7 +75,7 @@ func TestSnapPriceNeverReducesDistance(t *testing.T) {
 		got, err := DistanceBps(mark, side, snapped)
 		require.NoError(t, err)
 		require.GreaterOrEqual(t, float64(got), float64(distance)-1e-9,
-			"снэп сдвинул ордер ближе к mark: было %s, стало %s", distance, got)
+			"snapping moved the order closer to mark: was %s, became %s", distance, got)
 	})
 }
 
@@ -114,9 +114,9 @@ func TestValidateQty(t *testing.T) {
 	s := spec(2, 4)
 
 	require.NoError(t, s.ValidateQty(money.MustParseQty("1")))
-	require.Error(t, s.ValidateQty(money.MustParseQty("0")), "нулевой размер недопустим")
-	require.Error(t, s.ValidateQty(money.MustParseQty("0.00001")), "ниже минимального")
-	require.Error(t, s.ValidateQty(money.MustParseQty("101")), "выше максимального")
+	require.Error(t, s.ValidateQty(money.MustParseQty("0")), "zero size is not allowed")
+	require.Error(t, s.ValidateQty(money.MustParseQty("0.00001")), "below the minimum")
+	require.Error(t, s.ValidateQty(money.MustParseQty("101")), "above the maximum")
 }
 
 // Стакан приходит с негарантированным порядком уровней, поэтому конструктор
@@ -136,11 +136,11 @@ func TestNewBookSortsLevels(t *testing.T) {
 
 	bid, ok := book.BestBid()
 	require.True(t, ok)
-	require.Equal(t, "99950", bid.String(), "лучший бид — наибольшая цена")
+	require.Equal(t, "99950", bid.String(), "the best bid is the highest price")
 
 	ask, ok := book.BestAsk()
 	require.True(t, ok)
-	require.Equal(t, "100010", ask.String(), "лучший аск — наименьшая цена")
+	require.Equal(t, "100010", ask.String(), "the best ask is the lowest price")
 }
 
 func TestEmptyBookHasNoBest(t *testing.T) {
@@ -159,11 +159,11 @@ func TestWouldCross(t *testing.T) {
 		testTime())
 
 	require.False(t, book.WouldCross(Buy, money.MustParsePrice("100040")))
-	require.True(t, book.WouldCross(Buy, money.MustParsePrice("100050")), "покупка по цене аска пересекает стакан")
+	require.True(t, book.WouldCross(Buy, money.MustParsePrice("100050")), "buying at the ask price crosses the book")
 	require.True(t, book.WouldCross(Buy, money.MustParsePrice("100060")))
 
 	require.False(t, book.WouldCross(Sell, money.MustParsePrice("99960")))
-	require.True(t, book.WouldCross(Sell, money.MustParsePrice("99950")), "продажа по цене бида пересекает стакан")
+	require.True(t, book.WouldCross(Sell, money.MustParsePrice("99950")), "selling at the bid price crosses the book")
 	require.True(t, book.WouldCross(Sell, money.MustParsePrice("99940")))
 }
 

@@ -11,10 +11,12 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/go-viper/mapstructure/v2"
+	"github.com/joho/godotenv"
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/env"
 	"github.com/knadh/koanf/providers/file"
@@ -59,6 +61,10 @@ type Runtime struct {
 	HeartbeatPath string        `koanf:"heartbeatPath"`
 	RecordingDir  string        `koanf:"recordingDir"` // пусто — запись выключена
 	StatsInterval time.Duration `koanf:"statsInterval"`
+	// SessionPath — файл, в котором сохраняется выданный токен вместе с ключом
+	// сессии. Позволяет пережить перезапуск, не подключая ключ кошелька.
+	// Пусто — сессия не сохраняется.
+	SessionPath string `koanf:"sessionPath"`
 }
 
 // Exchange — координаты и учётные данные биржи.
@@ -175,12 +181,48 @@ type SymbolRisk struct {
 	MaxNetPositionBase string `koanf:"maxNetPositionBase"`
 }
 
-// envPrefix — префикс переменных окружения, переопределяющих конфигурацию.
-const envPrefix = "MMSTANDX_"
+const (
+	// envPrefix — префикс переменных окружения, переопределяющих конфигурацию.
+	envPrefix = "MMSTANDX_"
+	// dotenvPath — файл с секретами, подхватываемый при запуске.
+	dotenvPath = ".env"
+	// walletKeyEnv — переменная с приватным ключом кошелька.
+	walletKeyEnv = "STANDX_WALLET_PK"
+)
+
+// LoadDotEnv подхватывает переменные из файла .env, если он существует.
+//
+// Файл ищется рядом с конфигурацией, а не в текущем каталоге: процесс могут
+// запустить откуда угодно, а тесты — вообще из каталога пакета. Привязка
+// к расположению конфигурации делает поиск предсказуемым.
+//
+// Уже установленные переменные окружения не перезаписываются: то, что задано
+// явно при запуске, приоритетнее файла.
+func LoadDotEnv(nearPath string) error {
+	candidates := []string{filepath.Join(filepath.Dir(nearPath), dotenvPath)}
+	if nearPath == "" {
+		candidates = []string{dotenvPath}
+	}
+
+	for _, path := range candidates {
+		if _, err := os.Stat(path); err != nil {
+			continue // файла нет — штатная ситуация
+		}
+		if err := godotenv.Load(path); err != nil {
+			return fmt.Errorf("read %s: %w", path, err)
+		}
+		return nil
+	}
+	return nil
+}
 
 // Load читает конфигурацию из значений по умолчанию, файла и окружения,
 // применяет блок defaults к каждому символу и валидирует результат.
 func Load(path string) (*Config, error) {
+	if err := LoadDotEnv(path); err != nil {
+		return nil, err
+	}
+
 	k := koanf.New(".")
 
 	// Значения по умолчанию задают канонический набор ключей с правильным
@@ -212,7 +254,7 @@ func Load(path string) (*Config, error) {
 	}
 	cfg.Symbols = resolved
 
-	cfg.Exchange.WalletPrivateKey = secret.New(os.Getenv("STANDX_WALLET_PK"))
+	cfg.Exchange.WalletPrivateKey = secret.New(os.Getenv(walletKeyEnv))
 
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)

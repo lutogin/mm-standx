@@ -47,13 +47,13 @@ var (
 	//
 	// Только при этой ошибке безопасно повторить неидемпотентную операцию
 	// по запасному каналу: во всех прочих случаях заявка могла дойти до биржи.
-	ErrNotSent = errors.New("wsapi: команда не отправлена")
+	ErrNotSent = errors.New("wsapi: command was not sent")
 
 	// ErrAckTimeout означает, что команда ушла, но подтверждения не было.
 	//
 	// Исход неопределён. Повторять размещение нельзя — в стакане может
 	// оказаться два ордера; расхождение устраняет сверка.
-	ErrAckTimeout = errors.New("wsapi: биржа не подтвердила приём")
+	ErrAckTimeout = errors.New("wsapi: exchange did not acknowledge the command")
 )
 
 // request — конверт запроса торгового канала.
@@ -154,11 +154,11 @@ func (c *Client) Heartbeat(ctx context.Context, s wsconn.Sender) error {
 func (c *Client) login(ctx context.Context, s wsconn.Sender) error {
 	token, err := c.tokens.Token(ctx)
 	if err != nil {
-		return fmt.Errorf("получение токена: %w", err)
+		return fmt.Errorf("obtain token: %w", err)
 	}
 	params, err := json.Marshal(map[string]string{"token": token})
 	if err != nil {
-		return fmt.Errorf("сериализация параметров авторизации: %w", err)
+		return fmt.Errorf("marshal login params: %w", err)
 	}
 	requestID, err := auth.NewRequestID()
 	if err != nil {
@@ -176,7 +176,7 @@ func (c *Client) login(ctx context.Context, s wsconn.Sender) error {
 func (c *Client) OnMessage(ctx context.Context, payload []byte, received time.Time) {
 	var resp response
 	if err := json.Unmarshal(payload, &resp); err != nil {
-		c.log.Error("не удалось разобрать ответ", "error", err)
+		c.log.Error("failed to parse response", "error", err)
 		return
 	}
 
@@ -187,7 +187,7 @@ func (c *Client) OnMessage(ctx context.Context, payload []byte, received time.Ti
 	if p == nil {
 		// Ответ на авторизацию либо запоздавший итог по уже забытой заявке.
 		if resp.Code != 0 {
-			c.log.Error("ошибка торгового канала", "code", resp.Code, "message", resp.Message)
+			c.log.Error("trading channel error", "code", resp.Code, "message", resp.Message)
 		}
 		return
 	}
@@ -195,7 +195,7 @@ func (c *Client) OnMessage(ctx context.Context, payload []byte, received time.Ti
 	// Отклонение публикуем здесь, а не в ожидающем вызове: итог матчинга
 	// приходит вторым сообщением, когда вызывающий уже получил управление.
 	if resp.Code != 0 {
-		c.log.Warn("заявка отклонена", "cl_ord_id", p.clOrdID, "code", resp.Code, "message", resp.Message)
+		c.log.Warn("request rejected", "cl_ord_id", p.clOrdID, "code", resp.Code, "message", resp.Message)
 		events.Publish(c.bus, ctx, events.OrderRejected{
 			ClOrdID: p.clOrdID,
 			Code:    resp.Code,
@@ -225,12 +225,12 @@ func (c *Client) OnDisconnect(err error) {
 	if len(stranded) == 0 {
 		return
 	}
-	c.log.Warn("разрыв торгового канала с незавершёнными заявками",
+	c.log.Warn("trading channel dropped with in-flight requests",
 		"count", len(stranded), "error", err)
 
 	for _, p := range stranded {
 		select {
-		case p.ch <- response{Code: -1, Message: "соединение разорвано"}:
+		case p.ch <- response{Code: -1, Message: "connection lost"}:
 		default:
 		}
 	}
@@ -293,17 +293,17 @@ func (c *Client) call(
 	// что и REST, документация не уточняет. Считаем, что да: переоценка расхода
 	// стоит доли миллисекунды, недооценка — отказа с кодом 429.
 	if err := c.limiter.Acquire(ctx, priority); err != nil {
-		return fmt.Errorf("%s %s: шейпер: %w: %w", method, clOrdID, ErrNotSent, err)
+		return fmt.Errorf("%s %s: rate shaper: %w: %w", method, clOrdID, ErrNotSent, err)
 	}
 
 	payload, err := json.Marshal(params)
 	if err != nil {
-		return fmt.Errorf("%s %s: сериализация параметров: %w: %w", method, clOrdID, ErrNotSent, err)
+		return fmt.Errorf("%s %s: marshal params: %w: %w", method, clOrdID, ErrNotSent, err)
 	}
 	// Подписывается ровно та строка params, которая уйдёт в сеть.
 	headers, err := c.signer.Sign(payload)
 	if err != nil {
-		return fmt.Errorf("%s %s: подпись: %w: %w", method, clOrdID, ErrNotSent, err)
+		return fmt.Errorf("%s %s: sign: %w: %w", method, clOrdID, ErrNotSent, err)
 	}
 	requestID, err := auth.NewRequestID()
 	if err != nil {
@@ -331,18 +331,18 @@ func (c *Client) call(
 		c.forget(requestID)
 		// Ошибка записи в сокет означает, что кадр не ушёл: библиотека
 		// не рапортует успех при частичной отправке.
-		return fmt.Errorf("%s %s: отправка: %w: %w", method, clOrdID, ErrNotSent, err)
+		return fmt.Errorf("%s %s: send: %w: %w", method, clOrdID, ErrNotSent, err)
 	}
 
 	select {
 	case resp := <-waiter:
 		if resp.Code != 0 {
-			return fmt.Errorf("%s %s: биржа отклонила заявку: code %d: %s",
+			return fmt.Errorf("%s %s: exchange rejected the request: code %d: %s",
 				method, clOrdID, resp.Code, resp.Message)
 		}
 		return nil
 	case <-c.clock.After(c.ackTimeout):
-		return fmt.Errorf("%s %s: %w за %s", method, clOrdID, ErrAckTimeout, c.ackTimeout)
+		return fmt.Errorf("%s %s: %w within %s", method, clOrdID, ErrAckTimeout, c.ackTimeout)
 	case <-ctx.Done():
 		return ctx.Err()
 	}

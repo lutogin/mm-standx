@@ -78,7 +78,7 @@ func (h *handler) OnConnect(ctx context.Context, s wsconn.Sender) error {
 
 	if len(user) > 0 {
 		if h.tokens == nil {
-			return errors.New("запрошены пользовательские каналы, но провайдер токена не задан")
+			return errors.New("user channels requested but no token provider is configured")
 		}
 		token, err := h.tokens.Token(ctx)
 		if err != nil {

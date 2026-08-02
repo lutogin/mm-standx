@@ -27,6 +27,7 @@ type Authenticator struct {
 	cfg     config.Exchange
 	wallet  *Wallet
 	session *Session
+	store   SessionStore
 	http    *http.Client
 	clock   ports.Clock
 	log     *slog.Logger
@@ -36,12 +37,15 @@ type Authenticator struct {
 	expiresAt time.Time
 }
 
-// NewAuthenticator собирает аутентификатор. Кошелёк обязателен только для режима
-// live: в dry_run бот работает с публичными данными.
+// NewAuthenticator собирает аутентификатор.
+//
+// wallet может быть nil: при действующем кэше сессии приватный ключ кошелька
+// не нужен вовсе, он требуется только чтобы выпустить новый токен.
 func NewAuthenticator(
 	cfg config.Exchange,
 	wallet *Wallet,
 	session *Session,
+	store SessionStore,
 	httpClient *http.Client,
 	clock ports.Clock,
 	log *slog.Logger,
@@ -50,6 +54,7 @@ func NewAuthenticator(
 		cfg:     cfg,
 		wallet:  wallet,
 		session: session,
+		store:   store,
 		http:    httpClient,
 		clock:   clock,
 		log:     log.With("component", "auth"),
@@ -62,8 +67,19 @@ func (a *Authenticator) Token(ctx context.Context) (string, error) {
 	defer a.mu.Unlock()
 
 	// Обновляемся заранее, чтобы запрос не улетел с токеном, протухшим в полёте.
-	if a.token != "" && a.clock.Now().Add(a.cfg.TokenRefreshLead).Before(a.expiresAt) {
+	if a.token != "" && a.fresh(a.expiresAt) {
 		return a.token, nil
+	}
+	if token, expiresAt, ok := a.fromCache(); ok {
+		a.token, a.expiresAt = token, expiresAt
+		a.log.Info("using cached session", "expires_at", expiresAt)
+		return token, nil
+	}
+
+	if a.wallet == nil {
+		return "", fmt.Errorf(
+			"%w: no valid cached session and no wallet key, set STANDX_WALLET_PK",
+			ports.ErrNoCredentials)
 	}
 
 	token, expiresAt, err := a.login(ctx)
@@ -71,8 +87,63 @@ func (a *Authenticator) Token(ctx context.Context) (string, error) {
 		return "", err
 	}
 	a.token, a.expiresAt = token, expiresAt
-	a.log.Info("получен токен доступа", "expires_at", expiresAt, "address", a.wallet.Address())
+	a.log.Info("obtained access token", "expires_at", expiresAt, "address", a.wallet.Address())
+
+	a.persist(token, expiresAt)
 	return token, nil
+}
+
+// Address возвращает адрес кошелька, если он известен.
+func (a *Authenticator) Address() (Address, bool) {
+	if a.wallet == nil {
+		return "", false
+	}
+	return a.wallet.Address(), true
+}
+
+func (a *Authenticator) fresh(expiresAt time.Time) bool {
+	return a.clock.Now().Add(a.cfg.TokenRefreshLead).Before(expiresAt)
+}
+
+// fromCache поднимает сессию, сохранённую предыдущим запуском.
+func (a *Authenticator) fromCache() (string, time.Time, bool) {
+	cached, err := a.store.Load()
+	if err != nil {
+		a.log.Warn("failed to read cached session", "error", err)
+		return "", time.Time{}, false
+	}
+
+	var address string
+	if a.wallet != nil {
+		address = a.wallet.Address().String()
+	}
+	if !cached.Valid(a.clock.Now(), a.cfg.TokenRefreshLead, address, a.cfg.Chain) {
+		return "", time.Time{}, false
+	}
+
+	// Токен связан с публичным ключом ed25519, предъявленным при входе.
+	// Если ключ сессии не тот, подпись тела не пройдёт проверку на сервере,
+	// и лучше это обнаружить здесь, чем на первом торговом запросе.
+	seed, err := cached.Seed()
+	if err != nil || !bytes.Equal(seed, a.session.Seed()) {
+		a.log.Warn("cached session does not match the current key, re-login required")
+		return "", time.Time{}, false
+	}
+	return cached.Token, cached.ExpiresAt, true
+}
+
+func (a *Authenticator) persist(token string, expiresAt time.Time) {
+	err := a.store.Save(&CachedSession{
+		Address:     a.wallet.Address().String(),
+		Chain:       a.cfg.Chain,
+		Token:       token,
+		ExpiresAt:   expiresAt,
+		SessionSeed: base64.StdEncoding.EncodeToString(a.session.Seed()),
+	})
+	if err != nil {
+		// Не критично: без кэша следующий запуск просто выполнит вход заново.
+		a.log.Warn("failed to persist session", "error", err)
+	}
 }
 
 func (a *Authenticator) login(ctx context.Context) (string, time.Time, error) {
@@ -88,7 +159,7 @@ func (a *Authenticator) login(ctx context.Context) (string, time.Time, error) {
 
 	signature, err := a.wallet.SignPersonal(claims.Message)
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("auth: подпись сообщения входа: %w", err)
+		return "", time.Time{}, fmt.Errorf("auth: sign login message: %w", err)
 	}
 
 	return a.exchangeForToken(ctx, signedData, signature)
@@ -106,7 +177,7 @@ func (a *Authenticator) prepareSignIn(ctx context.Context) (string, error) {
 		"requestId": a.session.RequestID(),
 	})
 	if err != nil {
-		return "", fmt.Errorf("auth: сериализация prepare-signin: %w", err)
+		return "", fmt.Errorf("auth: marshal prepare-signin: %w", err)
 	}
 
 	var resp prepareSignInResponse
@@ -115,7 +186,7 @@ func (a *Authenticator) prepareSignIn(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("auth: prepare-signin: %w", err)
 	}
 	if !resp.Success || resp.SignedData == "" {
-		return "", fmt.Errorf("auth: prepare-signin отклонён: %s", resp.Message)
+		return "", fmt.Errorf("auth: prepare-signin rejected: %s", resp.Message)
 	}
 	return resp.SignedData, nil
 }
@@ -139,26 +210,26 @@ type signInClaims struct {
 func (a *Authenticator) verifySignInRequest(signedData string) (signInClaims, error) {
 	claims, err := decodeJWTPayload[signInClaims](signedData)
 	if err != nil {
-		return signInClaims{}, fmt.Errorf("auth: разбор signedData: %w", err)
+		return signInClaims{}, fmt.Errorf("auth: parse signedData: %w", err)
 	}
 
 	if claims.Domain != expectedDomain {
-		return signInClaims{}, fmt.Errorf("auth: неожиданный домен в запросе подписи: %q", claims.Domain)
+		return signInClaims{}, fmt.Errorf("auth: unexpected domain in signing request: %q", claims.Domain)
 	}
 	if !strings.EqualFold(claims.Address, a.wallet.Address().String()) {
-		return signInClaims{}, fmt.Errorf("auth: запрос подписи адресован другому адресу: %q", claims.Address)
+		return signInClaims{}, fmt.Errorf("auth: signing request targets a different address: %q", claims.Address)
 	}
 	if claims.RequestID != a.session.RequestID() {
-		return signInClaims{}, fmt.Errorf("auth: запрос подписи не соответствует ключу сессии")
+		return signInClaims{}, fmt.Errorf("auth: signing request does not match the session key")
 	}
 	if claims.Message == "" {
-		return signInClaims{}, fmt.Errorf("auth: пустое сообщение для подписи")
+		return signInClaims{}, fmt.Errorf("auth: empty message to sign")
 	}
 	if claims.Exp > 0 && a.clock.Now().After(time.Unix(claims.Exp, 0)) {
-		return signInClaims{}, fmt.Errorf("auth: запрос подписи просрочен")
+		return signInClaims{}, fmt.Errorf("auth: signing request has expired")
 	}
 	if !strings.Contains(claims.Message, expectedDomain) {
-		return signInClaims{}, fmt.Errorf("auth: подписываемое сообщение не упоминает %s", expectedDomain)
+		return signInClaims{}, fmt.Errorf("auth: message to sign does not mention %s", expectedDomain)
 	}
 	return claims, nil
 }
@@ -177,7 +248,7 @@ func (a *Authenticator) exchangeForToken(ctx context.Context, signedData, signat
 		"expiresSeconds": int64(a.cfg.TokenTTL.Seconds()),
 	})
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("auth: сериализация login: %w", err)
+		return "", time.Time{}, fmt.Errorf("auth: marshal login: %w", err)
 	}
 
 	var resp loginResponse
@@ -186,7 +257,7 @@ func (a *Authenticator) exchangeForToken(ctx context.Context, signedData, signat
 		return "", time.Time{}, fmt.Errorf("auth: login: %w", err)
 	}
 	if resp.Token == "" {
-		return "", time.Time{}, fmt.Errorf("auth: login не вернул токен: %s", resp.Message)
+		return "", time.Time{}, fmt.Errorf("auth: login returned no token: %s", resp.Message)
 	}
 
 	// Срок берём из самого токена: сервер вправе выдать меньше запрошенного.
@@ -202,25 +273,25 @@ func (a *Authenticator) exchangeForToken(ctx context.Context, signedData, signat
 func (a *Authenticator) postJSON(ctx context.Context, url string, body []byte, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("построение запроса: %w", err)
+		return fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := a.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("выполнение запроса: %w", err)
+		return fmt.Errorf("execute request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	payload, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return fmt.Errorf("чтение ответа: %w", err)
+		return fmt.Errorf("read response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("статус %d: %s", resp.StatusCode, truncate(payload, 256))
+		return fmt.Errorf("status %d: %s", resp.StatusCode, truncate(payload, 256))
 	}
 	if err := json.Unmarshal(payload, out); err != nil {
-		return fmt.Errorf("разбор ответа: %w", err)
+		return fmt.Errorf("parse response: %w", err)
 	}
 	return nil
 }
@@ -233,14 +304,14 @@ func decodeJWTPayload[T any](token string) (T, error) {
 	var out T
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
-		return out, fmt.Errorf("ожидалось 3 секции JWT, получено %d", len(parts))
+		return out, fmt.Errorf("want 3 JWT segments, got %d", len(parts))
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return out, fmt.Errorf("декодирование payload: %w", err)
+		return out, fmt.Errorf("decode payload: %w", err)
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
-		return out, fmt.Errorf("разбор payload: %w", err)
+		return out, fmt.Errorf("parse payload: %w", err)
 	}
 	return out, nil
 }

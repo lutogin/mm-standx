@@ -6,6 +6,7 @@ package ports
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/nd/mm-standx/internal/domain/market"
@@ -95,7 +96,17 @@ type ExchangeReader interface {
 	Balance(ctx context.Context) (trading.Balance, error)
 }
 
+// ErrNoCredentials означает отсутствие учётных данных.
+//
+// В отличие от сетевого сбоя это состояние повтором запроса не исправляется,
+// поэтому клиенты обязаны прекращать попытки, а не расходовать бюджет
+// на заведомо безнадёжные обращения.
+var ErrNoCredentials = errors.New("credentials are not configured")
+
 // TokenProvider выдаёт действующий JWT, продлевая его по мере необходимости.
+//
+// Отсутствие ключа возвращается как ErrNoCredentials; прочие ошибки считаются
+// временными и допускают повтор.
 type TokenProvider interface {
 	Token(ctx context.Context) (string, error)
 }

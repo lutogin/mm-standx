@@ -65,10 +65,10 @@ func (r *Router) Place(ctx context.Context, req ports.PlaceRequest) error {
 		return err
 	}
 
-	r.log.Warn("размещение уходит через REST: команда не покинула торговый канал",
+	r.log.Warn("falling back to REST for placement: command never left the trading channel",
 		"cl_ord_id", req.ClOrdID, "error", err)
 	if restErr := r.rest.Place(ctx, req); restErr != nil {
-		return fmt.Errorf("оба канала отказали: ws: %w; rest: %w", err, restErr)
+		return fmt.Errorf("both channels failed: ws: %w; rest: %w", err, restErr)
 	}
 	return nil
 }
@@ -88,9 +88,9 @@ func (r *Router) Cancel(ctx context.Context, id trading.ClOrdID, p ports.Priorit
 		return nil
 	}
 
-	r.log.Warn("отмена уходит через REST", "cl_ord_id", id, "error", err)
+	r.log.Warn("falling back to REST for cancel", "cl_ord_id", id, "error", err)
 	if restErr := r.rest.Cancel(ctx, id, p); restErr != nil {
-		return fmt.Errorf("оба канала отказали: ws: %w; rest: %w", err, restErr)
+		return fmt.Errorf("both channels failed: ws: %w; rest: %w", err, restErr)
 	}
 	return nil
 }
@@ -114,9 +114,9 @@ func (r *Router) CancelBatch(ctx context.Context, ids []trading.ClOrdID, p ports
 		return err
 	}
 
-	r.log.Warn("пакетная отмена уходит конвейером через WebSocket", "count", len(ids), "error", err)
+	r.log.Warn("falling back to a WebSocket pipeline for batch cancel", "count", len(ids), "error", err)
 	if wsErr := r.ws.CancelBatch(ctx, ids, p); wsErr != nil {
-		return fmt.Errorf("оба канала отказали: rest: %w; ws: %w", err, wsErr)
+		return fmt.Errorf("both channels failed: rest: %w; ws: %w", err, wsErr)
 	}
 	return nil
 }

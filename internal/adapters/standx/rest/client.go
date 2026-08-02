@@ -35,7 +35,7 @@ func (e *APIError) Error() string {
 }
 
 // ErrRateLimited возвращается при HTTP 429.
-var ErrRateLimited = errors.New("standx: превышен лимит запросов")
+var ErrRateLimited = errors.New("standx: rate limit exceeded")
 
 func (e *APIError) Is(target error) bool {
 	return target == ErrRateLimited && e.StatusCode == http.StatusTooManyRequests
@@ -101,7 +101,7 @@ func (c *Client) do(ctx context.Context, r request, out any) error {
 			}
 		}
 		if err := c.limiter.Acquire(ctx, r.priority); err != nil {
-			return fmt.Errorf("%s %s: шейпер: %w", r.method, r.path, err)
+			return fmt.Errorf("%s %s: rate shaper: %w", r.method, r.path, err)
 		}
 
 		err := c.attempt(ctx, r, out)
@@ -113,10 +113,10 @@ func (c *Client) do(ctx context.Context, r request, out any) error {
 		if !c.retryable(r, err) {
 			return err
 		}
-		c.log.Warn("повтор запроса",
+		c.log.Warn("retrying request",
 			"method", r.method, "path", r.path, "attempt", attempt+1, "error", err)
 	}
-	return fmt.Errorf("%s %s: исчерпаны попытки: %w", r.method, r.path, lastErr)
+	return fmt.Errorf("%s %s: attempts exhausted: %w", r.method, r.path, lastErr)
 }
 
 // retryable решает, имеет ли смысл повторять запрос.
@@ -126,6 +126,11 @@ func (c *Client) do(ctx context.Context, r request, out any) error {
 // оставляет исход неопределённым, поэтому торговые команды не переотправляются:
 // цена ложного повтора — лишний ордер в стакане.
 func (c *Client) retryable(r request, err error) bool {
+	// Отсутствие учётных данных повтором не лечится: ключ от этого не появится,
+	// а бюджет запросов и время будут потрачены впустую.
+	if errors.Is(err, ports.ErrNoCredentials) {
+		return false
+	}
 	if errors.Is(err, ErrRateLimited) {
 		return true
 	}
@@ -148,7 +153,7 @@ func (c *Client) attempt(ctx context.Context, r request, out any) error {
 		// который уходит в сеть.
 		body, err = json.Marshal(r.body)
 		if err != nil {
-			return fmt.Errorf("сериализация тела: %w", err)
+			return fmt.Errorf("marshal body: %w", err)
 		}
 	}
 
@@ -159,7 +164,7 @@ func (c *Client) attempt(ctx context.Context, r request, out any) error {
 
 	req, err := http.NewRequestWithContext(ctx, r.method, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("построение запроса: %w", err)
+		return fmt.Errorf("build request: %w", err)
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -168,14 +173,14 @@ func (c *Client) attempt(ctx context.Context, r request, out any) error {
 	if r.auth {
 		token, err := c.tokens.Token(ctx)
 		if err != nil {
-			return fmt.Errorf("получение токена: %w", err)
+			return fmt.Errorf("obtain token: %w", err)
 		}
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	if r.signed {
 		h, err := c.signer.Sign(body)
 		if err != nil {
-			return fmt.Errorf("подпись тела: %w", err)
+			return fmt.Errorf("sign body: %w", err)
 		}
 		req.Header.Set("x-request-sign-version", h.Version)
 		req.Header.Set("x-request-id", h.RequestID)
@@ -186,13 +191,13 @@ func (c *Client) attempt(ctx context.Context, r request, out any) error {
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("выполнение запроса: %w", err)
+		return fmt.Errorf("execute request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	payload, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
-		return fmt.Errorf("чтение ответа: %w", err)
+		return fmt.Errorf("read response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -202,7 +207,7 @@ func (c *Client) attempt(ctx context.Context, r request, out any) error {
 		return nil
 	}
 	if err := json.Unmarshal(payload, out); err != nil {
-		return fmt.Errorf("разбор ответа: %w", err)
+		return fmt.Errorf("parse response: %w", err)
 	}
 	return nil
 }
