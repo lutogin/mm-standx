@@ -1,0 +1,22 @@
+/bin/
+/dist/
+*.test
+*.out
+coverage.*
+
+# Секреты — никогда в репозиторий
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Локальные данные: записи рынка, журнал ордеров, состояние
+/data/
+/recordings/
+*.db
+*.bolt
+
+# Инструменты
+/graphify-out/
+.DS_Store

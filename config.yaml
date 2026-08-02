@@ -1,0 +1,130 @@
+# Конфигурация mm-standx.
+#
+# Приватный ключ здесь не хранится и не принимается: он читается только из
+# переменной окружения STANDX_WALLET_PK. Попытка задать его в этом файле
+# приведёт к отказу загрузки.
+#
+# Любой параметр переопределяется окружением с префиксом MMSTANDX_, например
+# MMSTANDX_RUNTIME_MODE=live. Неизвестные ключи считаются ошибкой: опечатка
+# не должна молча вернуть значение по умолчанию.
+
+runtime:
+  mode: dry_run # dry_run | live — переключать осознанно
+  logLevel: info
+  logFormat: text
+  metricsAddr: ":9090"
+  heartbeatPath: data/mmbot.hb
+  recordingDir: recordings # пусто — запись выключена
+  statsInterval: 30s
+
+exchange:
+  authBaseUrl: https://api.standx.com
+  restBaseUrl: https://perps.standx.com
+  wsStreamUrl: wss://perps.standx.com/ws-stream/v1
+  wsApiUrl: wss://perps.standx.com/ws-api/v1
+  chain: bsc
+  tokenTtl: 24h
+  tokenRefreshLead: 2h
+  wsRotateAfter: 20h # биржа рвёт соединение на 24-м часе
+  wsReconnectMin: 250ms
+  wsReconnectMax: 30s
+  # Живость определяется по молчанию, а не пингом: сервер StandX на клиентские
+  # ping не отвечает, и активная проверка рвала бы исправное соединение.
+  wsIdleTimeout: 30s
+  wsHeartbeatInterval: 10s
+  requestTimeout: 5s
+
+rateLimit:
+  sustainedRps: 15 # биржевой предел ~22, оставляем запас
+  burst: 12
+  safetyReservePct: 30 # доля бакета, доступная только командам безопасности
+
+# Параметры программы наград StandX. Вынесены в конфиг, потому что биржа меняет
+# их без предупреждения, а таблица весов в документации противоречит формуле
+# на той же странице — см. PLAN.md §12.1.
+reward:
+  bandBps: 10
+  maxWeightPct: 200
+  minWeightPct: 40
+  uptimeTiers:
+    - { thresholdPct: 70, multiplier: 1.0 }
+    - { thresholdPct: 50, multiplier: 0.5 }
+
+risk:
+  maxDailyLossUsd: 500
+  maxNotionalUsd: 120000
+  maxFillsPerHour: 20
+  marginMode: isolated # isolated изолирует риск между инструментами
+  flattenPolicy: immediate_market
+  flattenDebounce: 150ms # свип даёт десятки частичных исполнений — агрегируем
+  postFillCooldown: 3s
+  killSwitchOnDrawdown: true
+
+health:
+  # Канал price обновляется примерно раз в 3 секунды — заметно реже стакана.
+  # Порог даёт запас на три пропущенных обновления; уточняется по записи.
+  markStale: 10s
+  disconnectPull: 1500ms
+  reconcileInterval: 5s
+  ackTimeout: 2s
+  heartbeatInterval: 1s
+
+# Наследуется каждым инструментом; ниже переопределяются только отличия.
+defaults:
+  enabled: false
+  allocationUsd: 0
+  quote:
+    targetBps: 7.5 # где хотим стоять
+    minKeepBps: 5.0 # ближе — перекотировка
+    maxKeepBps: 9.2 # дальше — перекотировка
+    panicBps: 2.5 # cancel-first
+    pullBps: 1.0 # снять сторону целиком
+    ladderLayers: 3 # лесенка компенсирует отсутствие amend в API
+    ladderSpreadBps: 1.0
+    minRest: 3200ms # ≥3с, иначе ордер не засчитывается в Maker Points
+    requoteCooldown: 250ms
+  volatility:
+    ewmaHalfLife: 3s
+    widenSigmaBps: 3.0
+    pullSigmaBps: 8.0
+    jumpBps: 4.0
+    widenFactorK: 0.8
+  uptime:
+    targetPct: 80 # выше 70% зачёт не растёт, разница — страховой запас
+    hardFloorPct: 72
+    reservePct: 8
+  risk:
+    leverage: 4
+    maxNetPositionBase: "0" # 0 — закрывать любую позицию немедленно
+
+symbols:
+  # Металлы: низкая волатильность и хорошая эффективность капитала.
+  XAG-USD:
+    enabled: true
+    allocationUsd: 40000
+    quote:
+      targetBps: 7.0
+  XAU-USD:
+    enabled: true
+    allocationUsd: 30000
+    quote:
+      targetBps: 7.0
+
+  # Крипта: круглосуточно, без гэпов выходного дня, но подвижнее.
+  BTC-USD:
+    enabled: true
+    allocationUsd: 30000
+    quote:
+      targetBps: 8.0
+  ETH-USD:
+    enabled: false
+    allocationUsd: 0
+
+  # Остальные инструменты программы — включаются по результатам калибровки.
+  SOL-USD: { enabled: false }
+  BNB-USD: { enabled: false }
+  HYPE-USD: { enabled: false }
+  CL-USD: { enabled: false }
+  TSLA-USD: { enabled: false }
+  MU-USD: { enabled: false }
+  SPCX-USD: { enabled: false }
