@@ -138,34 +138,62 @@ type Symbol struct {
 	Enabled       bool       `koanf:"enabled"`
 	AllocationUSD float64    `koanf:"allocationUsd"`
 	Quote         Quote      `koanf:"quote"`
+	Appetite      Appetite   `koanf:"appetite"`
 	Volatility    Volatility `koanf:"volatility"`
+	Program       Program    `koanf:"program"`
 	Uptime        Uptime     `koanf:"uptime"`
 	SymbolRisk    SymbolRisk `koanf:"risk"`
 }
 
-// Quote — геометрия котировок и гистерезис.
+// Quote — геометрия лесенки и темп перестановки.
 //
-// Пороги обязаны быть упорядочены: pull < panic < minKeep < target < maxKeep ≤ band.
-// Порядок проверяется при валидации, см. PLAN.md §4.1.
+// Дистанций здесь нет намеренно: они вычисляются по рыночным условиям,
+// см. PLAN.md §4.5.
 type Quote struct {
-	TargetBps       money.Bps     `koanf:"targetBps"`
-	MinKeepBps      money.Bps     `koanf:"minKeepBps"`
-	MaxKeepBps      money.Bps     `koanf:"maxKeepBps"`
-	PanicBps        money.Bps     `koanf:"panicBps"`
-	PullBps         money.Bps     `koanf:"pullBps"`
 	LadderLayers    int           `koanf:"ladderLayers"`
 	LadderSpreadBps money.Bps     `koanf:"ladderSpreadBps"`
 	MinRest         time.Duration `koanf:"minRest"`
 	RequoteCooldown time.Duration `koanf:"requoteCooldown"`
 }
 
-// Volatility — параметры адаптации к волатильности и аварийного съёма.
+// Appetite — готовность рисковать ради награды.
+//
+// Задаёт не сами дистанции, а правило их вычисления: сколько характерных
+// скачков должно умещаться в глубину котировки.
+type Appetite struct {
+	// JumpMultiple — сколько скачков должно покрывать глубину.
+	JumpMultiple float64 `koanf:"jumpMultiple"`
+	// FloorMarginBps — абсолютный запас поверх расчётного.
+	FloorMarginBps money.Bps `koanf:"floorMarginBps"`
+	// DeadBandJumps — ширина мёртвой зоны в скачках.
+	DeadBandJumps float64 `koanf:"deadBandJumps"`
+	// MinDeadBandBps — нижняя граница мёртвой зоны.
+	MinDeadBandBps money.Bps `koanf:"minDeadBandBps"`
+	// MinBps — ближе к mark не подходим ни при каких условиях.
+	// Страхует случай, когда измеренный риск обманчиво мал.
+	MinBps money.Bps `koanf:"minBps"`
+	// MaxBps — дальше награда обнуляется.
+	MaxBps money.Bps `koanf:"maxBps"`
+}
+
+// Volatility — параметры оценщика скачка.
 type Volatility struct {
-	EWMAHalfLife  time.Duration `koanf:"ewmaHalfLife"`
-	WidenSigmaBps money.Bps     `koanf:"widenSigmaBps"`
-	PullSigmaBps  money.Bps     `koanf:"pullSigmaBps"`
-	JumpBps       money.Bps     `koanf:"jumpBps"`
-	WidenFactorK  float64       `koanf:"widenFactorK"`
+	// Window — глубина скользящего окна.
+	Window time.Duration `koanf:"window"`
+	// MinSamples — сколько замеров нужно, чтобы начать котировать.
+	MinSamples int `koanf:"minSamples"`
+	// FullConfidenceAt — при каком числе замеров оценка считается зрелой.
+	FullConfidenceAt int `koanf:"fullConfidenceAt"`
+}
+
+// Program — параметры начисления инструмента, публикуемые StandX.
+type Program struct {
+	// UnitSize — размер, дающий один Maker Hour.
+	UnitSize string `koanf:"unitSize"`
+	// PerSideCap — потолок засчитываемого размера на сторону.
+	PerSideCap string `koanf:"perSideCap"`
+	// MaxMakerHoursPerHour — потолок начисления за час.
+	MaxMakerHoursPerHour float64 `koanf:"maxMakerHoursPerHour"`
 }
 
 // Uptime — цели по присутствию в стакане и бюджет простоя.

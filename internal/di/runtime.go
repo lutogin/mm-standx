@@ -2,18 +2,29 @@ package di
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
+	"time"
+
+	"github.com/shopspring/decimal"
 
 	"go.uber.org/fx"
 
 	"github.com/nd/mm-standx/internal/adapters/standx/auth"
 	"github.com/nd/mm-standx/internal/adapters/standx/wsapi"
 	"github.com/nd/mm-standx/internal/adapters/standx/wsstream"
+	"github.com/nd/mm-standx/internal/app/account"
+	"github.com/nd/mm-standx/internal/app/engine"
+	"github.com/nd/mm-standx/internal/app/heartbeat"
 	"github.com/nd/mm-standx/internal/app/observer"
 	"github.com/nd/mm-standx/internal/app/watchdog"
 	"github.com/nd/mm-standx/internal/config"
 	"github.com/nd/mm-standx/internal/domain/market"
+	"github.com/nd/mm-standx/internal/domain/policy"
+	"github.com/nd/mm-standx/internal/domain/reward"
+	"github.com/nd/mm-standx/internal/domain/volatility"
 	"github.com/nd/mm-standx/internal/events"
 	"github.com/nd/mm-standx/internal/ports"
 )
@@ -27,6 +38,9 @@ var Runtime = fx.Module("runtime",
 		fx.Annotate(provideStreams, fx.ResultTags(`group:"runnables,flatten"`)),
 		fx.Annotate(provideWatchdog, fx.As(new(ports.Runnable)), fx.ResultTags(`group:"runnables"`)),
 		fx.Annotate(provideObserver, fx.As(new(ports.Runnable)), fx.ResultTags(`group:"runnables"`)),
+		fx.Annotate(provideAccountPoller, fx.As(new(ports.Runnable)), fx.ResultTags(`group:"runnables"`)),
+		fx.Annotate(provideHeartbeat, fx.As(new(ports.Runnable)), fx.ResultTags(`group:"runnables"`)),
+		fx.Annotate(provideEngines, fx.ResultTags(`group:"runnables,flatten"`)),
 	),
 	fx.Invoke(fx.Annotate(registerRunnables, fx.ParamTags(``, ``, `group:"runnables"`))),
 )
@@ -104,10 +118,16 @@ func provideObserver(cfg *config.Config, bus *events.Bus, clk ports.Clock, log *
 
 // registerRunnables связывает компоненты с жизненным циклом приложения.
 //
-// fx останавливает хуки в порядке, обратном регистрации, поэтому потоки данных
-// закрываются последними — прикладные компоненты успевают доработать на живых
-// данных до разрыва соединений.
+// Порядок здесь не косметика. fx останавливает хуки в порядке, обратном
+// регистрации, а акторы обязаны успеть снять котировки, пока соединения ещё
+// живы: у StandX нет отмены ордеров по разрыву, и оставленная котировка
+// продолжит исполняться после выхода процесса. Поэтому акторы регистрируются
+// последними и останавливаются первыми.
 func registerRunnables(lc fx.Lifecycle, log *slog.Logger, runnables []ports.Runnable) {
+	sort.SliceStable(runnables, func(i, j int) bool {
+		return stopRank(runnables[i]) < stopRank(runnables[j])
+	})
+
 	for _, r := range runnables {
 		lc.Append(fx.Hook{
 			OnStart: func(ctx context.Context) error {
@@ -120,6 +140,119 @@ func registerRunnables(lc fx.Lifecycle, log *slog.Logger, runnables []ports.Runn
 			},
 		})
 	}
+}
+
+func provideAccountPoller(
+	cfg *config.Config,
+	reader ports.ExchangeReader,
+	bus *events.Bus,
+	clk ports.Clock,
+	log *slog.Logger,
+) *account.Poller {
+	return account.New(sortedSymbols(cfg), cfg.Health.ReconcileInterval, reader, bus, clk, log)
+}
+
+func provideHeartbeat(cfg *config.Config, clk ports.Clock, log *slog.Logger) *heartbeat.Writer {
+	return heartbeat.New(
+		cfg.Runtime.HeartbeatPath,
+		cfg.Health.HeartbeatInterval,
+		sortedSymbols(cfg),
+		cfg.IsLive(),
+		clk,
+		log,
+	)
+}
+
+// stopRank задаёт очерёдность запуска: чем меньше, тем раньше стартует
+// и тем позже останавливается.
+func stopRank(r ports.Runnable) int {
+	if strings.HasPrefix(r.Name(), "engine[") {
+		return 1
+	}
+	return 0
+}
+
+// provideEngines создаёт актора на каждый включённый инструмент.
+//
+// Спецификации инструментов читаются с биржи на старте: тики и минимальные
+// размеры нельзя держать в конфигурации, потому что биржа их меняет,
+// а расхождение приводит к отклонённым ордерам.
+func provideEngines(
+	cfg *config.Config,
+	reader ports.ExchangeReader,
+	gateway ports.OrderGateway,
+	bus *events.Bus,
+	clk ports.Clock,
+	log *slog.Logger,
+) ([]ports.Runnable, error) {
+	symbols := sortedSymbols(cfg)
+	if len(symbols) == 0 {
+		return nil, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	out := make([]ports.Runnable, 0, len(symbols))
+	for _, symbol := range symbols {
+		symCfg := cfg.Symbols[symbol.String()]
+
+		spec, err := reader.SymbolSpec(ctx, symbol)
+		if err != nil {
+			return nil, fmt.Errorf("load specification for %s: %w", symbol, err)
+		}
+		program, err := buildProgram(cfg.Reward, symCfg.Program)
+		if err != nil {
+			return nil, fmt.Errorf("reward programme for %s: %w", symbol, err)
+		}
+
+		out = append(out, engine.New(
+			symbol, spec, symCfg, cfg.Health, cfg.Risk, cfg.IsLive(),
+			program,
+			policy.Appetite{
+				JumpMultiple:   symCfg.Appetite.JumpMultiple,
+				FloorMarginBps: symCfg.Appetite.FloorMarginBps,
+				DeadBandJumps:  symCfg.Appetite.DeadBandJumps,
+				MinDeadBandBps: symCfg.Appetite.MinDeadBandBps,
+			},
+			policy.Bounds{MinBps: symCfg.Appetite.MinBps, MaxBps: symCfg.Appetite.MaxBps},
+			volatility.Config{
+				Window:           symCfg.Volatility.Window,
+				MinSamples:       symCfg.Volatility.MinSamples,
+				FullConfidenceAt: symCfg.Volatility.FullConfidenceAt,
+			},
+			engine.Deps{Gateway: gateway, Reader: reader, Bus: bus, Clock: clk, Log: log},
+		))
+	}
+	return out, nil
+}
+
+func buildProgram(rewardCfg config.Reward, p config.Program) (reward.Program, error) {
+	unit, err := decimal.NewFromString(p.UnitSize)
+	if err != nil {
+		return reward.Program{}, fmt.Errorf("unit size %q: %w", p.UnitSize, err)
+	}
+	cap, err := decimal.NewFromString(p.PerSideCap)
+	if err != nil {
+		return reward.Program{}, fmt.Errorf("per-side cap %q: %w", p.PerSideCap, err)
+	}
+
+	tiers := make([]reward.Tier, 0, len(rewardCfg.UptimeTiers))
+	for _, t := range rewardCfg.UptimeTiers {
+		tiers = append(tiers, reward.Tier{ThresholdPct: t.ThresholdPct, Multiplier: t.Multiplier})
+	}
+
+	return reward.Program{
+		Curve: reward.Curve{
+			BandBps:      rewardCfg.BandBps,
+			MaxWeightPct: rewardCfg.MaxWeightPct,
+			MinWeightPct: rewardCfg.MinWeightPct,
+		},
+		Tiers:                tiers,
+		UnitSize:             unit,
+		PerSideCap:           cap,
+		MaxMakerHoursPerHour: p.MaxMakerHoursPerHour,
+	}, nil
 }
 
 // sortedSymbols возвращает включённые инструменты в устойчивом порядке:

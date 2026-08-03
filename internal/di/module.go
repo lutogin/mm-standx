@@ -259,10 +259,12 @@ func provideOrderGateway(
 	cfg *config.Config,
 	ws *wsapi.Client,
 	c *rest.Client,
+	bus *events.Bus,
+	clk ports.Clock,
 	log *slog.Logger,
 ) ports.OrderGateway {
 	if !cfg.IsLive() {
-		return dryrun.New(log)
+		return dryrun.New(log, bus, clk)
 	}
 	log.Warn("live mode: orders will be sent to the exchange")
 

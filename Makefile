@@ -14,6 +14,7 @@ build: ## Build all binaries into ./bin
 	$(GO) build -o $(BIN)/recorder ./cmd/recorder
 	$(GO) build -o $(BIN)/standxctl ./cmd/standxctl
 	$(GO) build -o $(BIN)/analyze ./cmd/analyze
+	$(GO) build -o $(BIN)/guardian ./cmd/guardian
 
 .PHONY: check-account
 check-account: build ## Verify access to the StandX account

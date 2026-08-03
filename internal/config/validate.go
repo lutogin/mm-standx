@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/shopspring/decimal"
+
 	"github.com/nd/mm-standx/internal/domain/money"
 	"github.com/nd/mm-standx/internal/domain/trading"
 )
@@ -203,9 +205,13 @@ func (s Symbol) validate(name string, band money.Bps) []error {
 	if s.Enabled && s.AllocationUSD <= 0 {
 		errs = append(errs, fmt.Errorf("%s.allocationUsd must be positive for an enabled symbol", prefix))
 	}
-	errs = append(errs, s.Quote.validate(prefix+".quote", band)...)
+	errs = append(errs, s.Quote.validate(prefix+".quote")...)
+	errs = append(errs, s.Appetite.validate(prefix+".appetite", band)...)
 	errs = append(errs, s.Uptime.validate(prefix+".uptime")...)
 	errs = append(errs, s.Volatility.validate(prefix+".volatility")...)
+	if s.Enabled {
+		errs = append(errs, s.Program.validate(prefix+".program")...)
+	}
 
 	if s.SymbolRisk.Leverage < 1 {
 		errs = append(errs, fmt.Errorf("%s.risk.leverage must be at least 1", prefix))
@@ -213,53 +219,70 @@ func (s Symbol) validate(name string, band money.Bps) []error {
 	return errs
 }
 
-func (q Quote) validate(prefix string, band money.Bps) []error {
+func (q Quote) validate(prefix string) []error {
 	var errs []error
-
-	// Пороги обязаны идти строго по возрастанию: на этом порядке держится
-	// весь гистерезис из PLAN.md §4.1.
-	ordered := []struct {
-		name string
-		val  money.Bps
-	}{
-		{"pullBps", q.PullBps},
-		{"panicBps", q.PanicBps},
-		{"minKeepBps", q.MinKeepBps},
-		{"targetBps", q.TargetBps},
-		{"maxKeepBps", q.MaxKeepBps},
-	}
-	if q.PullBps < 0 {
-		errs = append(errs, fmt.Errorf("%s.pullBps must not be negative", prefix))
-	}
-	for i := 1; i < len(ordered); i++ {
-		if ordered[i].val <= ordered[i-1].val {
-			errs = append(errs, fmt.Errorf("%s: require %s < %s, got %s >= %s",
-				prefix, ordered[i-1].name, ordered[i].name, ordered[i-1].val, ordered[i].val))
-		}
-	}
-	if q.MaxKeepBps > band {
-		errs = append(errs, fmt.Errorf("%s.maxKeepBps (%s) falls outside the reward band reward.bandBps (%s): orders would stop counting",
-			prefix, q.MaxKeepBps, band))
-	}
 
 	if q.LadderLayers < 1 {
 		errs = append(errs, fmt.Errorf("%s.ladderLayers must be at least 1", prefix))
 	}
-	if q.LadderLayers > 1 {
-		if q.LadderSpreadBps <= 0 {
-			errs = append(errs, fmt.Errorf("%s.ladderSpreadBps must be positive when ladderLayers > 1", prefix))
-		}
-		// Лесенка центрирована вокруг targetBps и обязана целиком помещаться
-		// в удерживаемый диапазон, иначе крайние ступени будут перекотировываться вечно.
-		half := money.Bps(float64(q.LadderLayers-1)) * q.LadderSpreadBps / 2
-		if q.TargetBps-half < q.MinKeepBps || q.TargetBps+half > q.MaxKeepBps {
-			errs = append(errs, fmt.Errorf(
-				"%s: ladder of %d x %s around %s does not fit within [%s, %s]; reduce ladderSpreadBps or widen the range",
-				prefix, q.LadderLayers, q.LadderSpreadBps, q.TargetBps, q.MinKeepBps, q.MaxKeepBps))
-		}
+	if q.LadderLayers > 1 && q.LadderSpreadBps <= 0 {
+		errs = append(errs, fmt.Errorf("%s.ladderSpreadBps must be positive when ladderLayers > 1", prefix))
 	}
 	if q.MinRest < 0 || q.RequoteCooldown < 0 {
 		errs = append(errs, fmt.Errorf("%s: minRest and requoteCooldown must not be negative", prefix))
+	}
+	return errs
+}
+
+// validate проверяет правило вычисления дистанции.
+//
+// Границы обязаны оставлять правилу место для манёвра и не выходить за полосу
+// награды: за её пределами вес обнуляется, а не убывает.
+func (a Appetite) validate(prefix string, band money.Bps) []error {
+	var errs []error
+
+	if a.JumpMultiple <= 0 {
+		errs = append(errs, fmt.Errorf("%s.jumpMultiple must be positive", prefix))
+	}
+	if a.FloorMarginBps < 0 {
+		errs = append(errs, fmt.Errorf("%s.floorMarginBps must not be negative", prefix))
+	}
+	if a.DeadBandJumps <= 0 {
+		errs = append(errs, fmt.Errorf("%s.deadBandJumps must be positive", prefix))
+	}
+	if a.MinDeadBandBps <= 0 {
+		errs = append(errs, fmt.Errorf("%s.minDeadBandBps must be positive", prefix))
+	}
+	if a.MinBps < 0 {
+		errs = append(errs, fmt.Errorf("%s.minBps must not be negative", prefix))
+	}
+	if a.MaxBps <= a.MinBps {
+		errs = append(errs, fmt.Errorf("%s: require minBps < maxBps, got %s >= %s", prefix, a.MinBps, a.MaxBps))
+	}
+	if a.MaxBps > band {
+		errs = append(errs, fmt.Errorf(
+			"%s.maxBps (%s) falls outside the reward band reward.bandBps (%s): quotes would stop counting",
+			prefix, a.MaxBps, band))
+	}
+	return errs
+}
+
+// validate проверяет параметры начисления инструмента.
+func (p Program) validate(prefix string) []error {
+	var errs []error
+
+	for name, raw := range map[string]string{"unitSize": p.UnitSize, "perSideCap": p.PerSideCap} {
+		value, err := decimal.NewFromString(raw)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s.%s: %q is not a number", prefix, name, raw))
+			continue
+		}
+		if !value.IsPositive() {
+			errs = append(errs, fmt.Errorf("%s.%s must be positive for an enabled symbol, got %s", prefix, name, raw))
+		}
+	}
+	if p.MaxMakerHoursPerHour <= 0 {
+		errs = append(errs, fmt.Errorf("%s.maxMakerHoursPerHour must be positive for an enabled symbol", prefix))
 	}
 	return errs
 }
@@ -280,21 +303,18 @@ func (u Uptime) validate(prefix string) []error {
 
 func (v Volatility) validate(prefix string) []error {
 	var errs []error
-	if v.EWMAHalfLife <= 0 {
-		errs = append(errs, fmt.Errorf("%s.ewmaHalfLife must be positive", prefix))
+
+	if v.Window <= 0 {
+		errs = append(errs, fmt.Errorf("%s.window must be positive", prefix))
 	}
-	if v.WidenSigmaBps <= 0 {
-		errs = append(errs, fmt.Errorf("%s.widenSigmaBps must be positive", prefix))
+	if v.MinSamples < 2 {
+		errs = append(errs, fmt.Errorf("%s.minSamples must be at least 2", prefix))
 	}
-	if v.PullSigmaBps <= v.WidenSigmaBps {
-		errs = append(errs, fmt.Errorf("%s: require widenSigmaBps < pullSigmaBps, got %s >= %s",
-			prefix, v.WidenSigmaBps, v.PullSigmaBps))
-	}
-	if v.JumpBps <= 0 {
-		errs = append(errs, fmt.Errorf("%s.jumpBps must be positive", prefix))
-	}
-	if v.WidenFactorK < 0 {
-		errs = append(errs, fmt.Errorf("%s.widenFactorK must not be negative", prefix))
+	// Зрелость не может наступать раньше готовности: иначе поправка
+	// на незрелость никогда не применяется.
+	if v.FullConfidenceAt < v.MinSamples {
+		errs = append(errs, fmt.Errorf("%s: require minSamples <= fullConfidenceAt, got %d > %d",
+			prefix, v.MinSamples, v.FullConfidenceAt))
 	}
 	return errs
 }

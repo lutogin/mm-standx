@@ -25,14 +25,10 @@ func thresholds() policy.Thresholds {
 
 func desired() []money.Bps { return []money.Bps{6.5, 7.5, 8.5} }
 
-// at builds a distance function that reports a fixed distance for every rung.
-func at(d money.Bps) func(Slot) money.Bps {
-	return func(Slot) money.Bps { return d }
-}
-
-func classifier() func(money.Bps) policy.Decision {
+// atDistance builds a classifier that sees every rung at a fixed distance.
+func atDistance(d money.Bps) Classifier {
 	th := thresholds()
-	return func(d money.Bps) policy.Decision { return th.Classify(d) }
+	return func(Slot) policy.Decision { return th.Classify(d) }
 }
 
 // place walks a rung through the full lifecycle to Live.
@@ -56,7 +52,7 @@ func fullLadder(t *testing.T) *Ladder {
 func TestEmptyLadderFillsRungsOneAtATime(t *testing.T) {
 	l := New(market.Buy, 3)
 
-	actions := l.Plan(epoch, desired(), at(7.5), classifier(), rules())
+	actions := l.Plan(epoch, desired(), atDistance(7.5), rules())
 	require.Len(t, actions, 1, "only one command may be in flight per side")
 	require.Equal(t, Place, actions[0].Kind)
 	require.Equal(t, money.Bps(6.5), actions[0].Distance)
@@ -68,11 +64,11 @@ func TestEmptyLadderFillsRungsOneAtATime(t *testing.T) {
 func TestOnlyOneCommandInFlightPerSide(t *testing.T) {
 	l := New(market.Buy, 3)
 
-	actions := l.Plan(epoch, desired(), at(7.5), classifier(), rules())
+	actions := l.Plan(epoch, desired(), atDistance(7.5), rules())
 	require.Len(t, actions, 1)
 	l.OnPlaceSent(actions[0].Slot, "a", money.MustParsePrice("100"), money.MustParseQty("1"), epoch)
 
-	require.Empty(t, l.Plan(epoch, desired(), at(7.5), classifier(), rules()),
+	require.Empty(t, l.Plan(epoch, desired(), atDistance(7.5), rules()),
 		"a second command must wait for the first to settle")
 }
 
@@ -80,7 +76,7 @@ func TestQuietLadderProducesNoCommands(t *testing.T) {
 	l := fullLadder(t)
 
 	later := epoch.Add(time.Minute)
-	require.Empty(t, l.Plan(later, desired(), at(7.5), classifier(), rules()),
+	require.Empty(t, l.Plan(later, desired(), atDistance(7.5), rules()),
 		"rungs inside the dead band must be left alone")
 	require.True(t, l.Populated())
 }
@@ -90,7 +86,7 @@ func TestQuietLadderProducesNoCommands(t *testing.T) {
 func TestDangerPullsTheEntireSide(t *testing.T) {
 	l := fullLadder(t)
 
-	actions := l.Plan(epoch.Add(time.Minute), desired(), at(0.5), classifier(), rules())
+	actions := l.Plan(epoch.Add(time.Minute), desired(), atDistance(0.5), rules())
 	require.Len(t, actions, 3, "the whole side must come down at once")
 	for _, a := range actions {
 		require.Equal(t, Cancel, a.Kind)
@@ -103,7 +99,7 @@ func TestDangerPullsTheEntireSide(t *testing.T) {
 func TestPullIgnoresMinimumRestTime(t *testing.T) {
 	l := fullLadder(t)
 
-	actions := l.Plan(epoch, desired(), at(0.5), classifier(), rules())
+	actions := l.Plan(epoch, desired(), atDistance(0.5), rules())
 	require.Len(t, actions, 3, "a fresh order must still be pulled when in danger")
 }
 
@@ -111,10 +107,10 @@ func TestFreshOrdersAreLeftAloneUnlessThreatened(t *testing.T) {
 	l := fullLadder(t)
 
 	// Drifted out of the band: pure reward loss, so the rest rule applies.
-	require.Empty(t, l.Plan(epoch.Add(time.Second), desired(), at(12), classifier(), rules()),
+	require.Empty(t, l.Plan(epoch.Add(time.Second), desired(), atDistance(12), rules()),
 		"an order younger than minRest must not be requoted for reward alone")
 
-	require.NotEmpty(t, l.Plan(epoch.Add(4*time.Second), desired(), at(12), classifier(), rules()),
+	require.NotEmpty(t, l.Plan(epoch.Add(4*time.Second), desired(), atDistance(12), rules()),
 		"after minRest the same drift must trigger a requote")
 }
 
@@ -122,7 +118,7 @@ func TestFreshOrdersAreLeftAloneUnlessThreatened(t *testing.T) {
 func TestSafetyRequoteBypassesMinimumRest(t *testing.T) {
 	l := fullLadder(t)
 
-	actions := l.Plan(epoch.Add(time.Second), desired(), at(2.0), classifier(), rules())
+	actions := l.Plan(epoch.Add(time.Second), desired(), atDistance(2.0), rules())
 	require.Len(t, actions, 1)
 	require.Equal(t, Cancel, actions[0].Kind, "approaching price must cancel first")
 	require.Equal(t, policy.UrgencySafety, actions[0].Urgency)
@@ -136,7 +132,7 @@ func TestOutwardDriftPlacesBeforeCancelling(t *testing.T) {
 	place(t, l, 1, "b", epoch)
 	// Rung 2 stays empty, giving the replacement somewhere to go.
 
-	actions := l.Plan(epoch.Add(4*time.Second), desired(), at(12), classifier(), rules())
+	actions := l.Plan(epoch.Add(4*time.Second), desired(), atDistance(12), rules())
 	require.Len(t, actions, 1)
 	require.Equal(t, Place, actions[0].Kind, "a free rung must be used before cancelling")
 	require.Equal(t, 2, actions[0].Slot)
@@ -147,7 +143,7 @@ func TestOutwardDriftPlacesBeforeCancelling(t *testing.T) {
 func TestFullLadderCancelsWhenNoRungIsFree(t *testing.T) {
 	l := fullLadder(t)
 
-	actions := l.Plan(epoch.Add(4*time.Second), desired(), at(12), classifier(), rules())
+	actions := l.Plan(epoch.Add(4*time.Second), desired(), atDistance(12), rules())
 	require.Len(t, actions, 1)
 	require.Equal(t, Cancel, actions[0].Kind)
 	require.Contains(t, actions[0].Reason, "no free rung")
@@ -165,7 +161,7 @@ func TestCursorRotatesAcrossRungs(t *testing.T) {
 
 	seen := map[int]bool{}
 	for range 3 {
-		actions := l.Plan(epoch, desired(), at(7.5), classifier(), rules())
+		actions := l.Plan(epoch, desired(), atDistance(7.5), rules())
 		require.Len(t, actions, 1)
 		seen[actions[0].Slot] = true
 
@@ -184,10 +180,10 @@ func TestLostCommandFreesTheRung(t *testing.T) {
 	l := New(market.Buy, 3)
 	l.OnPlaceSent(0, "a", money.MustParsePrice("100"), money.MustParseQty("1"), epoch)
 
-	require.Empty(t, l.Plan(epoch.Add(time.Second), desired(), at(7.5), classifier(), rules()),
+	require.Empty(t, l.Plan(epoch.Add(time.Second), desired(), atDistance(7.5), rules()),
 		"within the ack timeout the side stays blocked")
 
-	actions := l.Plan(epoch.Add(3*time.Second), desired(), at(7.5), classifier(), rules())
+	actions := l.Plan(epoch.Add(3*time.Second), desired(), atDistance(7.5), rules())
 	require.NotEmpty(t, actions, "after the ack timeout the rung must be reusable")
 	require.Equal(t, Empty, l.Slots[0].Phase)
 }

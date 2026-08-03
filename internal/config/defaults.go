@@ -80,22 +80,35 @@ func defaults() *Config {
 			Enabled:       false,
 			AllocationUSD: 0,
 			Quote: Quote{
-				TargetBps:       7.5,
-				MinKeepBps:      5.0,
-				MaxKeepBps:      9.2,
-				PanicBps:        2.5,
-				PullBps:         1.0,
 				LadderLayers:    3,
 				LadderSpreadBps: 1.0,
 				MinRest:         3200 * time.Millisecond, // ≥3с для зачёта Maker Points
 				RequoteCooldown: 250 * time.Millisecond,
 			},
+			Appetite: Appetite{
+				// Мера риска — максимум скользящего окна, то есть уже оценка
+				// хвоста, а не типичного движения. Множитель поэтому покрывает
+				// только смену режима, а не толщину хвоста: удвоение считало бы
+				// запас дважды и запрещало котировать в обычный будний день.
+				JumpMultiple:   1.25,
+				FloorMarginBps: 1.5,
+				DeadBandJumps:  2.0,
+				MinDeadBandBps: 0.8,
+				MinBps:         5.5,
+				MaxBps:         9.5,
+			},
 			Volatility: Volatility{
-				EWMAHalfLife:  3 * time.Second,
-				WidenSigmaBps: 3.0,
-				PullSigmaBps:  8.0,
-				JumpBps:       4.0,
-				WidenFactorK:  0.8,
+				// Окно в двадцать минут при такте в три секунды даёт до 400
+				// замеров; порог в 40 — это две минуты прогрева, 100 — пять
+				// минут до зрелой оценки.
+				Window:           20 * time.Minute,
+				MinSamples:       40,
+				FullConfidenceAt: 100,
+			},
+			Program: Program{
+				UnitSize:             "0",
+				PerSideCap:           "0",
+				MaxMakerHoursPerHour: 0,
 			},
 			Uptime: Uptime{
 				TargetPct:    80,

@@ -74,21 +74,25 @@ defaults:
   enabled: false
   allocationUsd: 0
   quote:
-    targetBps: 7.5 # где хотим стоять
-    minKeepBps: 5.0 # ближе — перекотировка
-    maxKeepBps: 9.2 # дальше — перекотировка
-    panicBps: 2.5 # cancel-first
-    pullBps: 1.0 # снять сторону целиком
     ladderLayers: 3 # лесенка компенсирует отсутствие amend в API
     ladderSpreadBps: 1.0
     minRest: 3200ms # ≥3с, иначе ордер не засчитывается в Maker Points
     requoteCooldown: 250ms
+  # Дистанции здесь нет: она вычисляется из спреда и измеренного скачка.
+  # Задаётся только готовность рисковать. См. PLAN.md §4.5.
+  appetite:
+    # Мера риска — максимум окна, то есть уже оценка хвоста. Множитель покрывает
+    # только смену режима: при 2.0 бот отказывался котировать BTC днём в будни.
+    jumpMultiple: 1.25
+    floorMarginBps: 1.5 # запас когда скачок обманчиво мал (выходные, короткое окно)
+    deadBandJumps: 2.0 # шире мёртвая зона → реже перестановки, дольше в стакане
+    minDeadBandBps: 0.8
+    minBps: 5.5 # пол: ближе 112% веса, но 4.35 дало fill в live-прогоне
+    maxBps: 9.5 # дальше награда обнуляется
   volatility:
-    ewmaHalfLife: 3s
-    widenSigmaBps: 3.0
-    pullSigmaBps: 8.0
-    jumpBps: 4.0
-    widenFactorK: 0.8
+    window: 20m
+    minSamples: 40 # 2 минуты прогрева до первой котировки
+    fullConfidenceAt: 100 # 5 минут до зрелой оценки
   uptime:
     targetPct: 80 # выше 70% зачёт не растёт, разница — страховой запас
     hardFloorPct: 72
@@ -97,34 +101,45 @@ defaults:
     leverage: 4
     maxNetPositionBase: "0" # 0 — закрывать любую позицию немедленно
 
+# Параметры начисления публикуются StandX и меняются оперативной командой:
+# https://docs.standx.com/docs/standx-perps-solutions/community-maker-yield
 symbols:
-  # Металлы: низкая волатильность и хорошая эффективность капитала.
-  XAG-USD:
-    enabled: true
-    allocationUsd: 40000
-    quote:
-      targetBps: 7.0
-  XAU-USD:
-    enabled: true
-    allocationUsd: 30000
-    quote:
-      targetBps: 7.0
-
-  # Крипта: круглосуточно, без гэпов выходного дня, но подвижнее.
   BTC-USD:
     enabled: true
-    allocationUsd: 30000
-    quote:
-      targetBps: 8.0
+    allocationUsd: 60
+    program: { unitSize: "2", perSideCap: "20", maxMakerHoursPerHour: 10 }
+
   ETH-USD:
     enabled: false
-    allocationUsd: 0
+    program: { unitSize: "60", perSideCap: "600", maxMakerHoursPerHour: 10 }
+  SOL-USD:
+    enabled: false
+    program: { unitSize: "1500", perSideCap: "15000", maxMakerHoursPerHour: 10 }
+  BNB-USD:
+    enabled: false
+    program: { unitSize: "300", perSideCap: "3000", maxMakerHoursPerHour: 10 }
+  HYPE-USD:
+    enabled: false
+    program: { unitSize: "4000", perSideCap: "40000", maxMakerHoursPerHour: 10 }
 
-  # Остальные инструменты программы — включаются по результатам калибровки.
-  SOL-USD: { enabled: false }
-  BNB-USD: { enabled: false }
-  HYPE-USD: { enabled: false }
-  CL-USD: { enabled: false }
-  TSLA-USD: { enabled: false }
-  MU-USD: { enabled: false }
-  SPCX-USD: { enabled: false }
+  # Металлы: спред шире, движение рваное — см. PLAN.md §1.4.
+  XAU-USD:
+    enabled: false
+    program: { unitSize: "30", perSideCap: "60", maxMakerHoursPerHour: 2 }
+  XAG-USD:
+    enabled: false
+    program: { unitSize: "1500", perSideCap: "3000", maxMakerHoursPerHour: 2 }
+  CL-USD:
+    enabled: false
+    program: { unitSize: "1400", perSideCap: "2800", maxMakerHoursPerHour: 2 }
+
+  # Акции: гэпы на открытии и закрытии базового рынка.
+  TSLA-USD:
+    enabled: false
+    program: { unitSize: "400", perSideCap: "800", maxMakerHoursPerHour: 2 }
+  MU-USD:
+    enabled: false
+    program: { unitSize: "200", perSideCap: "400", maxMakerHoursPerHour: 2 }
+  SPCX-USD:
+    enabled: false
+    program: { unitSize: "800", perSideCap: "800", maxMakerHoursPerHour: 1 }

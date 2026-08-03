@@ -159,16 +159,22 @@ func (l *Ladder) PullAll(reason string) []Action {
 	return out
 }
 
+// Classifier выносит решение по живой ступени.
+//
+// Принимает ступень целиком, а не дистанцию, потому что решение зависит
+// от двух опорных цен сразу: официальный mark определяет попадание в полосу
+// награды, оценочный — близость опасности (PLAN.md §4.7). Сводить это
+// к одному числу — значит потерять одну из двух ролей.
+type Classifier func(Slot) policy.Decision
+
 // Plan решает, что делать со стороной прямо сейчас.
 //
-// classify получает дистанцию живой ступени и возвращает решение политики;
 // desired задаёт целевые дистанции ступеней. Возвращается не более одной
 // команды в штатном режиме — кроме случая опасности, где снимается всё сразу.
 func (l *Ladder) Plan(
 	now time.Time,
 	desired []money.Bps,
-	distanceOf func(Slot) money.Bps,
-	classify func(money.Bps) policy.Decision,
+	classify Classifier,
 	rules Rules,
 ) []Action {
 	// Опасность рассматривается первой и по всем ступеням сразу: пока мы
@@ -177,7 +183,7 @@ func (l *Ladder) Plan(
 		if l.Slots[i].Phase != Live {
 			continue
 		}
-		if d := classify(distanceOf(l.Slots[i])); d.Action == policy.Pull {
+		if d := classify(l.Slots[i]); d.Action == policy.Pull {
 			return l.PullAll(d.Reason)
 		}
 	}
@@ -198,15 +204,14 @@ func (l *Ladder) Plan(
 		return nil
 	}
 
-	return l.planOne(now, desired, distanceOf, classify, rules)
+	return l.planOne(now, desired, classify, rules)
 }
 
 // planOne выбирает одну ступень, начиная с позиции курсора.
 func (l *Ladder) planOne(
 	now time.Time,
 	desired []money.Bps,
-	distanceOf func(Slot) money.Bps,
-	classify func(money.Bps) policy.Decision,
+	classify Classifier,
 	rules Rules,
 ) []Action {
 	n := len(l.Slots)
@@ -228,7 +233,7 @@ func (l *Ladder) planOne(
 			}}
 
 		case Live:
-			decision := classify(distanceOf(slot))
+			decision := classify(slot)
 			if decision.Action != policy.Requote {
 				continue
 			}

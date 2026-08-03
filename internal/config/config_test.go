@@ -19,11 +19,13 @@ symbols:
   XAG-USD:
     enabled: true
     allocationUsd: 40000
+    program: { unitSize: "1500", perSideCap: "3000", maxMakerHoursPerHour: 2 }
   BTC-USD:
     enabled: true
     allocationUsd: 30000
-    quote:
-      targetBps: 8.0
+    program: { unitSize: "2", perSideCap: "20", maxMakerHoursPerHour: 10 }
+    appetite:
+      jumpMultiple: 3.0
 `
 
 func writeConfig(t *testing.T, body string) string {
@@ -39,15 +41,15 @@ func TestLoadAppliesDefaultsToSymbols(t *testing.T) {
 
 	// Символ, не переопределивший ничего, получает весь блок defaults.
 	silver := cfg.Symbols["XAG-USD"]
-	require.Equal(t, defaults().Defaults.Quote.TargetBps, silver.Quote.TargetBps)
+	require.Equal(t, defaults().Defaults.Appetite.JumpMultiple, silver.Appetite.JumpMultiple)
 	require.Equal(t, defaults().Defaults.Quote.LadderLayers, silver.Quote.LadderLayers)
 	require.Equal(t, 40000.0, silver.AllocationUSD)
 
 	// Переопределение затрагивает только указанное поле, остальные наследуются.
 	btc := cfg.Symbols["BTC-USD"]
-	require.EqualValues(t, 8.0, btc.Quote.TargetBps)
-	require.Equal(t, defaults().Defaults.Quote.MinKeepBps, btc.Quote.MinKeepBps)
-	require.Equal(t, defaults().Defaults.Volatility.PullSigmaBps, btc.Volatility.PullSigmaBps)
+	require.EqualValues(t, 3.0, btc.Appetite.JumpMultiple)
+	require.Equal(t, defaults().Defaults.Appetite.MinBps, btc.Appetite.MinBps)
+	require.Equal(t, defaults().Defaults.Volatility.MinSamples, btc.Volatility.MinSamples)
 }
 
 func TestEnabledSymbols(t *testing.T) {
@@ -134,20 +136,33 @@ symbols:
 	require.Contains(t, err.Error(), "STANDX_WALLET_PK")
 }
 
-func TestValidationRejectsMisorderedThresholds(t *testing.T) {
-	// minKeepBps выше targetBps: ордер выставлялся бы сразу в зоне перекотировки
-	// и переставлялся бы бесконечно.
+// Границы должны оставлять правилу вычисления дистанции место для манёвра.
+func TestValidationRejectsMisorderedBounds(t *testing.T) {
 	_, err := Load(writeConfig(t, `
 symbols:
   BTC-USD:
     enabled: true
     allocationUsd: 1000
-    quote:
-      minKeepBps: 9.0
-      targetBps: 7.5
+    program: { unitSize: "2", perSideCap: "20", maxMakerHoursPerHour: 10 }
+    appetite:
+      minBps: 9.0
+      maxBps: 4.0
 `))
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "minKeepBps < targetBps")
+	require.Contains(t, err.Error(), "minBps < maxBps")
+}
+
+// Параметры начисления публикуются биржей и не имеют разумных умолчаний:
+// включённый символ без них считал бы награду по нулевой единице.
+func TestEnabledSymbolRequiresProgrammeParameters(t *testing.T) {
+	_, err := Load(writeConfig(t, `
+symbols:
+  BTC-USD:
+    enabled: true
+    allocationUsd: 1000
+`))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unitSize")
 }
 
 func TestValidationRejectsQuotesOutsideRewardBand(t *testing.T) {
@@ -156,27 +171,25 @@ symbols:
   BTC-USD:
     enabled: true
     allocationUsd: 1000
-    quote:
-      maxKeepBps: 12.0
+    program: { unitSize: "2", perSideCap: "20", maxMakerHoursPerHour: 10 }
+    appetite:
+      maxBps: 12.0
 `))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "bandBps")
 }
 
-// Лесенка центрирована вокруг targetBps и обязана помещаться в удерживаемый
-// диапазон: иначе крайние ступени сразу оказываются в зоне перекотировки.
-func TestValidationRejectsLadderOutsideKeepRange(t *testing.T) {
-	_, err := Load(writeConfig(t, `
-symbols:
-  BTC-USD:
-    enabled: true
-    allocationUsd: 1000
-    quote:
-      ladderLayers: 5
-      ladderSpreadBps: 2.0
+// Зрелость оценки не может наступать раньше готовности: иначе поправка
+// на незрелость никогда не применяется.
+func TestValidationRejectsInvertedConfidenceThresholds(t *testing.T) {
+	_, err := Load(writeConfig(t, minimalConfig+`
+defaults:
+  volatility:
+    minSamples: 200
+    fullConfidenceAt: 50
 `))
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "ladder")
+	require.Contains(t, err.Error(), "fullConfidenceAt")
 }
 
 func TestValidationRejectsEnabledSymbolWithoutAllocation(t *testing.T) {

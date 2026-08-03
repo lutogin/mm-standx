@@ -71,6 +71,20 @@ type BalanceUpdated struct {
 
 func (BalanceUpdated) EventName() string { return "account.balance_updated" }
 
+// OpenOrdersSnapshot — полный список висящих ордеров по инструменту,
+// прочитанный запросом.
+//
+// Единственный способ обнаружить расхождение локального состояния
+// с действительностью. Потоковые события можно пропустить, ответ на запрос —
+// нет, поэтому снимок и служит опорой сверки.
+type OpenOrdersSnapshot struct {
+	Symbol market.Symbol
+	Orders []trading.Order
+	At     time.Time
+}
+
+func (OpenOrdersSnapshot) EventName() string { return "account.open_orders_snapshot" }
+
 // TradeExecuted — наше исполнение с известной комиссией.
 type TradeExecuted struct {
 	Trade trading.Trade
