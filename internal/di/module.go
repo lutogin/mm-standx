@@ -20,12 +20,14 @@ import (
 
 	"github.com/nd/mm-standx/internal/adapters/clock"
 	"github.com/nd/mm-standx/internal/adapters/dryrun"
+	"github.com/nd/mm-standx/internal/adapters/metrics"
 	"github.com/nd/mm-standx/internal/adapters/ratelimit"
 	"github.com/nd/mm-standx/internal/adapters/recorder"
 	"github.com/nd/mm-standx/internal/adapters/standx/auth"
 	"github.com/nd/mm-standx/internal/adapters/standx/gateway"
 	"github.com/nd/mm-standx/internal/adapters/standx/rest"
 	"github.com/nd/mm-standx/internal/adapters/standx/wsapi"
+	"github.com/nd/mm-standx/internal/adapters/store"
 	"github.com/nd/mm-standx/internal/config"
 	"github.com/nd/mm-standx/internal/events"
 	"github.com/nd/mm-standx/internal/ports"
@@ -47,6 +49,8 @@ var Core = fx.Module("core",
 		provideHTTPClient,
 		provideSessionID,
 		provideRecorder,
+		provideMetrics,
+		provideStateStore,
 	),
 	fx.WithLogger(provideFxLogger),
 )
@@ -72,6 +76,7 @@ var StandX = fx.Module("standx",
 		provideTokenProvider,
 		provideBodySigner,
 		provideRESTClient,
+		provideDryRunGateway,
 		provideExchangeReader,
 		provideWSAPIClient,
 		provideOrderGateway,
@@ -156,6 +161,25 @@ func provideRecorder(cfg *config.Config, clk ports.Clock, lc fx.Lifecycle) (port
 	return rec, nil
 }
 
+// provideMetrics создаёт реестр показателей.
+//
+// Реестр существует всегда, даже когда сервер метрик выключен: акторы пишут
+// в него из горячего пути, и подменять реализацию по признаку «настроен ли
+// адрес» значило бы получить два разных пути исполнения там, где нужен один.
+func provideMetrics() (*metrics.Prometheus, ports.Metrics) {
+	p := metrics.New()
+	return p, p
+}
+
+// provideStateStore открывает хранилище снимков защитного контура.
+func provideStateStore(cfg *config.Config, log *slog.Logger) (ports.StateStore, error) {
+	if cfg.Runtime.StateDir == "" {
+		log.Warn("runtime.stateDir is empty: risk counters will not survive a restart")
+		return nil, nil
+	}
+	return store.NewFile(cfg.Runtime.StateDir)
+}
+
 // provideWallet возвращает nil, если приватный ключ не задан.
 //
 // Это штатный режим наблюдения: публичные потоки работают без учётных данных,
@@ -227,7 +251,23 @@ func provideRESTClient(
 	return rest.New(cfg.Exchange, httpClient, tokens, signer, limiter, clk, string(sessionID), log)
 }
 
-func provideExchangeReader(c *rest.Client) ports.ExchangeReader { return c }
+// provideDryRunGateway создаёт заглушку торгового шлюза вне боевого режима.
+//
+// Возвращается конкретным типом, а не интерфейсом: её же список ордеров нужен
+// сверке, чтобы теневая лесенка сверялась сама с собой, а не с пустой биржей.
+func provideDryRunGateway(cfg *config.Config, bus *events.Bus, clk ports.Clock, log *slog.Logger) *dryrun.Gateway {
+	if cfg.IsLive() {
+		return nil
+	}
+	return dryrun.New(log, bus, clk)
+}
+
+func provideExchangeReader(c *rest.Client, dry *dryrun.Gateway) ports.ExchangeReader {
+	if dry == nil {
+		return c
+	}
+	return dryrun.NewReader(c, dry)
+}
 
 // provideWSAPIClient создаёт торговый WebSocket-канал.
 //
@@ -257,14 +297,13 @@ func provideWSAPIClient(
 // в каком-нибудь новом месте невозможно.
 func provideOrderGateway(
 	cfg *config.Config,
+	dry *dryrun.Gateway,
 	ws *wsapi.Client,
 	c *rest.Client,
-	bus *events.Bus,
-	clk ports.Clock,
 	log *slog.Logger,
 ) ports.OrderGateway {
-	if !cfg.IsLive() {
-		return dryrun.New(log, bus, clk)
+	if dry != nil {
+		return dry
 	}
 	log.Warn("live mode: orders will be sent to the exchange")
 

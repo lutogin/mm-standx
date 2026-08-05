@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,6 +16,10 @@ import (
 const minimalConfig = `
 runtime:
   mode: dry_run
+risk:
+  # 70k выделенных средств при плече 4 дают 280k нотионала — общий лимит
+  # обязан их вмещать, иначе конфигурация отвергается на старте.
+  maxNotionalUsd: 300000
 symbols:
   XAG-USD:
     enabled: true
@@ -233,4 +238,98 @@ symbols:
 func TestMissingFileIsReported(t *testing.T) {
 	_, err := Load(filepath.Join(t.TempDir(), "absent.yaml"))
 	require.Error(t, err)
+}
+
+// The aggregate notional limit is a config-time invariant, not a runtime one:
+// allocations are static, so the ceiling is known before the first order. There
+// is no point discovering a known-in-advance mistake once money is in the market.
+func TestAggregateNotionalMustFitTheRiskLimit(t *testing.T) {
+	_, err := Load(writeConfig(t, `
+runtime:
+  mode: dry_run
+risk:
+  maxNotionalUsd: 1000
+symbols:
+  BTC-USD:
+    enabled: true
+    allocationUsd: 500
+    program: { unitSize: "2", perSideCap: "20", maxMakerHoursPerHour: 10 }
+`))
+	require.ErrorContains(t, err, "risk.maxNotionalUsd")
+	require.ErrorContains(t, err, "2000 USD of notional")
+}
+
+// Without persisted state the daily loss counter resets on every restart, and
+// the cycle of tripping and restarting drains the deposit in instalments. That
+// is tolerable while shadowing and not tolerable live.
+func TestLiveModeRequiresPersistedRiskState(t *testing.T) {
+	t.Setenv("STANDX_WALLET_PK", "0x01")
+
+	body := `
+runtime:
+  mode: live
+  stateDir: ""
+symbols:
+  BTC-USD:
+    enabled: true
+    allocationUsd: 60
+    program: { unitSize: "2", perSideCap: "20", maxMakerHoursPerHour: 10 }
+`
+	_, err := Load(writeConfig(t, body))
+	require.ErrorContains(t, err, "runtime.stateDir is required in live mode")
+
+	_, err = Load(writeConfig(t, strings.Replace(body, `stateDir: ""`, `stateDir: data/state`, 1)))
+	require.NoError(t, err)
+}
+
+// Memory shorter than the observation window could never bind the estimate: it
+// would fade before the window forgot the same jump.
+func TestMemoryHalfLifeMustOutliveTheWindow(t *testing.T) {
+	_, err := Load(writeConfig(t, minimalConfig+`
+defaults:
+  volatility:
+    window: 20m
+    memoryHalfLife: 5m
+`))
+	require.ErrorContains(t, err, "can never bind the estimate")
+}
+
+// One file ships to the server; what to trade is decided at launch. The list
+// only selects among instruments described in the file — programme parameters
+// and allocation are published by the exchange and chosen deliberately, not
+// set by an environment variable.
+func TestRuntimeSymbolsSelectsWhatToTrade(t *testing.T) {
+	t.Setenv("MMSTANDX_RUNTIME_SYMBOLS", "BTC-USD")
+
+	cfg, err := Load(writeConfig(t, minimalConfig))
+	require.NoError(t, err)
+
+	enabled := cfg.EnabledSymbols()
+	require.Len(t, enabled, 1)
+	require.Contains(t, enabled, market.Symbol("BTC-USD"))
+	require.NotContains(t, enabled, market.Symbol("XAG-USD"),
+		"the selection overrides enabled: true from the file")
+}
+
+// A typo must not start a bot with no instruments at all: silence is the one
+// failure mode that looks exactly like working correctly.
+func TestUnknownSymbolInSelectionIsRejected(t *testing.T) {
+	t.Setenv("MMSTANDX_RUNTIME_SYMBOLS", "XAU-USB")
+
+	_, err := Load(writeConfig(t, minimalConfig))
+	require.ErrorContains(t, err, "XAU-USB")
+	require.ErrorContains(t, err, "known:")
+}
+
+// Selecting an instrument the file left disabled is the point of the knob, but
+// it still has to be configured well enough to trade.
+func TestSelectionStillRequiresValidSymbolConfig(t *testing.T) {
+	body := minimalConfig + `
+  ETH-USD:
+    enabled: false
+    program: { unitSize: "60", perSideCap: "600", maxMakerHoursPerHour: 10 }
+`
+	t.Setenv("MMSTANDX_RUNTIME_SYMBOLS", "ETH-USD")
+	_, err := Load(writeConfig(t, body))
+	require.ErrorContains(t, err, "allocationUsd")
 }

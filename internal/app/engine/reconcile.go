@@ -33,6 +33,11 @@ func (e *Engine) reconcile(ctx context.Context, snapshot events.OpenOrdersSnapsh
 		onExchange[order.ClOrdID] = order
 	}
 
+	// Очередь повторного съёма чистится по ответу биржи, а не по нашим
+	// ожиданиям: команда могла дойти, а подтверждение — потеряться. Без этого
+	// повторы уходили бы в пустоту, расходуя бюджет запросов.
+	e.pruneWithdrawals(onExchange)
+
 	known := make(map[trading.ClOrdID]bool)
 	for _, ladder := range []*quotes.Ladder{e.bids, e.asks} {
 		for i := range ladder.Slots {
@@ -45,6 +50,15 @@ func (e *Engine) reconcile(ctx context.Context, snapshot events.OpenOrdersSnapsh
 			// Ступень, отправленная в полёт, ещё не обязана быть видна бирже:
 			// подтверждение занимает около 400 мс, и торопить его нельзя.
 			if slot.Phase != quotes.Live {
+				continue
+			}
+			// Ордер, появившийся после снятия снимка, не мог в него попасть.
+			// Без этой проверки сверка объявляет его призраком и освобождает
+			// ступень — а ордер продолжает стоять в стакане, и следующее
+			// размещение даёт вторую котировку вместо одной. Снимок читается
+			// не мгновенно: между чтением у биржи и разбором в акторе проходит
+			// и сеть, и очередь событий.
+			if slot.Since.After(snapshot.At) {
 				continue
 			}
 			if _, present := onExchange[slot.ClOrdID]; !present {
@@ -75,5 +89,21 @@ func (e *Engine) reconcile(ctx context.Context, snapshot events.OpenOrdersSnapsh
 
 	if err := e.deps.Gateway.CancelBatch(ctx, orphans, ports.PrioritySafety); err != nil {
 		e.deps.Log.Error("failed to cancel orphan orders", "symbol", e.symbol, "error", err)
+		e.deps.Metrics.OrderFailed(e.symbol, "cancel_batch")
 	}
+}
+
+// pruneWithdrawals оставляет в очереди повтора только то, что биржа
+// действительно всё ещё держит в стакане.
+func (e *Engine) pruneWithdrawals(onExchange map[trading.ClOrdID]trading.Order) {
+	if len(e.pendingWithdraw) == 0 {
+		return
+	}
+	var settled []trading.ClOrdID
+	for _, id := range e.pendingWithdraw {
+		if _, present := onExchange[id]; !present {
+			settled = append(settled, id)
+		}
+	}
+	e.forgetWithdrawal(settled)
 }

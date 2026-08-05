@@ -22,6 +22,9 @@ func defaults() *Config {
 			RecordingDir:  "recordings",
 			StatsInterval: 30 * time.Second,
 			SessionPath:   "data/session.json",
+			StateDir:      "data/state",
+			StatsDir:      "data/stats",
+			StatsSample:   15 * time.Second,
 		},
 		Exchange: Exchange{
 			AuthBaseURL:      "https://api.standx.com",
@@ -63,6 +66,8 @@ func defaults() *Config {
 			FlattenDebounce:      150 * time.Millisecond,
 			PostFillCooldown:     3 * time.Second,
 			KillSwitchOnDrawdown: true,
+			// Ставки одинаковы для всех рынков StandX, см. PLAN.md §1.3.
+			Fees: Fees{MakerBps: 1, TakerBps: 4},
 		},
 		Health: Health{
 			// Канал price обновляется заметно реже стакана: на живом рынке
@@ -71,7 +76,6 @@ func defaults() *Config {
 			// поэтому берём запас на три пропущенных обновления.
 			// Значение уточняется по длительной записи, см. PLAN.md §12.9.
 			MarkStale:         10 * time.Second,
-			DisconnectPull:    1500 * time.Millisecond,
 			ReconcileInterval: 5 * time.Second,
 			AckTimeout:        2 * time.Second,
 			HeartbeatInterval: time.Second,
@@ -104,6 +108,11 @@ func defaults() *Config {
 				Window:           20 * time.Minute,
 				MinSamples:       40,
 				FullConfidenceAt: 100,
+				// Полураспад в шесть часов переносит вечернюю волатильность
+				// через ночь и пятничную — через выходные, оставляя от неё
+				// к понедельнику около одной восьмой. Спокойный рынок при этом
+				// всё равно позволяет подойти ближе, только не за один час.
+				MemoryHalfLife: 6 * time.Hour,
 			},
 			Program: Program{
 				UnitSize:             "0",

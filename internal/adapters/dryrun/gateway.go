@@ -4,7 +4,9 @@ package dryrun
 import (
 	"context"
 	"log/slog"
+	"sync"
 
+	"github.com/nd/mm-standx/internal/domain/market"
 	"github.com/nd/mm-standx/internal/domain/trading"
 	"github.com/nd/mm-standx/internal/events"
 	"github.com/nd/mm-standx/internal/ports"
@@ -25,6 +27,9 @@ type Gateway struct {
 	bus   *events.Bus
 	clock ports.Clock
 
+	// mu защищает live: акторов столько же, сколько инструментов, и сверка
+	// читает список из своей горутины. На бирже эту роль играет сама биржа.
+	mu sync.Mutex
 	// live хранит выставленные ордера, чтобы отмена относилась к чему-то
 	// существующему, как и на бирже.
 	live map[trading.ClOrdID]trading.Order
@@ -72,7 +77,10 @@ func (g *Gateway) Place(ctx context.Context, req ports.PlaceRequest) error {
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
+	g.mu.Lock()
 	g.live[req.ClOrdID] = order
+	g.mu.Unlock()
+
 	events.Publish(g.bus, ctx, events.OrderUpdated{Order: order})
 	return nil
 }
@@ -92,15 +100,36 @@ func (g *Gateway) CancelBatch(ctx context.Context, ids []trading.ClOrdID, p port
 }
 
 func (g *Gateway) confirmCancel(ctx context.Context, id trading.ClOrdID) {
+	g.mu.Lock()
 	order, ok := g.live[id]
+	delete(g.live, id)
+	g.mu.Unlock()
+
 	if !ok {
 		return
 	}
-	delete(g.live, id)
-
 	order.Status = trading.StatusCanceled
 	order.UpdatedAt = g.clock.Now()
 	events.Publish(g.bus, ctx, events.OrderUpdated{Order: order})
+}
+
+// OpenOrders возвращает ордера, которые заглушка считает стоящими в стакане.
+//
+// Без этого метода сверка сравнивала бы теневую лесенку с настоящей биржей,
+// где никаких наших ордеров нет по определению. Каждая ступень оказывалась бы
+// призрачной, освобождалась и выставлялась заново — теневой прогон мерил бы
+// частоту собственной ошибки вместо поведения стратегии.
+func (g *Gateway) OpenOrders(symbol market.Symbol) []trading.Order {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	out := make([]trading.Order, 0, len(g.live))
+	for _, order := range g.live {
+		if order.Symbol == symbol {
+			out = append(out, order)
+		}
+	}
+	return out
 }
 
 var _ ports.OrderGateway = (*Gateway)(nil)

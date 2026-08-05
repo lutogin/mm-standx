@@ -121,6 +121,13 @@ func (p *Poller) poll(parent context.Context) {
 
 // pollOrders публикует снимок висящих ордеров для сверки.
 func (p *Poller) pollOrders(ctx context.Context, symbol market.Symbol) {
+	// Отметка ставится до запроса, а не после. Ответ описывает состояние
+	// не позднее момента отправки, и сверка по этой отметке решает, мог ли
+	// ордер вообще попасть в снимок. Отметка после ответа была бы позже
+	// истины на время оборота сети, и ордер, выставленный в этот промежуток,
+	// ошибочно считался бы призраком.
+	at := p.clock.Now()
+
 	orders, err := p.reader.OpenOrders(ctx, symbol)
 	if err != nil {
 		p.log.Warn("failed to read open orders", "symbol", symbol, "error", err)
@@ -129,7 +136,7 @@ func (p *Poller) pollOrders(ctx context.Context, symbol market.Symbol) {
 	events.Publish(p.bus, ctx, events.OpenOrdersSnapshot{
 		Symbol: symbol,
 		Orders: orders,
-		At:     p.clock.Now(),
+		At:     at,
 	})
 }
 

@@ -186,3 +186,33 @@ func TestSideOpposite(t *testing.T) {
 	require.True(t, Buy.Valid())
 	require.False(t, Side("long").Valid())
 }
+
+// Spread only describes the top of the book. A book that is tight at the touch
+// but empty behind it lets a small market order run several basis points deep
+// and reach a quote that looked protected by the spread alone.
+func TestDepthNotionalCountsOnlyWhatIsInsideTheBand(t *testing.T) {
+	mid := money.MustParsePrice("100")
+	level := func(p, q string) Level {
+		return Level{Price: money.MustParsePrice(p), Qty: money.MustParseQty(q)}
+	}
+	book := NewBook("X-USD",
+		[]Level{level("99.99", "1"), level("99.95", "2"), level("99.80", "100")},
+		[]Level{level("100.01", "1"), level("100.05", "2"), level("100.20", "100")},
+		time.Time{})
+
+	// Ten basis points either side: the third level sits at 20 bps and is out.
+	bid, _ := book.DepthNotional(mid, Buy, 10).Float64()
+	ask, _ := book.DepthNotional(mid, Sell, 10).Float64()
+
+	require.InDelta(t, 99.99*1+99.95*2, bid, 0.01)
+	require.InDelta(t, 100.01*1+100.05*2, ask, 0.01)
+}
+
+func TestDepthNotionalIsZeroWithoutAReference(t *testing.T) {
+	book := NewBook("X-USD",
+		[]Level{{Price: money.MustParsePrice("99"), Qty: money.MustParseQty("1")}},
+		nil, time.Time{})
+
+	require.True(t, book.DepthNotional(money.Price{}, Buy, 10).IsZero())
+	require.True(t, book.DepthNotional(money.MustParsePrice("100"), Buy, 0).IsZero())
+}

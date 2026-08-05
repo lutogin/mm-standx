@@ -10,6 +10,7 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/nd/mm-standx/internal/adapters/wsconn"
 	"github.com/nd/mm-standx/internal/config"
@@ -45,6 +46,7 @@ func New(
 		subs:     subs,
 		tokens:   tokens,
 		bus:      bus,
+		clock:    clock,
 		recorder: recorder,
 		log:      log.With("component", "wsstream", "stream", name),
 	}
@@ -56,6 +58,7 @@ type handler struct {
 	name     string
 	subs     []Subscription
 	tokens   ports.TokenProvider
+	clock    ports.Clock
 	bus      *events.Bus
 	recorder ports.Recorder
 	log      *slog.Logger
@@ -97,15 +100,33 @@ func (h *handler) OnConnect(ctx context.Context, s wsconn.Sender) error {
 		}
 	}
 
-	for _, sub := range public {
+	for i, sub := range public {
+		// Подписки разносятся во времени. Найдено измерением: одиннадцать
+		// инструментов дают двадцать два кадра подряд, и последний из них
+		// биржа молча теряла — XAU-USD не присылал ни одного сообщения,
+		// оставаясь при этом в списке инструментов биржи. Отказа в ответ
+		// не приходит, поэтому единственная защита — не упираться в предел.
+		if i > 0 {
+			if err := h.clock.Sleep(ctx, subscribePacing); err != nil {
+				return err
+			}
+		}
 		if err := s.SendJSON(ctx, map[string]any{
 			"subscribe": map[string]string{"channel": sub.Channel, "symbol": sub.Symbol.String()},
 		}); err != nil {
 			return err
 		}
 	}
+	h.log.Info("subscribed", "channels", len(public)+len(user))
 	return nil
 }
+
+// subscribePacing — пауза между кадрами подписки.
+//
+// Десять в секунду при биржевом пределе около двадцати двух: запас двукратный,
+// а вся подписка на одиннадцать инструментов занимает пару секунд, что рядом
+// с многоминутным прогревом оценки риска незаметно.
+const subscribePacing = 100 * time.Millisecond
 
 // OnDisconnect сбрасывает счётчик сообщений: нумерация начинается заново
 // на каждом новом сокете.

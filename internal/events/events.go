@@ -3,7 +3,10 @@ package events
 import (
 	"time"
 
+	"github.com/shopspring/decimal"
+
 	"github.com/nd/mm-standx/internal/domain/market"
+	"github.com/nd/mm-standx/internal/domain/money"
 	"github.com/nd/mm-standx/internal/domain/trading"
 )
 
@@ -84,6 +87,29 @@ type OpenOrdersSnapshot struct {
 }
 
 func (OpenOrdersSnapshot) EventName() string { return "account.open_orders_snapshot" }
+
+// QuoteFilled — рынок достал нашу котировку.
+//
+// Отличается от OrderUpdated тем, что несёт истолкование факта, а не сам факт:
+// актор уже знает, начинает ли это исполнение новую серию, и во что оно
+// обойдётся при закрытии по рынку. Восстанавливать это в защитном контуре
+// заново значило бы держать вторую копию состояния лесенки.
+type QuoteFilled struct {
+	Symbol market.Symbol
+	Side   market.Side
+	Qty    money.Qty
+	Price  money.Price
+	// NotionalUSD — объём исполнения в долларах.
+	NotionalUSD decimal.Decimal
+	// EstimatedCostUSD — оценка стоимости: тейкерская комиссия за закрытие,
+	// мейкерская за само исполнение и половина спреда как проскальзывание.
+	EstimatedCostUSD decimal.Decimal
+	// StartsEpisode отличает первое исполнение серии от продолжения.
+	StartsEpisode bool
+	At            time.Time
+}
+
+func (QuoteFilled) EventName() string { return "account.quote_filled" }
 
 // TradeExecuted — наше исполнение с известной комиссией.
 type TradeExecuted struct {

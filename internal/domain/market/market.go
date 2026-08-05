@@ -173,3 +173,36 @@ func (b Book) WouldCross(side Side, price money.Price) bool {
 	bid, ok := b.BestBid()
 	return ok && price.Lte(bid)
 }
+
+// DepthNotional возвращает нотионал, стоящий на стороне side в пределах
+// within базисных пунктов от опорной цены.
+//
+// Меряет то, чего не видно по спреду: сколько рынку придётся выкупить, прежде
+// чем он дойдёт до нашей котировки. Узкий спред при пустом стакане за вершиной
+// опаснее широкого при плотном — небольшой рыночный ордер проходит сквозь
+// разреженные уровни на несколько базисных пунктов и достаёт котировку,
+// которая по спреду выглядела защищённой.
+func (b Book) DepthNotional(ref money.Price, side Side, within money.Bps) decimal.Decimal {
+	total := decimal.Zero
+	if !ref.IsPositive() || within <= 0 {
+		return total
+	}
+
+	levels, bound := b.Bids, ref.MulRatio(decimal.NewFromInt(1).Sub(within.Ratio()))
+	if side == Sell {
+		levels, bound = b.Asks, ref.MulRatio(decimal.NewFromInt(1).Add(within.Ratio()))
+	}
+
+	for _, l := range levels {
+		// Уровни отсортированы от вершины наружу, поэтому первый вышедший
+		// за границу завершает обход.
+		if side == Buy && l.Price.Lt(bound) {
+			break
+		}
+		if side == Sell && l.Price.Gt(bound) {
+			break
+		}
+		total = total.Add(l.Price.Decimal().Mul(l.Qty.Decimal()))
+	}
+	return total
+}

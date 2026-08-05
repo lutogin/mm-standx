@@ -1,0 +1,16 @@
+# Контекст сборки должен содержать только исходники: recordings и logs
+# исчисляются сотнями мегабайт, а data и .env содержат ключи и состояние.
+.git
+.env
+.env.*
+!.env.example
+data/
+logs/
+recordings/
+bin/
+docs/
+graphify-out/
+*.ndjson
+*.log
+coverage.*
+docs/

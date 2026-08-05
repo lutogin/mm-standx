@@ -37,8 +37,39 @@ func (c *Config) Validate() error {
 	if enabled == 0 && c.IsLive() {
 		errs = append(errs, errors.New("runtime.mode=live but no symbol is enabled"))
 	}
+	errs = append(errs, c.validateExposure()...)
+
+	if c.IsLive() && c.Runtime.StateDir == "" {
+		errs = append(errs, errors.New(
+			"runtime.stateDir is required in live mode: without it the daily loss counter "+
+				"resets on every restart and the kill switch protects nothing"))
+	}
 
 	return errors.Join(errs...)
+}
+
+// validateExposure сверяет суммарную аллокацию с общим лимитом нотионала.
+//
+// Проверка живёт на старте, а не в горячем пути, потому что аллокация статична:
+// каждый актор ограничен своим allocationUsd, поэтому потолок суммы определяется
+// конфигурацией целиком и известен до первого ордера. Ловить превышение
+// во время торговли значило бы обнаруживать заведомо известную ошибку тогда,
+// когда деньги уже в рынке.
+func (c *Config) validateExposure() []error {
+	total := 0.0
+	for _, sym := range c.Symbols {
+		if !sym.Enabled {
+			continue
+		}
+		leverage := max(sym.SymbolRisk.Leverage, 1)
+		total += sym.AllocationUSD * float64(leverage)
+	}
+	if c.Risk.MaxNotionalUSD > 0 && total > c.Risk.MaxNotionalUSD {
+		return []error{fmt.Errorf(
+			"enabled symbols allow up to %.0f USD of notional (allocation × leverage) "+
+				"but risk.maxNotionalUsd is %.0f", total, c.Risk.MaxNotionalUSD)}
+	}
+	return nil
 }
 
 func (r Runtime) validate() []error {
@@ -56,6 +87,13 @@ func (r Runtime) validate() []error {
 	}
 	if r.StatsInterval <= 0 {
 		errs = append(errs, errors.New("runtime.statsInterval must be positive"))
+	}
+	// Свёртка часовая, поэтому шаг съёма обязан укладываться в час
+	// достаточное число раз, чтобы квантили имели смысл.
+	if r.StatsDir != "" && (r.StatsSample <= 0 || r.StatsSample > 5*time.Minute) {
+		errs = append(errs, fmt.Errorf(
+			"runtime.statsSample (%s) must be within (0, 5m] for hourly quantiles to mean anything",
+			r.StatsSample))
 	}
 	return errs
 }
@@ -179,6 +217,13 @@ func (r Risk) validate() []error {
 	if r.FlattenDebounce < 0 {
 		errs = append(errs, errors.New("risk.flattenDebounce must not be negative"))
 	}
+	// Комиссии входят в независимую оценку стоимости залива. Ноль отключил бы
+	// её молча, и защита осталась бы зависеть от одного непроверенного канала.
+	if r.Fees.MakerBps < 0 || r.Fees.TakerBps <= 0 {
+		errs = append(errs, fmt.Errorf(
+			"risk.fees: makerBps must not be negative and takerBps must be positive, got %s and %s",
+			r.Fees.MakerBps, r.Fees.TakerBps))
+	}
 	return errs
 }
 
@@ -186,7 +231,6 @@ func (h Health) validate() []error {
 	var errs []error
 	for name, d := range map[string]int64{
 		"health.markStale":         int64(h.MarkStale),
-		"health.disconnectPull":    int64(h.DisconnectPull),
 		"health.reconcileInterval": int64(h.ReconcileInterval),
 		"health.ackTimeout":        int64(h.AckTimeout),
 		"health.heartbeatInterval": int64(h.HeartbeatInterval),
@@ -315,6 +359,16 @@ func (v Volatility) validate(prefix string) []error {
 	if v.FullConfidenceAt < v.MinSamples {
 		errs = append(errs, fmt.Errorf("%s: require minSamples <= fullConfidenceAt, got %d > %d",
 			prefix, v.MinSamples, v.FullConfidenceAt))
+	}
+	if v.MemoryHalfLife < 0 {
+		errs = append(errs, fmt.Errorf("%s.memoryHalfLife must not be negative", prefix))
+	}
+	// Память короче окна бессмысленна: она затухла бы раньше, чем окно успело
+	// забыть тот же скачок, и нижней границей никогда бы не стала.
+	if v.MemoryHalfLife > 0 && v.MemoryHalfLife < v.Window {
+		errs = append(errs, fmt.Errorf(
+			"%s: memoryHalfLife (%s) shorter than window (%s) can never bind the estimate",
+			prefix, v.MemoryHalfLife, v.Window))
 	}
 	return errs
 }

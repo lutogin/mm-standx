@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sort"
+	"strings"
 	"syscall"
 	"time"
 
@@ -32,10 +34,51 @@ func main() {
 		os.Exit(1)
 	}
 
+	announce(cfg)
+
 	if err := run(cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// announce печатает, что именно сейчас будет запущено, до всякой инициализации.
+//
+// Единственная защита от запуска не того, что ожидалось, — увидеть это раньше,
+// чем уйдёт первый ордер. Технической защиты здесь быть не может: режим берётся
+// из файла, а любой второй признак пришлось бы держать в том же файле и он
+// залипал бы после первого боевого запуска.
+//
+// Поэтому сводка идёт в stderr отдельным блоком, а не строкой лога: она обязана
+// быть видна и когда логи в JSON, и когда их перехватывает docker, и когда
+// человек запускает бот вручную и смотрит в терминал.
+func announce(cfg *config.Config) {
+	symbols := make([]string, 0, len(cfg.Symbols))
+	total := 0.0
+	for name, sym := range cfg.Symbols {
+		if sym.Enabled {
+			symbols = append(symbols, fmt.Sprintf("%s (%.0f USD × %d)",
+				name, sym.AllocationUSD, sym.SymbolRisk.Leverage))
+			total += sym.AllocationUSD * float64(sym.SymbolRisk.Leverage)
+		}
+	}
+	sort.Strings(symbols)
+
+	banner := "DRY RUN — заявки на биржу не уходят"
+	if cfg.IsLive() {
+		banner = "LIVE — заявки уходят на биржу реальными деньгами"
+	}
+
+	fmt.Fprintf(os.Stderr, `
+┌─────────────────────────────────────────────────────────────
+│ %s
+│ инструменты:   %s
+│ нотионал до:   %.0f USD
+│ дневной убыток: стоп на %.0f USD, заливов в час не более %d
+└─────────────────────────────────────────────────────────────
+
+`, banner, strings.Join(symbols, ", "), total,
+		cfg.Risk.MaxDailyLossUSD, cfg.Risk.MaxFillsPerHour)
 }
 
 func run(cfg *config.Config) error {

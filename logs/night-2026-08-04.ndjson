@@ -1,0 +1,97 @@
+[Fx] PROVIDE	fx.Lifecycle <= go.uber.org/fx.New.func1()
+[Fx] PROVIDE	fx.Shutdowner <= go.uber.org/fx.(*App).shutdowner-fm()
+[Fx] PROVIDE	fx.DotGraph <= go.uber.org/fx.(*App).dotGraph-fm()
+[Fx] SUPPLY	*config.Config
+[Fx] PROVIDE	*auth.Wallet <= github.com/nd/mm-standx/internal/di.provideWallet() from module "standx"
+[Fx] PROVIDE	auth.SessionStore <= github.com/nd/mm-standx/internal/di.provideSessionStore() from module "standx"
+[Fx] PROVIDE	*auth.Session <= github.com/nd/mm-standx/internal/di.provideSession() from module "standx"
+[Fx] PROVIDE	ports.TokenProvider <= github.com/nd/mm-standx/internal/di.provideTokenProvider() from module "standx"
+[Fx] PROVIDE	ports.BodySigner <= github.com/nd/mm-standx/internal/di.provideBodySigner() from module "standx"
+[Fx] PROVIDE	*rest.Client <= github.com/nd/mm-standx/internal/di.provideRESTClient() from module "standx"
+[Fx] PROVIDE	*dryrun.Gateway <= github.com/nd/mm-standx/internal/di.provideDryRunGateway() from module "standx"
+[Fx] PROVIDE	ports.ExchangeReader <= github.com/nd/mm-standx/internal/di.provideExchangeReader() from module "standx"
+[Fx] PROVIDE	*wsapi.Client <= github.com/nd/mm-standx/internal/di.provideWSAPIClient() from module "standx"
+[Fx] PROVIDE	ports.OrderGateway <= github.com/nd/mm-standx/internal/di.provideOrderGateway() from module "standx"
+[Fx] PROVIDE	ports.Runnable[group = "runnables"] <= fx.Annotate(github.com/nd/mm-standx/internal/di.provideStreams(), fx.ResultTags(["group:\"runnables,flatten\""]) from module "runtime"
+[Fx] PROVIDE	ports.Runnable[group = "runnables"] <= fx.Annotate(github.com/nd/mm-standx/internal/di.provideMetricsServer(), fx.ResultTags(["group:\"runnables\""]), fx.As([[ports.Runnable]]) from module "runtime"
+[Fx] PROVIDE	ports.Runnable[group = "runnables"] <= fx.Annotate(github.com/nd/mm-standx/internal/di.provideRiskGuard(), fx.ResultTags(["group:\"runnables\""]), fx.As([[ports.Runnable]]) from module "runtime"
+[Fx] PROVIDE	ports.Runnable[group = "runnables"] <= fx.Annotate(github.com/nd/mm-standx/internal/di.provideWatchdog(), fx.ResultTags(["group:\"runnables\""]), fx.As([[ports.Runnable]]) from module "runtime"
+[Fx] PROVIDE	ports.Runnable[group = "runnables"] <= fx.Annotate(github.com/nd/mm-standx/internal/di.provideObserver(), fx.ResultTags(["group:\"runnables\""]), fx.As([[ports.Runnable]]) from module "runtime"
+[Fx] PROVIDE	ports.Runnable[group = "runnables"] <= fx.Annotate(github.com/nd/mm-standx/internal/di.provideTelemetry(), fx.ResultTags(["group:\"runnables\""]), fx.As([[ports.Runnable]]) from module "runtime"
+[Fx] PROVIDE	ports.Runnable[group = "runnables"] <= fx.Annotate(github.com/nd/mm-standx/internal/di.provideAccountPoller(), fx.ResultTags(["group:\"runnables\""]), fx.As([[ports.Runnable]]) from module "runtime"
+[Fx] PROVIDE	ports.Runnable[group = "runnables"] <= fx.Annotate(github.com/nd/mm-standx/internal/di.provideHeartbeat(), fx.ResultTags(["group:\"runnables\""]), fx.As([[ports.Runnable]]) from module "runtime"
+[Fx] PROVIDE	ports.Runnable[group = "runnables"] <= fx.Annotate(github.com/nd/mm-standx/internal/di.provideEngines(), fx.ResultTags(["group:\"runnables,flatten\""]) from module "runtime"
+[Fx] BEFORE RUN	supply: stub(*config.Config)
+[Fx] RUN	supply: stub(*config.Config) in 25.292µs
+[Fx] INVOKE		fx.Annotate(github.com/nd/mm-standx/internal/di.registerRunnables(), fx.ParamTags(["" "" "group:\"runnables\""]) from module "runtime"
+[Fx] BEFORE RUN	provide: go.uber.org/fx.New.func1()
+[Fx] RUN	provide: go.uber.org/fx.New.func1() in 1.041µs
+[Fx] BEFORE RUN	provide: github.com/nd/mm-standx/internal/di.provideWallet() from module "standx"
+[Fx] RUN	provide: github.com/nd/mm-standx/internal/di.provideWallet() in 5.06425ms from module "standx"
+[Fx] BEFORE RUN	provide: github.com/nd/mm-standx/internal/di.provideSessionStore() from module "standx"
+[Fx] RUN	provide: github.com/nd/mm-standx/internal/di.provideSessionStore() in 5.666µs from module "standx"
+[Fx] BEFORE RUN	provide: github.com/nd/mm-standx/internal/di.provideSession() from module "standx"
+[Fx] RUN	provide: github.com/nd/mm-standx/internal/di.provideSession() in 1.004333ms from module "standx"
+[Fx] BEFORE RUN	provide: github.com/nd/mm-standx/internal/di.provideTokenProvider() from module "standx"
+[Fx] RUN	provide: github.com/nd/mm-standx/internal/di.provideTokenProvider() in 7.667µs from module "standx"
+[Fx] BEFORE RUN	provide: github.com/nd/mm-standx/internal/di.provideBodySigner() from module "standx"
+[Fx] RUN	provide: github.com/nd/mm-standx/internal/di.provideBodySigner() in 1.625µs from module "standx"
+[Fx] BEFORE RUN	provide: github.com/nd/mm-standx/internal/di.provideWSAPIClient() from module "standx"
+[Fx] RUN	provide: github.com/nd/mm-standx/internal/di.provideWSAPIClient() in 3.042µs from module "standx"
+[Fx] BEFORE RUN	provide: fx.Annotate(github.com/nd/mm-standx/internal/di.provideStreams(), fx.ResultTags(["group:\"runnables,flatten\""]) from module "runtime"
+[Fx] RUN	provide: fx.Annotate(github.com/nd/mm-standx/internal/di.provideStreams(), fx.ResultTags(["group:\"runnables,flatten\""]) in 37.75µs from module "runtime"
+[Fx] BEFORE RUN	provide: fx.Annotate(github.com/nd/mm-standx/internal/di.provideMetricsServer(), fx.ResultTags(["group:\"runnables\""]), fx.As([[ports.Runnable]]) from module "runtime"
+[Fx] RUN	provide: fx.Annotate(github.com/nd/mm-standx/internal/di.provideMetricsServer(), fx.ResultTags(["group:\"runnables\""]), fx.As([[ports.Runnable]]) in 11.917µs from module "runtime"
+[Fx] BEFORE RUN	provide: fx.Annotate(github.com/nd/mm-standx/internal/di.provideRiskGuard(), fx.ResultTags(["group:\"runnables\""]), fx.As([[ports.Runnable]]) from module "runtime"
+[Fx] RUN	provide: fx.Annotate(github.com/nd/mm-standx/internal/di.provideRiskGuard(), fx.ResultTags(["group:\"runnables\""]), fx.As([[ports.Runnable]]) in 16.584µs from module "runtime"
+[Fx] BEFORE RUN	provide: fx.Annotate(github.com/nd/mm-standx/internal/di.provideWatchdog(), fx.ResultTags(["group:\"runnables\""]), fx.As([[ports.Runnable]]) from module "runtime"
+[Fx] RUN	provide: fx.Annotate(github.com/nd/mm-standx/internal/di.provideWatchdog(), fx.ResultTags(["group:\"runnables\""]), fx.As([[ports.Runnable]]) in 10.25µs from module "runtime"
+[Fx] BEFORE RUN	provide: fx.Annotate(github.com/nd/mm-standx/internal/di.provideObserver(), fx.ResultTags(["group:\"runnables\""]), fx.As([[ports.Runnable]]) from module "runtime"
+[Fx] RUN	provide: fx.Annotate(github.com/nd/mm-standx/internal/di.provideObserver(), fx.ResultTags(["group:\"runnables\""]), fx.As([[ports.Runnable]]) in 14.125µs from module "runtime"
+[Fx] BEFORE RUN	provide: fx.Annotate(github.com/nd/mm-standx/internal/di.provideTelemetry(), fx.ResultTags(["group:\"runnables\""]), fx.As([[ports.Runnable]]) from module "runtime"
+[Fx] RUN	provide: fx.Annotate(github.com/nd/mm-standx/internal/di.provideTelemetry(), fx.ResultTags(["group:\"runnables\""]), fx.As([[ports.Runnable]]) in 6.209µs from module "runtime"
+[Fx] BEFORE RUN	provide: github.com/nd/mm-standx/internal/di.provideRESTClient() from module "standx"
+[Fx] RUN	provide: github.com/nd/mm-standx/internal/di.provideRESTClient() in 12.208µs from module "standx"
+[Fx] BEFORE RUN	provide: github.com/nd/mm-standx/internal/di.provideDryRunGateway() from module "standx"
+[Fx] RUN	provide: github.com/nd/mm-standx/internal/di.provideDryRunGateway() in 1.875µs from module "standx"
+[Fx] BEFORE RUN	provide: github.com/nd/mm-standx/internal/di.provideExchangeReader() from module "standx"
+[Fx] RUN	provide: github.com/nd/mm-standx/internal/di.provideExchangeReader() in 1.083µs from module "standx"
+[Fx] BEFORE RUN	provide: fx.Annotate(github.com/nd/mm-standx/internal/di.provideAccountPoller(), fx.ResultTags(["group:\"runnables\""]), fx.As([[ports.Runnable]]) from module "runtime"
+[Fx] RUN	provide: fx.Annotate(github.com/nd/mm-standx/internal/di.provideAccountPoller(), fx.ResultTags(["group:\"runnables\""]), fx.As([[ports.Runnable]]) in 6.791µs from module "runtime"
+[Fx] BEFORE RUN	provide: fx.Annotate(github.com/nd/mm-standx/internal/di.provideHeartbeat(), fx.ResultTags(["group:\"runnables\""]), fx.As([[ports.Runnable]]) from module "runtime"
+[Fx] RUN	provide: fx.Annotate(github.com/nd/mm-standx/internal/di.provideHeartbeat(), fx.ResultTags(["group:\"runnables\""]), fx.As([[ports.Runnable]]) in 6.417µs from module "runtime"
+[Fx] BEFORE RUN	provide: github.com/nd/mm-standx/internal/di.provideOrderGateway() from module "standx"
+[Fx] RUN	provide: github.com/nd/mm-standx/internal/di.provideOrderGateway() in 1.667µs from module "standx"
+[Fx] BEFORE RUN	provide: fx.Annotate(github.com/nd/mm-standx/internal/di.provideEngines(), fx.ResultTags(["group:\"runnables,flatten\""]) from module "runtime"
+[Fx] RUN	provide: fx.Annotate(github.com/nd/mm-standx/internal/di.provideEngines(), fx.ResultTags(["group:\"runnables,flatten\""]) in 2.879098125s from module "runtime"
+[Fx] HOOK OnStart		github.com/nd/mm-standx/internal/di.registerRunnables.func2() executing (caller: github.com/nd/mm-standx/internal/di.registerRunnables)
+{"time":"2026-08-04T12:44:02.902836+02:00","level":"INFO","msg":"risk limits in force","mode":"dry_run","component":"risk","max_daily_loss_usd":35,"max_fills_per_hour":20,"trip_on_drawdown":true,"persisted":true}
+{"time":"2026-08-04T12:44:02.903083+02:00","level":"INFO","msg":"risk ledger restored","mode":"dry_run","component":"risk","realized_pnl_usd":"0.00","estimated_cost_usd":"0.00","episodes_today":0}
+[Fx] HOOK OnStart		github.com/nd/mm-standx/internal/di.registerRunnables.func2() called by github.com/nd/mm-standx/internal/di.registerRunnables ran successfully in 265.25µs
+[Fx] HOOK OnStart		github.com/nd/mm-standx/internal/di.registerRunnables.func2() executing (caller: github.com/nd/mm-standx/internal/di.registerRunnables)
+[Fx] HOOK OnStart		github.com/nd/mm-standx/internal/di.registerRunnables.func2() called by github.com/nd/mm-standx/internal/di.registerRunnables ran successfully in 74.292µs
+[Fx] HOOK OnStart		github.com/nd/mm-standx/internal/di.registerRunnables.func2() executing (caller: github.com/nd/mm-standx/internal/di.registerRunnables)
+[Fx] HOOK OnStart		github.com/nd/mm-standx/internal/di.registerRunnables.func2() called by github.com/nd/mm-standx/internal/di.registerRunnables ran successfully in 536.209µs
+[Fx] HOOK OnStart		github.com/nd/mm-standx/internal/di.registerRunnables.func2() executing (caller: github.com/nd/mm-standx/internal/di.registerRunnables)
+[Fx] HOOK OnStart		github.com/nd/mm-standx/internal/di.registerRunnables.func2() called by github.com/nd/mm-standx/internal/di.registerRunnables ran successfully in 1.833µs
+[Fx] HOOK OnStart		github.com/nd/mm-standx/internal/di.registerRunnables.func2() executing (caller: github.com/nd/mm-standx/internal/di.registerRunnables)
+[Fx] HOOK OnStart		github.com/nd/mm-standx/internal/di.registerRunnables.func2() called by github.com/nd/mm-standx/internal/di.registerRunnables ran successfully in 2.708µs
+[Fx] HOOK OnStart		github.com/nd/mm-standx/internal/di.registerRunnables.func2() executing (caller: github.com/nd/mm-standx/internal/di.registerRunnables)
+[Fx] HOOK OnStart		github.com/nd/mm-standx/internal/di.registerRunnables.func2() called by github.com/nd/mm-standx/internal/di.registerRunnables ran successfully in 1.875µs
+[Fx] HOOK OnStart		github.com/nd/mm-standx/internal/di.registerRunnables.func2() executing (caller: github.com/nd/mm-standx/internal/di.registerRunnables)
+[Fx] HOOK OnStart		github.com/nd/mm-standx/internal/di.registerRunnables.func2() called by github.com/nd/mm-standx/internal/di.registerRunnables failed in 255.666µs: metrics: listen on :9090: listen tcp :9090: bind: address already in use
+[Fx] ERROR		Start failed, rolling back: metrics: listen on :9090: listen tcp :9090: bind: address already in use
+[Fx] HOOK OnStop		github.com/nd/mm-standx/internal/di.registerRunnables.func3() executing (caller: github.com/nd/mm-standx/internal/di.registerRunnables)
+[Fx] HOOK OnStop		github.com/nd/mm-standx/internal/di.registerRunnables.func3() called by github.com/nd/mm-standx/internal/di.registerRunnables ran successfully in 11.542µs
+[Fx] HOOK OnStop		github.com/nd/mm-standx/internal/di.registerRunnables.func3() executing (caller: github.com/nd/mm-standx/internal/di.registerRunnables)
+[Fx] HOOK OnStop		github.com/nd/mm-standx/internal/di.registerRunnables.func3() called by github.com/nd/mm-standx/internal/di.registerRunnables ran successfully in 4.5µs
+[Fx] HOOK OnStop		github.com/nd/mm-standx/internal/di.registerRunnables.func3() executing (caller: github.com/nd/mm-standx/internal/di.registerRunnables)
+[Fx] HOOK OnStop		github.com/nd/mm-standx/internal/di.registerRunnables.func3() called by github.com/nd/mm-standx/internal/di.registerRunnables ran successfully in 13.042µs
+[Fx] HOOK OnStop		github.com/nd/mm-standx/internal/di.registerRunnables.func3() executing (caller: github.com/nd/mm-standx/internal/di.registerRunnables)
+[Fx] HOOK OnStop		github.com/nd/mm-standx/internal/di.registerRunnables.func3() called by github.com/nd/mm-standx/internal/di.registerRunnables ran successfully in 71.584µs
+[Fx] HOOK OnStop		github.com/nd/mm-standx/internal/di.registerRunnables.func3() executing (caller: github.com/nd/mm-standx/internal/di.registerRunnables)
+[Fx] HOOK OnStop		github.com/nd/mm-standx/internal/di.registerRunnables.func3() called by github.com/nd/mm-standx/internal/di.registerRunnables ran successfully in 5.458µs
+[Fx] HOOK OnStop		github.com/nd/mm-standx/internal/di.registerRunnables.func3() executing (caller: github.com/nd/mm-standx/internal/di.registerRunnables)
+[Fx] HOOK OnStop		github.com/nd/mm-standx/internal/di.registerRunnables.func3() called by github.com/nd/mm-standx/internal/di.registerRunnables ran successfully in 8.161375ms
+[Fx] ERROR		Failed to start: metrics: listen on :9090: listen tcp :9090: bind: address already in use
+error: failed to start: metrics: listen on :9090: listen tcp :9090: bind: address already in use

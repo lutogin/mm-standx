@@ -38,8 +38,20 @@ type Watchdog struct {
 }
 
 // New создаёт сторож с указанным порогом устаревания.
-func New(threshold time.Duration, bus *events.Bus, clk ports.Clock, log *slog.Logger) *Watchdog {
-	return &Watchdog{
+//
+// Список ожидаемых инструментов обязателен. Сторож, знающий только о тех,
+// от кого данные уже приходили, не заметит инструмент, не приславший ничего
+// ни разу: он просто отсутствует в наблюдении. Ровно так и произошло с XAU-USD,
+// чья подписка терялась на стороне биржи, — актор молчал, никто не жаловался,
+// и обнаружилось это только при сравнении инструментов между собой.
+func New(
+	expected []market.Symbol,
+	threshold time.Duration,
+	bus *events.Bus,
+	clk ports.Clock,
+	log *slog.Logger,
+) *Watchdog {
+	w := &Watchdog{
 		threshold: threshold,
 		bus:       bus,
 		clock:     clk,
@@ -48,6 +60,13 @@ func New(threshold time.Duration, bus *events.Bus, clk ports.Clock, log *slog.Lo
 		stale:     make(map[market.Symbol]bool),
 		done:      make(chan struct{}),
 	}
+	// Отсчёт для ожидаемых инструментов начинается с момента запуска: молчание
+	// с самого начала ничем не лучше молчания после разрыва.
+	now := clk.Now()
+	for _, s := range expected {
+		w.lastSeen[s] = now
+	}
+	return w
 }
 
 func (w *Watchdog) Name() string { return "watchdog" }

@@ -11,11 +11,24 @@
 runtime:
   mode: dry_run # dry_run | live — переключать осознанно
   logLevel: info
-  logFormat: text
+  logFormat: json # json для разбора, text для чтения глазами
   metricsAddr: ":9090"
   heartbeatPath: data/mmbot.hb
-  recordingDir: recordings # пусто — запись выключена
+  # Запись сырого потока для повторного разбора. В бою выключена: даёт около
+  # 100 МБ в час на инструмент и нужна только для пересчёта профиля риска.
+  recordingDir: ""
   statsInterval: 30s
+  # Снимки защитного контура. Пустое значение допустимо только в теневом режиме:
+  # счётчик убытка, обнуляемый перезапуском, не защищает ни от чего.
+  stateDir: data/state
+  # Почасовая свёртка показателей: один файл на сутки, забирается по ssh.
+  # Реестр в памяти отвечает по HTTP только мгновенным снимком.
+  statsDir: data/stats
+  statsSample: 15s
+  # Какие инструменты торговать. Пусто — берутся флаги enabled ниже.
+  # Задаётся окружением, чтобы один файл ехал на сервер, а решение
+  # принималось при запуске: MMSTANDX_RUNTIME_SYMBOLS=XAU-USD
+  symbols: []
 
 exchange:
   authBaseUrl: https://api.standx.com
@@ -51,9 +64,21 @@ reward:
     - { thresholdPct: 50, multiplier: 0.5 }
 
 risk:
-  maxDailyLossUsd: 500
+  # Лимиты применяются защитным контуром (internal/app/risk). Дневной убыток
+  # считается по данным биржи и независимо по модели стоимости; принимается
+  # худшая из двух оценок. Взведённая остановка переживает перезапуск.
+  # На время калибровки — доля депозита, а не круглое число: при 95 DUSD
+  # на счёте лимит в 500 не сработал бы никогда.
+  maxDailyLossUsd: 35
+  # Проверяется на старте: сумма allocationUsd × leverage по включённым
+  # инструментам не должна превышать этот потолок.
   maxNotionalUsd: 120000
+  # Не денежный лимит, а детектор рассогласования модели с рынком: стратегия
+  # построена на том, что исполнения редки.
   maxFillsPerHour: 20
+  # Ставки StandX, одинаковые для всех рынков. Нужны для независимой оценки
+  # стоимости залива, см. PLAN.md §1.3.
+  fees: { makerBps: 1, takerBps: 4 }
   marginMode: isolated # isolated изолирует риск между инструментами
   flattenPolicy: immediate_market
   flattenDebounce: 150ms # свип даёт десятки частичных исполнений — агрегируем
@@ -64,7 +89,6 @@ health:
   # Канал price обновляется примерно раз в 3 секунды — заметно реже стакана.
   # Порог даёт запас на три пропущенных обновления; уточняется по записи.
   markStale: 10s
-  disconnectPull: 1500ms
   reconcileInterval: 5s
   ackTimeout: 2s
   heartbeatInterval: 1s
@@ -87,12 +111,20 @@ defaults:
     floorMarginBps: 1.5 # запас когда скачок обманчиво мал (выходные, короткое окно)
     deadBandJumps: 2.0 # шире мёртвая зона → реже перестановки, дольше в стакане
     minDeadBandBps: 0.8
-    minBps: 5.5 # пол: ближе 112% веса, но 4.35 дало fill в live-прогоне
+    # Абсолютный пол. С появлением memoryHalfLife он перестал быть основной
+    # защитой от заниженной оценки риска и связывает дистанцию редко; снижать
+    # его следует по результатам суточного прогона в будни, а не умозрительно.
+    minBps: 5.5
     maxBps: 9.5 # дальше награда обнуляется
   volatility:
     window: 20m
     minSamples: 40 # 2 минуты прогрева до первой котировки
     fullConfidenceAt: 100 # 5 минут до зрелой оценки
+    # Нижняя граница меры риска, живущая дольше окна. Без неё замерший рынок
+    # (выходные, ночь) даёт зрелую оценку нулевого скачка, и бот подходит
+    # вплотную ровно перед тем, как рынок оживёт. Шесть часов переносят
+    # вечернюю волатильность через ночь, а пятничную — через выходные.
+    memoryHalfLife: 6h
   uptime:
     targetPct: 80 # выше 70% зачёт не растёт, разница — страховой запас
     hardFloorPct: 72
@@ -104,8 +136,19 @@ defaults:
 # Параметры начисления публикуются StandX и меняются оперативной командой:
 # https://docs.standx.com/docs/standx-perps-solutions/community-maker-yield
 symbols:
-  BTC-USD:
+  # Золото — рабочий инструмент. Выбрано по измерениям 3–5 августа:
+  # глубина стакана внутри полосы p05 = 1.9M USD (у остальных, кроме BTC,
+  # около нуля), самый тонкий хвост и спреда, и скачка, окупаемость
+  # с 31 USD за Maker Hour. См. docs/ab-appetite-2026-08-05.md.
+  XAU-USD:
     enabled: true
+    allocationUsd: 60 # калибровочный размер, поднимается после сверки MH
+    program: { unitSize: "30", perSideCap: "60", maxMakerHoursPerHour: 2 }
+
+  # Единственная реальная альтернатива: стакан глубже золотого, но полоса
+  # награды съедена волатильностью — проигрывает при любом $/MH.
+  BTC-USD:
+    enabled: false
     allocationUsd: 60
     program: { unitSize: "2", perSideCap: "20", maxMakerHoursPerHour: 10 }
 
@@ -123,9 +166,6 @@ symbols:
     program: { unitSize: "4000", perSideCap: "40000", maxMakerHoursPerHour: 10 }
 
   # Металлы: спред шире, движение рваное — см. PLAN.md §1.4.
-  XAU-USD:
-    enabled: false
-    program: { unitSize: "30", perSideCap: "60", maxMakerHoursPerHour: 2 }
   XAG-USD:
     enabled: false
     program: { unitSize: "1500", perSideCap: "3000", maxMakerHoursPerHour: 2 }

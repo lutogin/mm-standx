@@ -1,0 +1,183 @@
+# Конфигурация обзорного теневого прогона: все инструменты включены с одинаковой
+# аллокацией. Цель — не доход, а котируемость: доля времени, когда правило
+# дистанции вообще находит безопасное место внутри полосы награды.
+#
+# Запись потока выключена: одиннадцать инструментов дали бы десятки гигабайт
+# за сутки, а профиль риска снимается отдельным прогоном recorder.
+# Конфигурация mm-standx.
+#
+# Приватный ключ здесь не хранится и не принимается: он читается только из
+# переменной окружения STANDX_WALLET_PK. Попытка задать его в этом файле
+# приведёт к отказу загрузки.
+#
+# Любой параметр переопределяется окружением с префиксом MMSTANDX_, например
+# MMSTANDX_RUNTIME_MODE=live. Неизвестные ключи считаются ошибкой: опечатка
+# не должна молча вернуть значение по умолчанию.
+
+runtime:
+  mode: dry_run # dry_run | live — переключать осознанно
+  logLevel: info
+  logFormat: text
+  metricsAddr: ":9090"
+  heartbeatPath: data/mmbot.hb
+  recordingDir: "" # пусто — запись выключена
+  statsInterval: 30s
+  # Снимки защитного контура. Пустое значение допустимо только в теневом режиме:
+  # счётчик убытка, обнуляемый перезапуском, не защищает ни от чего.
+  stateDir: data/state-shadow
+
+exchange:
+  authBaseUrl: https://api.standx.com
+  restBaseUrl: https://perps.standx.com
+  wsStreamUrl: wss://perps.standx.com/ws-stream/v1
+  wsApiUrl: wss://perps.standx.com/ws-api/v1
+  chain: bsc
+  tokenTtl: 24h
+  tokenRefreshLead: 2h
+  wsRotateAfter: 20h # биржа рвёт соединение на 24-м часе
+  wsReconnectMin: 250ms
+  wsReconnectMax: 30s
+  # Живость определяется по молчанию, а не пингом: сервер StandX на клиентские
+  # ping не отвечает, и активная проверка рвала бы исправное соединение.
+  wsIdleTimeout: 30s
+  wsHeartbeatInterval: 10s
+  requestTimeout: 5s
+
+rateLimit:
+  sustainedRps: 15 # биржевой предел ~22, оставляем запас
+  burst: 12
+  safetyReservePct: 30 # доля бакета, доступная только командам безопасности
+
+# Параметры программы наград StandX. Вынесены в конфиг, потому что биржа меняет
+# их без предупреждения, а таблица весов в документации противоречит формуле
+# на той же странице — см. PLAN.md §12.1.
+reward:
+  bandBps: 10
+  maxWeightPct: 200
+  minWeightPct: 40
+  uptimeTiers:
+    - { thresholdPct: 70, multiplier: 1.0 }
+    - { thresholdPct: 50, multiplier: 0.5 }
+
+risk:
+  # Лимиты применяются защитным контуром (internal/app/risk). Дневной убыток
+  # считается по данным биржи и независимо по модели стоимости; принимается
+  # худшая из двух оценок. Взведённая остановка переживает перезапуск.
+  # На время калибровки — доля депозита, а не круглое число: при 95 DUSD
+  # на счёте лимит в 500 не сработал бы никогда.
+  maxDailyLossUsd: 35
+  # Проверяется на старте: сумма allocationUsd × leverage по включённым
+  # инструментам не должна превышать этот потолок.
+  maxNotionalUsd: 120000
+  # Не денежный лимит, а детектор рассогласования модели с рынком: стратегия
+  # построена на том, что исполнения редки.
+  maxFillsPerHour: 20
+  # Ставки StandX, одинаковые для всех рынков. Нужны для независимой оценки
+  # стоимости залива, см. PLAN.md §1.3.
+  fees: { makerBps: 1, takerBps: 4 }
+  marginMode: isolated # isolated изолирует риск между инструментами
+  flattenPolicy: immediate_market
+  flattenDebounce: 150ms # свип даёт десятки частичных исполнений — агрегируем
+  postFillCooldown: 3s
+  killSwitchOnDrawdown: true
+
+health:
+  # Канал price обновляется примерно раз в 3 секунды — заметно реже стакана.
+  # Порог даёт запас на три пропущенных обновления; уточняется по записи.
+  markStale: 10s
+  reconcileInterval: 5s
+  ackTimeout: 2s
+  heartbeatInterval: 1s
+
+# Наследуется каждым инструментом; ниже переопределяются только отличия.
+defaults:
+  enabled: false
+  allocationUsd: 0
+  quote:
+    ladderLayers: 3 # лесенка компенсирует отсутствие amend в API
+    ladderSpreadBps: 1.0
+    minRest: 3200ms # ≥3с, иначе ордер не засчитывается в Maker Points
+    requoteCooldown: 250ms
+  # Дистанции здесь нет: она вычисляется из спреда и измеренного скачка.
+  # Задаётся только готовность рисковать. См. PLAN.md §4.5.
+  appetite:
+    # Мера риска — максимум окна, то есть уже оценка хвоста. Множитель покрывает
+    # только смену режима: при 2.0 бот отказывался котировать BTC днём в будни.
+    jumpMultiple: 1.25
+    floorMarginBps: 1.5 # запас когда скачок обманчиво мал (выходные, короткое окно)
+    deadBandJumps: 2.0 # шире мёртвая зона → реже перестановки, дольше в стакане
+    minDeadBandBps: 0.8
+    # Абсолютный пол. С появлением memoryHalfLife он перестал быть основной
+    # защитой от заниженной оценки риска и связывает дистанцию редко; снижать
+    # его следует по результатам суточного прогона в будни, а не умозрительно.
+    minBps: 5.5
+    maxBps: 9.5 # дальше награда обнуляется
+  volatility:
+    window: 20m
+    minSamples: 40 # 2 минуты прогрева до первой котировки
+    fullConfidenceAt: 100 # 5 минут до зрелой оценки
+    # Нижняя граница меры риска, живущая дольше окна. Без неё замерший рынок
+    # (выходные, ночь) даёт зрелую оценку нулевого скачка, и бот подходит
+    # вплотную ровно перед тем, как рынок оживёт. Шесть часов переносят
+    # вечернюю волатильность через ночь, а пятничную — через выходные.
+    memoryHalfLife: 6h
+  uptime:
+    targetPct: 80 # выше 70% зачёт не растёт, разница — страховой запас
+    hardFloorPct: 72
+    reservePct: 8
+  risk:
+    leverage: 4
+    maxNetPositionBase: "0" # 0 — закрывать любую позицию немедленно
+
+# Параметры начисления публикуются StandX и меняются оперативной командой:
+# https://docs.standx.com/docs/standx-perps-solutions/community-maker-yield
+symbols:
+  BTC-USD:
+    enabled: true
+    allocationUsd: 60
+    program: { unitSize: "2", perSideCap: "20", maxMakerHoursPerHour: 10 }
+
+  ETH-USD:
+    enabled: true
+    allocationUsd: 60
+    program: { unitSize: "60", perSideCap: "600", maxMakerHoursPerHour: 10 }
+  SOL-USD:
+    enabled: true
+    allocationUsd: 60
+    program: { unitSize: "1500", perSideCap: "15000", maxMakerHoursPerHour: 10 }
+  BNB-USD:
+    enabled: true
+    allocationUsd: 60
+    program: { unitSize: "300", perSideCap: "3000", maxMakerHoursPerHour: 10 }
+  HYPE-USD:
+    enabled: true
+    allocationUsd: 60
+    program: { unitSize: "4000", perSideCap: "40000", maxMakerHoursPerHour: 10 }
+
+  # Металлы: спред шире, движение рваное — см. PLAN.md §1.4.
+  XAU-USD:
+    enabled: true
+    allocationUsd: 60
+    program: { unitSize: "30", perSideCap: "60", maxMakerHoursPerHour: 2 }
+  XAG-USD:
+    enabled: true
+    allocationUsd: 60
+    program: { unitSize: "1500", perSideCap: "3000", maxMakerHoursPerHour: 2 }
+  CL-USD:
+    enabled: true
+    allocationUsd: 60
+    program: { unitSize: "1400", perSideCap: "2800", maxMakerHoursPerHour: 2 }
+
+  # Акции: гэпы на открытии и закрытии базового рынка.
+  TSLA-USD:
+    enabled: true
+    allocationUsd: 60
+    program: { unitSize: "400", perSideCap: "800", maxMakerHoursPerHour: 2 }
+  MU-USD:
+    enabled: true
+    allocationUsd: 60
+    program: { unitSize: "200", perSideCap: "400", maxMakerHoursPerHour: 2 }
+  SPCX-USD:
+    enabled: true
+    allocationUsd: 60
+    program: { unitSize: "800", perSideCap: "800", maxMakerHoursPerHour: 1 }

@@ -16,6 +16,7 @@ import (
 	"github.com/nd/mm-standx/internal/domain/trading"
 	"github.com/nd/mm-standx/internal/domain/uptime"
 	"github.com/nd/mm-standx/internal/domain/volatility"
+	"github.com/nd/mm-standx/internal/events"
 	"github.com/nd/mm-standx/internal/ports"
 )
 
@@ -25,14 +26,17 @@ import (
 // цену и разрешает выставление, обновление стакана — только снятие.
 func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 	if e.halted || !e.mark.IsPositive() {
+		// Молчание метрики неоднозначно: остановленный актор выглядел бы так же,
+		// как не запущенный. Ноль — утверждение, отсутствие ряда — нет.
+		e.deps.Metrics.Quoting(e.symbol, false)
 		return
 	}
 	now := e.deps.Clock.Now()
 
 	// Незакрытая позиция важнее награды: котировать, имея экспозицию, значит
 	// удвоить её при следующем заливе.
-	if e.flattenInFlight || !e.position.IsZero() || e.pendingFill.IsPositive() {
-		e.withdraw(ctx, "position is open")
+	if e.flattenInFlight || e.pendingFill.IsPositive() || e.overPositionLimit() {
+		e.withdraw(ctx, e.positionCause(), "no quoting while exposure is open")
 		return
 	}
 	if now.Before(e.cooldownUntil) {
@@ -41,7 +45,7 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 
 	halfSpread, ok := e.halfSpreadBps()
 	if !ok {
-		e.withdraw(ctx, "order book is not readable")
+		e.withdraw(ctx, ports.CauseBookUnreadable, "no two-sided book")
 		return
 	}
 
@@ -57,7 +61,7 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 	case uptime.Lost:
 		// Час недостижим: дальнейшее присутствие оплачивается исполнениями,
 		// а зачёта не приносит.
-		e.withdraw(ctx, "hour unreachable: "+hour.Reason)
+		e.withdraw(ctx, ports.CauseHourLost, hour.Reason)
 		return
 	case uptime.Banked:
 		// Цель взята, дополнительный аптайм ничего не добавляет — отходим.
@@ -66,9 +70,10 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 
 	quote := e.stickyTarget(appetite.Target(conditions, e.bounds))
 	e.reportStatus(now, conditions, estimate, quote)
+	e.reportMetrics(now, conditions, estimate, quote)
 
 	if !quote.Feasible {
-		e.withdraw(ctx, quote.Reason)
+		e.withdraw(ctx, ports.CauseNoSafeDistance, quote.Reason)
 		return
 	}
 	// Темп перестановки ограничен независимо от частоты событий: стакан
@@ -99,7 +104,7 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 		// Причина обязана быть видна: молчащий актор иначе выглядит одинаково
 		// и когда он корректно воздерживается, и когда он сломан.
 		e.blocked = "sizing: " + err.Error()
-		e.withdraw(ctx, e.blocked)
+		e.withdraw(ctx, ports.CauseSizing, err.Error())
 		return
 	}
 
@@ -139,6 +144,27 @@ func (e *Engine) stickyTarget(fresh policy.Quote) policy.Quote {
 		e.target = fresh
 	}
 	return e.target
+}
+
+// overPositionLimit сообщает, что экспозиция вышла за разрешённую инструменту.
+//
+// При значении по умолчанию (ноль) под предел попадает любая ненулевая
+// позиция: стратегия зарабатывает на присутствии в стакане, и направленная
+// экспозиция для неё — авария, а не инструмент.
+func (e *Engine) overPositionLimit() bool {
+	return e.position.Abs().Gt(e.maxNetPosition)
+}
+
+// positionCause различает штатное ожидание закрытия и превышение предела.
+//
+// Разница видна только в метриках, но именно там она и нужна: регулярный
+// «position_open» — это заливы, а «position_limit» — это позиция, выросшая
+// сверх разрешённой, то есть отказ закрывающего пути.
+func (e *Engine) positionCause() ports.WithdrawCause {
+	if !e.maxNetPosition.IsZero() && e.overPositionLimit() {
+		return ports.CausePositionLimit
+	}
+	return ports.CausePositionOpen
 }
 
 // utilizationPct — доля свободных средств, которую разрешено занимать.
@@ -186,8 +212,10 @@ func (e *Engine) execute(
 		case quotes.Cancel:
 			if err := e.deps.Gateway.Cancel(ctx, action.ClOrdID, priorityOf(action.Urgency)); err != nil {
 				e.deps.Log.Warn("cancel failed", "symbol", e.symbol, "cl_ord_id", action.ClOrdID, "error", err)
+				e.deps.Metrics.OrderFailed(e.symbol, "cancel")
 				continue
 			}
+			e.deps.Metrics.OrderSent(e.symbol, side, "cancel")
 			e.deps.Log.Info("quote cancelled",
 				"symbol", e.symbol, "side", side, "slot", action.Slot, "reason", action.Reason)
 			ladder.OnCancelSent(action.Slot, now)
@@ -243,8 +271,11 @@ func (e *Engine) place(
 
 	if err := e.deps.Gateway.Place(ctx, req); err != nil {
 		e.deps.Log.Warn("place failed", "symbol", e.symbol, "cl_ord_id", id, "error", err)
+		e.deps.Metrics.OrderFailed(e.symbol, "place")
 		return
 	}
+	e.deps.Metrics.OrderSent(e.symbol, side, "place")
+	e.deps.Metrics.QuoteDistance(e.symbol, side, float64(action.Distance))
 	// Логируется и успех: в боевом режиме заглушка молчит, и без этой записи
 	// по логу невозможно отличить работающего бота от бездействующего.
 	e.deps.Log.Info("quote placed",
@@ -255,12 +286,14 @@ func (e *Engine) place(
 }
 
 // withdraw снимает обе стороны.
-func (e *Engine) withdraw(ctx context.Context, reason string) {
+func (e *Engine) withdraw(ctx context.Context, cause ports.WithdrawCause, detail string) {
 	var ids []trading.ClOrdID
 	now := e.deps.Clock.Now()
 
+	e.deps.Metrics.Quoting(e.symbol, false)
+
 	for _, ladder := range []*quotes.Ladder{e.bids, e.asks} {
-		actions := ladder.PullAll(reason)
+		actions := ladder.PullAll(string(cause))
 		for _, a := range actions {
 			ids = append(ids, a.ClOrdID)
 		}
@@ -272,12 +305,94 @@ func (e *Engine) withdraw(ctx context.Context, reason string) {
 		return
 	}
 
-	e.deps.Log.Info("withdrawing quotes", "symbol", e.symbol, "count", len(ids), "reason", reason)
+	e.deps.Log.Info("withdrawing quotes",
+		"symbol", e.symbol, "count", len(ids), "cause", cause, "detail", detail)
+	e.deps.Metrics.Withdrawal(e.symbol, cause)
 	// Пакетная отмена стоит одного кредита вместо N — это важно именно
 	// в момент, когда бюджет запросов нужнее всего.
+	e.sendWithdrawal(ctx, ids)
+}
+
+// withdrawRetryBase и withdrawRetryMax задают отступ между повторами.
+//
+// Первый повтор уходит быстрее, чем биржа успевает подтвердить исходную
+// команду: повторная отмена безвредна, а промедление — нет.
+const (
+	withdrawRetryBase = 250 * time.Millisecond
+	withdrawRetryMax  = 5 * time.Second
+)
+
+// sendWithdrawal отправляет пакетную отмену и берёт неудачу на повтор.
+//
+// Молчаливая потеря команды на этом пути недопустима. Ступени уже переведены
+// в снимаемые, то есть локально сторона считается пустой, тогда как на бирже
+// она стоит под тем самым движением, ради которого съём и затевался. Сверка
+// обнаружила бы расхождение, но лишь через несколько секунд — а повтор
+// безопасен, потому что отмена идемпотентна (PLAN.md §2.2).
+func (e *Engine) sendWithdrawal(ctx context.Context, ids []trading.ClOrdID) {
 	if err := e.deps.Gateway.CancelBatch(ctx, ids, ports.PrioritySafety); err != nil {
-		e.deps.Log.Error("withdrawal failed", "symbol", e.symbol, "error", err)
+		e.deps.Log.Error("withdrawal failed, retrying",
+			"symbol", e.symbol, "count", len(ids), "attempt", e.withdrawAttempts+1, "error", err)
+		e.deps.Metrics.OrderFailed(e.symbol, "cancel_batch")
+		e.queueWithdrawal(ids)
+		return
 	}
+	e.forgetWithdrawal(ids)
+}
+
+// queueWithdrawal добавляет идентификаторы в очередь повтора и назначает срок.
+func (e *Engine) queueWithdrawal(ids []trading.ClOrdID) {
+	known := make(map[trading.ClOrdID]bool, len(e.pendingWithdraw))
+	for _, id := range e.pendingWithdraw {
+		known[id] = true
+	}
+	for _, id := range ids {
+		if !known[id] {
+			e.pendingWithdraw = append(e.pendingWithdraw, id)
+		}
+	}
+
+	backoff := withdrawRetryBase << min(e.withdrawAttempts, 8)
+	e.withdrawAttempts++
+	e.withdrawRetryAt = e.deps.Clock.Now().Add(min(backoff, withdrawRetryMax))
+}
+
+// forgetWithdrawal убирает идентификаторы из очереди повтора.
+func (e *Engine) forgetWithdrawal(ids []trading.ClOrdID) {
+	if len(e.pendingWithdraw) == 0 {
+		return
+	}
+	gone := make(map[trading.ClOrdID]bool, len(ids))
+	for _, id := range ids {
+		gone[id] = true
+	}
+
+	kept := e.pendingWithdraw[:0]
+	for _, id := range e.pendingWithdraw {
+		if !gone[id] {
+			kept = append(kept, id)
+		}
+	}
+	e.pendingWithdraw = kept
+	if len(e.pendingWithdraw) == 0 {
+		e.withdrawAttempts = 0
+	}
+}
+
+// retryWithdrawal повторяет неудавшийся съём.
+//
+// Верхнего предела на число попыток нет намеренно. Ордер, оставшийся в стакане,
+// продолжает исполняться независимо от того, сколько раз мы уже пытались его
+// снять; сдаться означало бы оставить в рынке позицию, за которой никто
+// не следит. Отступ растёт, поэтому недоступная биржа не съедает бюджет
+// запросов, а список очищается по мере того, как биржа подтверждает отмены.
+func (e *Engine) retryWithdrawal(ctx context.Context, now time.Time) {
+	if len(e.pendingWithdraw) == 0 || now.Before(e.withdrawRetryAt) {
+		return
+	}
+	ids := append([]trading.ClOrdID(nil), e.pendingWithdraw...)
+	e.deps.Log.Warn("retrying withdrawal", "symbol", e.symbol, "count", len(ids))
+	e.sendWithdrawal(ctx, ids)
 }
 
 // onFill накапливает исполнение и назначает срок закрытия.
@@ -286,18 +401,67 @@ func (e *Engine) withdraw(ctx context.Context, reason string) {
 // Закрывать каждое отдельным маркет-ордером значило бы платить тейкерскую
 // комиссию столько же раз.
 func (e *Engine) onFill(ctx context.Context, order trading.Order) {
-	now := e.deps.Clock.Now()
+	// Биржа присылает накопленный объём исполнения, а не приращение: каждое
+	// следующее сообщение по тому же ордеру повторяет всё, что уже было.
+	// Складывать эти числа значило бы удваивать залив на каждом обновлении.
+	delta := order.FilledQty.Sub(e.filled[order.ClOrdID])
+	if !delta.IsPositive() {
+		return
+	}
+	e.filled[order.ClOrdID] = order.FilledQty
 
-	e.pendingFill = e.pendingFill.Add(order.FilledQty)
+	now := e.deps.Clock.Now()
+	startsEpisode := !e.pendingFill.IsPositive()
+
+	e.pendingFill = e.pendingFill.Add(delta)
 	if e.fillDeadline.IsZero() || e.fillDeadline.Before(now) {
 		e.fillDeadline = now.Add(e.risk.FlattenDebounce)
 	}
 
 	e.deps.Log.Warn("order filled",
 		"symbol", e.symbol, "side", order.Side,
-		"qty", order.FilledQty, "price", order.AvgFillPrice)
+		"qty", delta, "price", order.AvgFillPrice, "new_episode", startsEpisode)
 
-	e.withdraw(ctx, "filled, closing position")
+	e.publishFill(ctx, order, delta, startsEpisode, now)
+	e.withdraw(ctx, ports.CauseFilled, "closing the position")
+}
+
+// publishFill сообщает защитному контуру о заливе вместе с оценкой стоимости.
+//
+// Оценка считается здесь, а не в контуре, потому что здесь есть измеренный
+// спред: цена закрытия по рынку отличается от цены исполнения на тейкерскую
+// комиссию и на проскальзывание порядка половины спреда. Собственный расчёт
+// нужен потому, что канал сделок биржи не проверен длительной эксплуатацией,
+// а защита, зависящая от одного источника, отказывает молча.
+func (e *Engine) publishFill(
+	ctx context.Context,
+	order trading.Order,
+	qty money.Qty,
+	startsEpisode bool,
+	now time.Time,
+) {
+	price := order.AvgFillPrice
+	if !price.IsPositive() {
+		price = e.mark
+	}
+	notional := qty.Decimal().Mul(price.Decimal()).Abs()
+
+	costBps := e.risk.Fees.MakerBps + e.risk.Fees.TakerBps
+	if half, ok := e.halfSpreadBps(); ok {
+		costBps += half
+	}
+	cost := notional.Mul(costBps.Ratio())
+
+	events.Publish(e.deps.Bus, ctx, events.QuoteFilled{
+		Symbol:           e.symbol,
+		Side:             order.Side,
+		Qty:              qty,
+		Price:            price,
+		NotionalUSD:      notional,
+		EstimatedCostUSD: cost,
+		StartsEpisode:    startsEpisode,
+		At:               now,
+	})
 }
 
 // flatten закрывает позицию рыночным ордером.
@@ -367,19 +531,26 @@ func (e *Engine) reportStatus(
 	e.lastStatus = now
 
 	hour := e.hour.Assess(now)
+	bidDepth, askDepth := e.bookDepth()
 	attrs := []any{
 		"symbol", e.symbol,
 		"mark", e.mark,
 		"half_spread", conditions.HalfSpreadBps,
+		"depth_bid_usd", fmt.Sprintf("%.0f", bidDepth),
+		"depth_ask_usd", fmt.Sprintf("%.0f", askDepth),
 		"jump", estimate.JumpBps,
 		"jump_effective", conditions.JumpBps,
 		"samples", estimate.Samples,
+		"tick", estimate.Tick,
 		"confidence", fmt.Sprintf("%.0f%%", estimate.Confidence*100),
 		"hour_mode", hour.Mode,
 		"uptime_pct", fmt.Sprintf("%.0f", hour.QualifiedPct),
 		"maker_hours", fmt.Sprintf("%.4f", hour.MakerHours),
 		"bids_live", e.bids.LiveCount(),
 		"asks_live", e.asks.LiveCount(),
+	}
+	if !e.live {
+		attrs = append(attrs, "shadow_fills", e.shadowFills)
 	}
 	switch {
 	case e.blocked != "":
@@ -390,6 +561,48 @@ func (e *Engine) reportStatus(
 		attrs = append(attrs, "quoting", "no", "reason", quote.Reason)
 	}
 	e.deps.Log.Info("engine status", attrs...)
+}
+
+// reportMetrics выкладывает состояние актора в метрики.
+//
+// Вызывается на каждом пересчёте, а не по расписанию сводки в логе: метрики
+// снимаются извне со своей частотой, и разрежать их вручную значило бы терять
+// разрешение как раз на быстрых эпизодах, ради которых наблюдаемость и нужна.
+func (e *Engine) reportMetrics(
+	now time.Time,
+	conditions policy.Conditions,
+	estimate volatility.Estimate,
+	quote policy.Quote,
+) {
+	m := e.deps.Metrics
+	hour := e.hour.Assess(now)
+
+	m.QuoteUptime(e.symbol, hour.QualifiedPct/100)
+	m.EstimatedMakerHours(e.symbol, hour.MakerHours)
+	m.HalfSpread(e.symbol, float64(conditions.HalfSpreadBps))
+	bidDepth, askDepth := e.bookDepth()
+	m.BookDepth(e.symbol, market.Buy, bidDepth)
+	m.BookDepth(e.symbol, market.Sell, askDepth)
+	m.Jump(e.symbol, float64(estimate.EffectiveJump()))
+	m.LiveQuotes(e.symbol, market.Buy, e.bids.LiveCount())
+	m.LiveQuotes(e.symbol, market.Sell, e.asks.LiveCount())
+
+	quoting := quote.Feasible && e.blocked == ""
+	m.Quoting(e.symbol, quoting)
+	if quoting {
+		m.TargetDistance(e.symbol, float64(quote.Distance))
+	}
+}
+
+// bookDepth возвращает нотионал в пределах полосы награды по каждой стороне.
+//
+// Опорой служит официальный mark, а не середина стакана: полоса награды
+// отсчитывается именно от него, и глубину имеет смысл мерить в тех же
+// координатах, в которых стоит котировка.
+func (e *Engine) bookDepth() (bid, ask float64) {
+	b, _ := e.book.DepthNotional(e.mark, market.Buy, e.bounds.MaxBps).Float64()
+	a, _ := e.book.DepthNotional(e.mark, market.Sell, e.bounds.MaxBps).Float64()
+	return b, a
 }
 
 // priorityOf отображает мотив решения в приоритет шейпера запросов.

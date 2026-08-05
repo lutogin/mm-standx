@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -65,6 +66,29 @@ type Runtime struct {
 	// сессии. Позволяет пережить перезапуск, не подключая ключ кошелька.
 	// Пусто — сессия не сохраняется.
 	SessionPath string `koanf:"sessionPath"`
+	// StateDir — каталог снимков состояния защитного контура.
+	//
+	// Пустое значение отключает сохранение, и это допустимо только в теневом
+	// режиме: в бою счётчик убытка, обнуляемый перезапуском, не защищает
+	// ни от чего.
+	StateDir string `koanf:"stateDir"`
+	// StatsDir — каталог почасовой свёртки показателей.
+	//
+	// Реестр показателей отвечает по HTTP мгновенным снимком; без выгрузки
+	// на диск история не сохраняется вовсе. Пусто — свёртка выключена.
+	StatsDir string `koanf:"statsDir"`
+	// StatsSample — период съёма показаний внутри часа.
+	StatsSample time.Duration `koanf:"statsSample"`
+	// Symbols — какие инструменты торговать, поверх флагов enabled в файле.
+	//
+	// Существует ради окружения: MMSTANDX_RUNTIME_SYMBOLS=XAU-USD выбирает
+	// инструмент, не трогая конфигурацию. Один и тот же файл едет на сервер,
+	// а решение о том, что торговать, принимается при запуске.
+	//
+	// Список только отбирает из описанных в файле и не может добавить
+	// неизвестный инструмент: параметры начисления и аллокация публикуются
+	// биржей и подбираются осознанно, а не задаются переменной среды.
+	Symbols []string `koanf:"symbols"`
 }
 
 // Exchange — координаты и учётные данные биржи.
@@ -122,12 +146,31 @@ type Risk struct {
 	FlattenDebounce      time.Duration      `koanf:"flattenDebounce"`
 	PostFillCooldown     time.Duration      `koanf:"postFillCooldown"`
 	KillSwitchOnDrawdown bool               `koanf:"killSwitchOnDrawdown"`
+	Fees                 Fees               `koanf:"fees"`
+}
+
+// Fees — ставки комиссий биржи.
+//
+// Нужны не для расчёта котировок, а для независимой оценки стоимости залива.
+// Биржа присылает и комиссию, и реализованный результат, но защитный контур,
+// целиком зависящий от одного непроверенного канала, отказывает молча:
+// отсутствие сообщений выглядит в точности как отсутствие убытка.
+type Fees struct {
+	// MakerBps — комиссия за исполнение нашей котировки.
+	MakerBps money.Bps `koanf:"makerBps"`
+	// TakerBps — комиссия за закрытие позиции по рынку.
+	TakerBps money.Bps `koanf:"takerBps"`
 }
 
 // Health — пороги контроля живости.
+//
+// Отсрочки перед съёмом котировок при разрыве потока здесь нет намеренно.
+// Разрыв приводит к немедленному съёму, а право котировать зарабатывается
+// заново прогревом оценщика. Замер теневого прогона: десять переподключений
+// за 22.6 часа стоили 11 минут присутствия, то есть 0.8%. Отсрочка выкупала бы
+// эту долю ценой секунд слепоты с живыми ордерами — обмен невыгодный.
 type Health struct {
 	MarkStale         time.Duration `koanf:"markStale"`
-	DisconnectPull    time.Duration `koanf:"disconnectPull"`
 	ReconcileInterval time.Duration `koanf:"reconcileInterval"`
 	AckTimeout        time.Duration `koanf:"ackTimeout"`
 	HeartbeatInterval time.Duration `koanf:"heartbeatInterval"`
@@ -184,6 +227,12 @@ type Volatility struct {
 	MinSamples int `koanf:"minSamples"`
 	// FullConfidenceAt — при каком числе замеров оценка считается зрелой.
 	FullConfidenceAt int `koanf:"fullConfidenceAt"`
+	// MemoryHalfLife — полураспад памяти о крупных скачках.
+	//
+	// Нижняя граница меры риска, живущая дольше окна. Без неё замерший рынок
+	// даёт зрелую оценку нулевого скачка, и бот подходит к цене вплотную
+	// ровно перед тем, как рынок оживёт.
+	MemoryHalfLife time.Duration `koanf:"memoryHalfLife"`
 }
 
 // Program — параметры начисления инструмента, публикуемые StandX.
@@ -281,6 +330,9 @@ func Load(path string) (*Config, error) {
 		resolved[name] = sym
 	}
 	cfg.Symbols = resolved
+	if err := cfg.applySymbolSelection(); err != nil {
+		return nil, err
+	}
 
 	cfg.Exchange.WalletPrivateKey = secret.New(os.Getenv(walletKeyEnv))
 
@@ -331,6 +383,40 @@ func unmarshal(k *koanf.Koanf, path string, out any) error {
 			Result:           out,
 		},
 	})
+}
+
+// applySymbolSelection сужает набор инструментов до перечисленных в runtime.symbols.
+//
+// Неизвестное имя — ошибка, а не пустой результат: молча запустить бота вообще
+// без инструментов из-за опечатки в переменной среды хуже, чем не запустить.
+func (c *Config) applySymbolSelection() error {
+	if len(c.Runtime.Symbols) == 0 {
+		return nil
+	}
+
+	wanted := make(map[string]bool, len(c.Runtime.Symbols))
+	for _, name := range c.Runtime.Symbols {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if _, ok := c.Symbols[name]; !ok {
+			known := make([]string, 0, len(c.Symbols))
+			for s := range c.Symbols {
+				known = append(known, s)
+			}
+			sort.Strings(known)
+			return fmt.Errorf("runtime.symbols: %q is not described in the configuration; known: %s",
+				name, strings.Join(known, ", "))
+		}
+		wanted[name] = true
+	}
+
+	for name, sym := range c.Symbols {
+		sym.Enabled = wanted[name]
+		c.Symbols[name] = sym
+	}
+	return nil
 }
 
 // EnabledSymbols возвращает только включённые инструменты.

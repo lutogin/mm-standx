@@ -50,10 +50,34 @@ type Deps struct {
 	Gateway ports.OrderGateway
 	// Reader нужен только для сверки при завершении: локальному состоянию
 	// на выходе доверять нельзя, а цена ошибки — оставленные в стакане ордера.
-	Reader ports.ExchangeReader
-	Bus    *events.Bus
-	Clock  ports.Clock
-	Log    *slog.Logger
+	Reader  ports.ExchangeReader
+	Bus     *events.Bus
+	Clock   ports.Clock
+	Metrics ports.Metrics
+	Log     *slog.Logger
+}
+
+// Params — всё, что актор знает о своём инструменте на момент сборки.
+//
+// Структура, а не список аргументов: параметров дюжина, и позиционный вызов
+// с двумя соседними config-полями одного типа — это ошибка, которую компилятор
+// не поймает, а рынок поймает.
+type Params struct {
+	Symbol     market.Symbol
+	Spec       market.SymbolSpec
+	Config     config.Symbol
+	Health     config.Health
+	Risk       config.Risk
+	Live       bool
+	Program    reward.Program
+	Appetite   policy.Appetite
+	Bounds     policy.Bounds
+	Volatility volatility.Config
+
+	// MaxNetPosition — экспозиция, выше которой актор перестаёт котировать
+	// и закрывает позицию. Ноль означает, что позиция не допускается вовсе:
+	// стратегия зарабатывает на присутствии в стакане, а не на направлении.
+	MaxNetPosition money.Qty
 }
 
 // Engine — актор котирования одного инструмента.
@@ -65,11 +89,12 @@ type Engine struct {
 	risk   config.Risk
 	live   bool
 
-	program  reward.Program
-	appetite policy.Appetite
-	bounds   policy.Bounds
-	ladder   policy.Ladder
-	rules    quotes.Rules
+	program        reward.Program
+	appetite       policy.Appetite
+	bounds         policy.Bounds
+	maxNetPosition money.Qty
+	ladder         policy.Ladder
+	rules          quotes.Rules
 
 	bids *quotes.Ladder
 	asks *quotes.Ladder
@@ -97,6 +122,31 @@ type Engine struct {
 	blocked         string
 	target          policy.Quote
 
+	// pendingWithdraw — ордера, снятие которых не удалось отправить.
+	//
+	// Съём котировок — аварийный путь, и молчаливая потеря команды на нём
+	// недопустима: ступени уже помечены снимаемыми, то есть локально мы считаем
+	// сторону пустой, а на бирже она стоит. Сверка нашла бы расхождение через
+	// несколько секунд, но эти секунды приходятся ровно на тот момент, ради
+	// которого съём и затевался.
+	pendingWithdraw  []trading.ClOrdID
+	withdrawRetryAt  time.Time
+	withdrawAttempts int
+
+	// filled хранит уже учтённый объём исполнения по каждому ордеру.
+	//
+	// Биржа присылает накопленное количество, а не приращение, поэтому без
+	// этой памяти повторное сообщение по тому же ордеру засчиталось бы как
+	// новый залив — и в дебаунсе закрытия, и в учёте риска.
+	filled map[trading.ClOrdID]money.Qty
+
+	// touched и shadowFills — учёт теневого режима: сколько раз рынок дошёл бы
+	// до наших котировок. Считается по ордеру, а не по обновлению стакана:
+	// стакан приходит в несколько раз чаще такта, и одно касание иначе дало бы
+	// десятки мнимых заливов.
+	touched     map[trading.ClOrdID]bool
+	shadowFills int
+
 	deps        Deps
 	inbox       chan events.Event
 	unsubscribe []func()
@@ -105,41 +155,36 @@ type Engine struct {
 }
 
 // New собирает актора.
-func New(
-	symbol market.Symbol,
-	spec market.SymbolSpec,
-	cfg config.Symbol,
-	health config.Health,
-	risk config.Risk,
-	live bool,
-	program reward.Program,
-	appetite policy.Appetite,
-	bounds policy.Bounds,
-	volCfg volatility.Config,
-	deps Deps,
-) *Engine {
-	layers := max(cfg.Quote.LadderLayers, 1)
+func New(p Params, deps Deps) *Engine {
+	layers := max(p.Config.Quote.LadderLayers, 1)
+
+	if deps.Metrics == nil {
+		deps.Metrics = ports.NopMetrics{}
+	}
 
 	return &Engine{
-		symbol:   symbol,
-		spec:     spec,
-		cfg:      cfg,
-		health:   health,
-		risk:     risk,
-		live:     live,
-		program:  program,
-		appetite: appetite,
-		bounds:   bounds,
-		ladder:   policy.Ladder{Layers: layers, SpreadBps: cfg.Quote.LadderSpreadBps},
+		symbol:         p.Symbol,
+		spec:           p.Spec,
+		cfg:            p.Config,
+		health:         p.Health,
+		risk:           p.Risk,
+		live:           p.Live,
+		program:        p.Program,
+		appetite:       p.Appetite,
+		bounds:         p.Bounds,
+		maxNetPosition: p.MaxNetPosition,
+		ladder:         policy.Ladder{Layers: layers, SpreadBps: p.Config.Quote.LadderSpreadBps},
 		rules: quotes.Rules{
-			MinRest:    cfg.Quote.MinRest,
-			AckTimeout: health.AckTimeout,
+			MinRest:    p.Config.Quote.MinRest,
+			AckTimeout: p.Health.AckTimeout,
 		},
 		bids:     quotes.New(market.Buy, layers),
 		asks:     quotes.New(market.Sell, layers),
-		vol:      volatility.New(volCfg),
-		hour:     uptime.New(program, cfg.Uptime.TargetPct),
+		vol:      volatility.New(p.Volatility),
+		hour:     uptime.New(p.Program, p.Config.Uptime.TargetPct),
 		position: money.MustParseQty("0"),
+		filled:   make(map[trading.ClOrdID]money.Qty),
+		touched:  make(map[trading.ClOrdID]bool),
 		deps:     deps,
 		inbox:    make(chan events.Event, inboxSize),
 		done:     make(chan struct{}),
@@ -175,7 +220,7 @@ func (e *Engine) Stop(ctx context.Context) error {
 	}
 	e.halted = true
 
-	e.withdraw(ctx, "shutdown")
+	e.withdraw(ctx, ports.CauseShutdown, "process is stopping")
 	e.clearRemaining(ctx)
 	e.closePositionOnExit(ctx)
 
@@ -299,6 +344,9 @@ func (e *Engine) subscribe() {
 				e.enqueue(ev)
 			}
 		}),
+		events.Subscribe(e.deps.Bus, e.Name(), func(_ context.Context, ev events.OrderRejected) {
+			e.enqueue(ev)
+		}),
 		events.Subscribe(e.deps.Bus, e.Name(), func(_ context.Context, ev events.PositionUpdated) {
 			if ev.Position.Symbol == e.symbol {
 				e.enqueue(ev)
@@ -365,6 +413,8 @@ func (e *Engine) handle(ctx context.Context, ev events.Event) {
 		e.onBook(ctx, v)
 	case events.OrderUpdated:
 		e.onOrder(ctx, v)
+	case events.OrderRejected:
+		e.onOrderRejected(ctx, v)
 	case events.PositionUpdated:
 		e.position = v.Position.Qty
 		now := e.deps.Clock.Now()
@@ -376,15 +426,15 @@ func (e *Engine) handle(ctx context.Context, ev events.Event) {
 	case events.OpenOrdersSnapshot:
 		e.reconcile(ctx, v)
 	case events.MarkPriceStale:
-		e.withdraw(ctx, "mark price is stale")
+		e.withdraw(ctx, ports.CauseStaleMark, "no mark price updates")
 	case events.StreamDisconnected:
 		// История скачков описывает рынок до разрыва, а склейка через паузу
 		// дала бы ложное наблюдение. Право котировать зарабатывается заново.
 		e.vol.Reset()
-		e.withdraw(ctx, "stream disconnected")
+		e.withdraw(ctx, ports.CauseDisconnected, v.Stream)
 	case events.KillSwitchTripped:
 		e.halted = true
-		e.withdraw(ctx, "kill switch: "+v.Reason)
+		e.withdraw(ctx, ports.CauseKillSwitch, v.Reason)
 	}
 }
 
@@ -418,6 +468,9 @@ func (e *Engine) onBook(ctx context.Context, ev events.BookUpdated) {
 		return
 	}
 	e.book = ev.Book
+	// Учёт теневых заливов идёт до пересчёта: evaluate может снять ступень,
+	// и тогда касание, ради наблюдения которого прогон и делается, пропало бы.
+	e.countShadowFills(e.deps.Clock.Now())
 	e.evaluate(ctx, false)
 }
 
@@ -428,18 +481,59 @@ func (e *Engine) onOrder(ctx context.Context, ev events.OrderUpdated) {
 	}
 	if ev.Order.FilledQty.IsPositive() {
 		e.onFill(ctx, ev.Order)
-		return
 	}
+	// Порядок важен: исполнение учитывается до уборки, иначе последнее
+	// сообщение по ордеру — оно же и терминальное — потеряло бы свой объём.
+	if ev.Order.Status.IsTerminal() {
+		e.forget(ev.Order.ClOrdID)
+	}
+	if !ev.Order.FilledQty.IsPositive() {
+		e.evaluate(ctx, true)
+	}
+}
+
+// onOrderRejected обрабатывает отказ биржи на этапе матчинга.
+//
+// Основной случай — отклонение post-only: котировка оказалась бы тейкером,
+// то есть стакан ушёл дальше, чем мы считали. Ступень освобождается сразу,
+// не дожидаясь таймаута подтверждения: ордера нет, и держать ступень занятой
+// две секунды значит терять присутствие впустую.
+func (e *Engine) onOrderRejected(ctx context.Context, ev events.OrderRejected) {
+	now := e.deps.Clock.Now()
+	rejected := trading.Order{ClOrdID: ev.ClOrdID, Status: trading.StatusRejected}
+
+	for _, ladder := range []*quotes.Ladder{e.bids, e.asks} {
+		if _, matched := ladder.OnOrderUpdate(rejected, now); matched {
+			e.deps.Log.Warn("order rejected",
+				"symbol", e.symbol, "cl_ord_id", ev.ClOrdID, "code", ev.Code, "reason", ev.Reason)
+			e.deps.Metrics.ALOReject(e.symbol)
+			break
+		}
+	}
+	e.forget(ev.ClOrdID)
 	e.evaluate(ctx, true)
+}
+
+// forget убирает завершённый ордер из вспомогательных карт.
+func (e *Engine) forget(id trading.ClOrdID) {
+	delete(e.filled, id)
+	delete(e.touched, id)
+	e.forgetWithdrawal([]trading.ClOrdID{id})
 }
 
 func (e *Engine) onTick(ctx context.Context) {
 	now := e.deps.Clock.Now()
 
 	// Устаревшая справочная цена означает торговлю вслепую.
-	if e.mark.IsPositive() && now.Sub(e.markAt) > e.health.MarkStale {
-		e.withdraw(ctx, "mark price is stale")
+	if e.mark.IsPositive() {
+		e.deps.Metrics.MarkStaleness(e.symbol, now.Sub(e.markAt).Seconds())
+		if now.Sub(e.markAt) > e.health.MarkStale {
+			e.withdraw(ctx, ports.CauseStaleMark, "no mark price updates")
+		}
 	}
+	// Повтор неудавшегося съёма идёт раньше всего остального: пока он не прошёл,
+	// в стакане стоят ордера, которые мы уже считаем снятыми.
+	e.retryWithdrawal(ctx, now)
 	// Дебаунс частичных исполнений: свип даёт их десятками, и закрывать
 	// каждое отдельным маркет-ордером значило бы платить комиссию многократно.
 	if e.pendingFill.IsPositive() && !now.Before(e.fillDeadline) {

@@ -12,6 +12,7 @@ import (
 
 	"go.uber.org/fx"
 
+	"github.com/nd/mm-standx/internal/adapters/metrics"
 	"github.com/nd/mm-standx/internal/adapters/standx/auth"
 	"github.com/nd/mm-standx/internal/adapters/standx/wsapi"
 	"github.com/nd/mm-standx/internal/adapters/standx/wsstream"
@@ -19,9 +20,13 @@ import (
 	"github.com/nd/mm-standx/internal/app/engine"
 	"github.com/nd/mm-standx/internal/app/heartbeat"
 	"github.com/nd/mm-standx/internal/app/observer"
+	"github.com/nd/mm-standx/internal/app/risk"
+	"github.com/nd/mm-standx/internal/app/stats"
+	"github.com/nd/mm-standx/internal/app/telemetry"
 	"github.com/nd/mm-standx/internal/app/watchdog"
 	"github.com/nd/mm-standx/internal/config"
 	"github.com/nd/mm-standx/internal/domain/market"
+	"github.com/nd/mm-standx/internal/domain/money"
 	"github.com/nd/mm-standx/internal/domain/policy"
 	"github.com/nd/mm-standx/internal/domain/reward"
 	"github.com/nd/mm-standx/internal/domain/volatility"
@@ -36,8 +41,12 @@ import (
 var Runtime = fx.Module("runtime",
 	fx.Provide(
 		fx.Annotate(provideStreams, fx.ResultTags(`group:"runnables,flatten"`)),
+		fx.Annotate(provideMetricsServer, fx.As(new(ports.Runnable)), fx.ResultTags(`group:"runnables"`)),
+		fx.Annotate(provideRiskGuard, fx.As(new(ports.Runnable)), fx.ResultTags(`group:"runnables"`)),
 		fx.Annotate(provideWatchdog, fx.As(new(ports.Runnable)), fx.ResultTags(`group:"runnables"`)),
 		fx.Annotate(provideObserver, fx.As(new(ports.Runnable)), fx.ResultTags(`group:"runnables"`)),
+		fx.Annotate(provideTelemetry, fx.As(new(ports.Runnable)), fx.ResultTags(`group:"runnables"`)),
+		fx.Annotate(provideStatsCollector, fx.As(new(ports.Runnable)), fx.ResultTags(`group:"runnables"`)),
 		fx.Annotate(provideAccountPoller, fx.As(new(ports.Runnable)), fx.ResultTags(`group:"runnables"`)),
 		fx.Annotate(provideHeartbeat, fx.As(new(ports.Runnable)), fx.ResultTags(`group:"runnables"`)),
 		fx.Annotate(provideEngines, fx.ResultTags(`group:"runnables,flatten"`)),
@@ -109,11 +118,52 @@ func provideStreams(
 }
 
 func provideWatchdog(cfg *config.Config, bus *events.Bus, clk ports.Clock, log *slog.Logger) *watchdog.Watchdog {
-	return watchdog.New(cfg.Health.MarkStale, bus, clk, log)
+	return watchdog.New(sortedSymbols(cfg), cfg.Health.MarkStale, bus, clk, log)
+}
+
+func provideMetricsServer(cfg *config.Config, p *metrics.Prometheus, log *slog.Logger) *metrics.Server {
+	return metrics.NewServer(cfg.Runtime.MetricsAddr, p, log)
+}
+
+// provideRiskGuard собирает защитный контур.
+//
+// Опрос идёт с шагом сверки: вердикт зависит от времени (скользящий час,
+// граница суток), поэтому проверять его только по событиям недостаточно —
+// час может истечь и без единого исполнения.
+func provideRiskGuard(
+	cfg *config.Config,
+	store ports.StateStore,
+	bus *events.Bus,
+	clk ports.Clock,
+	m ports.Metrics,
+	log *slog.Logger,
+) *risk.Guard {
+	return risk.New(cfg.Risk, cfg.Health.ReconcileInterval, store, bus, clk, m, log)
 }
 
 func provideObserver(cfg *config.Config, bus *events.Bus, clk ports.Clock, log *slog.Logger) *observer.Observer {
 	return observer.New(cfg.Runtime.StatsInterval, bus, clk, log)
+}
+
+// provideStatsCollector собирает выгрузку истории показателей на диск.
+func provideStatsCollector(
+	cfg *config.Config,
+	p *metrics.Prometheus,
+	clk ports.Clock,
+	log *slog.Logger,
+) *stats.Collector {
+	return stats.New(cfg.Runtime.StatsDir, cfg.Runtime.StatsSample, p, clk, log)
+}
+
+func provideTelemetry(
+	cfg *config.Config,
+	limiter ports.RateLimiter,
+	bus *events.Bus,
+	clk ports.Clock,
+	m ports.Metrics,
+	log *slog.Logger,
+) *telemetry.Collector {
+	return telemetry.New(cfg.Health.HeartbeatInterval, limiter, bus, clk, m, log)
 }
 
 // registerRunnables связывает компоненты с жизненным циклом приложения.
@@ -183,6 +233,7 @@ func provideEngines(
 	gateway ports.OrderGateway,
 	bus *events.Bus,
 	clk ports.Clock,
+	m ports.Metrics,
 	log *slog.Logger,
 ) ([]ports.Runnable, error) {
 	symbols := sortedSymbols(cfg)
@@ -205,23 +256,43 @@ func provideEngines(
 		if err != nil {
 			return nil, fmt.Errorf("reward programme for %s: %w", symbol, err)
 		}
+		maxPosition, err := money.ParseQty(symCfg.SymbolRisk.MaxNetPositionBase)
+		if err != nil {
+			return nil, fmt.Errorf("max net position for %s: %w", symbol, err)
+		}
 
 		out = append(out, engine.New(
-			symbol, spec, symCfg, cfg.Health, cfg.Risk, cfg.IsLive(),
-			program,
-			policy.Appetite{
-				JumpMultiple:   symCfg.Appetite.JumpMultiple,
-				FloorMarginBps: symCfg.Appetite.FloorMarginBps,
-				DeadBandJumps:  symCfg.Appetite.DeadBandJumps,
-				MinDeadBandBps: symCfg.Appetite.MinDeadBandBps,
+			engine.Params{
+				Symbol:  symbol,
+				Spec:    spec,
+				Config:  symCfg,
+				Health:  cfg.Health,
+				Risk:    cfg.Risk,
+				Live:    cfg.IsLive(),
+				Program: program,
+				Appetite: policy.Appetite{
+					JumpMultiple:   symCfg.Appetite.JumpMultiple,
+					FloorMarginBps: symCfg.Appetite.FloorMarginBps,
+					DeadBandJumps:  symCfg.Appetite.DeadBandJumps,
+					MinDeadBandBps: symCfg.Appetite.MinDeadBandBps,
+				},
+				Bounds: policy.Bounds{MinBps: symCfg.Appetite.MinBps, MaxBps: symCfg.Appetite.MaxBps},
+				Volatility: volatility.Config{
+					Window:           symCfg.Volatility.Window,
+					MinSamples:       symCfg.Volatility.MinSamples,
+					FullConfidenceAt: symCfg.Volatility.FullConfidenceAt,
+					MemoryHalfLife:   symCfg.Volatility.MemoryHalfLife,
+				},
+				MaxNetPosition: maxPosition,
 			},
-			policy.Bounds{MinBps: symCfg.Appetite.MinBps, MaxBps: symCfg.Appetite.MaxBps},
-			volatility.Config{
-				Window:           symCfg.Volatility.Window,
-				MinSamples:       symCfg.Volatility.MinSamples,
-				FullConfidenceAt: symCfg.Volatility.FullConfidenceAt,
+			engine.Deps{
+				Gateway: gateway,
+				Reader:  reader,
+				Bus:     bus,
+				Clock:   clk,
+				Metrics: m,
+				Log:     log,
 			},
-			engine.Deps{Gateway: gateway, Reader: reader, Bus: bus, Clock: clk, Log: log},
 		))
 	}
 	return out, nil
