@@ -40,6 +40,9 @@ type Collector struct {
 	hour   time.Time
 	series map[string]*series
 
+	// lastCurrent — когда снимок текущего часа записывался в последний раз.
+	lastCurrent time.Time
+
 	cancel context.CancelFunc
 	done   chan struct{}
 }
@@ -156,6 +159,64 @@ func (c *Collector) sample(now time.Time) {
 			acc.values = append(acc.values, s.Value)
 		}
 	}
+	c.writeCurrent(now)
+}
+
+const (
+	// currentName — файл с незавершённым часом.
+	currentName = "current.json"
+
+	// currentEvery — как часто перезаписывается снимок текущего часа.
+	//
+	// Реже, чем снимаются показания: замеры копятся в памяти, а на диск
+	// уходит только результат. Писать файл каждые пятнадцать секунд значило бы
+	// трепать диск ради данных, которые всё равно смотрят раз в несколько
+	// минут. Торгового цикла это в любом случае не касается — сборщик живёт
+	// в своей горутине.
+	currentEvery = 10 * time.Minute
+)
+
+// writeCurrent перезаписывает снимок часа, который идёт прямо сейчас.
+//
+// Свёртка по построению готова только к концу часа, и без этого файла первые
+// до пятидесяти девяти минут работы смотреть было бы нечего — состояние,
+// неотличимое от поломки для того, кто только что запустил бота и хочет
+// убедиться, что он считает.
+//
+// Файл перезаписывается целиком, а не дописывается: он описывает одно
+// состояние, а не ряд. История копится в почасовых файлах.
+func (c *Collector) writeCurrent(now time.Time) {
+	// Первый снимок пишется сразу: смысл файла в том, чтобы сразу после
+	// запуска было видно, что бот считает.
+	if !c.lastCurrent.IsZero() && now.Sub(c.lastCurrent) < currentEvery {
+		return
+	}
+	c.lastCurrent = now
+
+	records := c.snapshot(true)
+	if len(records) == 0 {
+		return
+	}
+	if err := c.replace(currentName, records); err != nil {
+		c.log.Error("failed to write the current hour snapshot", "error", err)
+	}
+}
+
+// snapshot превращает накопители в строки отчёта, не трогая накопленное.
+func (c *Collector) snapshot(partial bool) []Record {
+	keys := make([]string, 0, len(c.series))
+	for k := range c.series {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	out := make([]Record, 0, len(keys))
+	for _, k := range keys {
+		if r, ok := c.series[k].record(c.hour, partial); ok {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // Record — одна строка отчёта: показатель за один час.
@@ -190,18 +251,7 @@ func (c *Collector) flush(now time.Time, partial bool) {
 		return
 	}
 
-	keys := make([]string, 0, len(c.series))
-	for k := range c.series {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	records := make([]Record, 0, len(keys))
-	for _, k := range keys {
-		if r, ok := c.series[k].record(c.hour, partial); ok {
-			records = append(records, r)
-		}
-	}
+	records := c.snapshot(partial)
 	c.series = make(map[string]*series)
 
 	if err := c.append(records); err != nil {
@@ -269,6 +319,30 @@ func (c *Collector) append(records []Record) error {
 		}
 	}
 	return f.Sync()
+}
+
+// replace перезаписывает файл целиком, атомарно.
+//
+// Через временный файл с переименованием: читатель, забирающий снимок в тот же
+// момент, получит либо прежнее состояние, либо новое, но не половину.
+func (c *Collector) replace(name string, records []Record) error {
+	tmp, err := os.CreateTemp(c.dir, name+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temporary %s: %w", name, err)
+	}
+	defer os.Remove(tmp.Name())
+
+	enc := json.NewEncoder(tmp)
+	for _, r := range records {
+		if err := enc.Encode(r); err != nil {
+			tmp.Close()
+			return fmt.Errorf("write %s: %w", name, err)
+		}
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", name, err)
+	}
+	return os.Rename(tmp.Name(), filepath.Join(c.dir, name))
 }
 
 // seriesKey строит устойчивый ключ ряда: имя плюс метки в отсортированном виде.

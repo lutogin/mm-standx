@@ -1,4 +1,5 @@
-BIN := bin
+BIN   := bin
+IMAGE ?= lutogin/mm-standx:latest
 GO  ?= go
 
 .DEFAULT_GOAL := help
@@ -60,6 +61,14 @@ record: build ## Collect market data for replay tests (make record DURATION=1h)
 .PHONY: run
 run: build ## Run the bot with the current configuration
 	$(BIN)/mmbot -config config.yaml
+
+.PHONY: image
+image: ## Собрать образ (конфигурация запекается внутрь)
+	docker build -t $(IMAGE) .
+
+.PHONY: push
+push: image ## Опубликовать образ в реестр
+	docker push $(IMAGE)
 
 .PHONY: clean
 clean: ## Remove build artifacts

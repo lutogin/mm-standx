@@ -64,17 +64,17 @@ func announce(cfg *config.Config) {
 	}
 	sort.Strings(symbols)
 
-	banner := "DRY RUN — заявки на биржу не уходят"
+	banner := "DRY RUN — no orders reach the exchange"
 	if cfg.IsLive() {
-		banner = "LIVE — заявки уходят на биржу реальными деньгами"
+		banner = "LIVE — real orders, real money"
 	}
 
 	fmt.Fprintf(os.Stderr, `
 ┌─────────────────────────────────────────────────────────────
 │ %s
-│ инструменты:   %s
-│ нотионал до:   %.0f USD
-│ дневной убыток: стоп на %.0f USD, заливов в час не более %d
+│ symbols:      %s
+│ notional:     up to %.0f USD
+│ risk limits:  halt at %.0f USD daily loss, %d fills per hour
 └─────────────────────────────────────────────────────────────
 
 `, banner, strings.Join(symbols, ", "), total,

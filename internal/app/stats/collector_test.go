@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -50,9 +51,17 @@ func read(t *testing.T, dir string) []stats.Record {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
-	require.Len(t, entries, 1, "one file per day")
 
-	data, err := os.ReadFile(filepath.Join(dir, entries[0].Name()))
+	var hourly string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "hourly-") {
+			require.Empty(t, hourly, "one hourly file per day")
+			hourly = e.Name()
+		}
+	}
+	require.NotEmpty(t, hourly, "the completed hour must be archived")
+
+	data, err := os.ReadFile(filepath.Join(dir, hourly))
 	require.NoError(t, err)
 
 	var out []stats.Record
@@ -138,5 +147,52 @@ func TestDisabledWithoutDirectory(t *testing.T) {
 	c := stats.New("", time.Millisecond, &fakeSource{}, clock.New(),
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.NoError(t, c.Start(t.Context()))
+	require.NoError(t, c.Stop(t.Context()))
+}
+
+// The hourly rollup is only complete at the end of an hour, so without a live
+// snapshot the first fifty-nine minutes of a run would show nothing at all —
+// indistinguishable from a broken collector for whoever just started the bot.
+func TestCurrentHourIsReadableImmediately(t *testing.T) {
+	src := &fakeSource{frames: [][]ports.MetricSample{gauge(3), gauge(5), gauge(4)}}
+
+	c, dir := collector(t, src)
+	require.NoError(t, c.Start(t.Context()))
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(filepath.Join(dir, "current.json"))
+		return err == nil
+	}, time.Second, 5*time.Millisecond, "the snapshot appears without waiting for the hour")
+
+	data, err := os.ReadFile(filepath.Join(dir, "current.json"))
+	require.NoError(t, err)
+	require.Contains(t, string(data), "mm_half_spread_bps")
+	require.Contains(t, string(data), `"partial":true`)
+
+	require.NoError(t, c.Stop(t.Context()))
+}
+
+// The snapshot is written far less often than samples are taken: measurements
+// accumulate in memory and only the result reaches disk. Writing every fifteen
+// seconds would churn the disk for data nobody reads more than a few times an
+// hour. The first write is immediate, so a fresh start shows something at once.
+func TestSnapshotIsWrittenOnceThenThrottled(t *testing.T) {
+	src := &fakeSource{}
+	for range 40 {
+		src.frames = append(src.frames, gauge(1))
+	}
+
+	c, dir := collector(t, src)
+	require.NoError(t, c.Start(t.Context()))
+	require.Eventually(t, func() bool { return src.n >= 40 }, time.Second, 5*time.Millisecond)
+
+	info, err := os.Stat(filepath.Join(dir, "current.json"))
+	require.NoError(t, err, "the first snapshot is immediate")
+	first := info.ModTime()
+
+	require.Eventually(t, func() bool { return src.n >= 40 }, time.Second, 5*time.Millisecond)
+	info, err = os.Stat(filepath.Join(dir, "current.json"))
+	require.NoError(t, err)
+	require.Equal(t, first, info.ModTime(), "forty samples, still one write")
+
 	require.NoError(t, c.Stop(t.Context()))
 }
