@@ -167,6 +167,28 @@ func (l *Ladder) PullAll(reason string) []Action {
 // к одному числу — значит потерять одну из двух ролей.
 type Classifier func(Slot) policy.Decision
 
+// Danger возвращает команды на снятие стороны, если хотя бы одна живая ступень
+// признана опасной.
+//
+// Проверка вынесена из Plan отдельным методом, потому что вызывается раньше
+// ограничения темпа перестановок: кулдаун существует, чтобы не жечь бюджет
+// запросов, и задерживать им аварийный съём — значит применять экономию там,
+// где она стоит залива.
+//
+// Опасность рассматривается по всем ступеням сразу: пока мы аккуратно
+// переставляем одну, остальные стоят под тем же рынком.
+func (l *Ladder) Danger(classify Classifier) []Action {
+	for i := range l.Slots {
+		if l.Slots[i].Phase != Live {
+			continue
+		}
+		if d := classify(l.Slots[i]); d.Action == policy.Pull {
+			return l.PullAll(d.Reason)
+		}
+	}
+	return nil
+}
+
 // Plan решает, что делать со стороной прямо сейчас.
 //
 // desired задаёт целевые дистанции ступеней. Возвращается не более одной
@@ -177,15 +199,8 @@ func (l *Ladder) Plan(
 	classify Classifier,
 	rules Rules,
 ) []Action {
-	// Опасность рассматривается первой и по всем ступеням сразу: пока мы
-	// аккуратно переставляем одну, остальные стоят под тем же рынком.
-	for i := range l.Slots {
-		if l.Slots[i].Phase != Live {
-			continue
-		}
-		if d := classify(l.Slots[i]); d.Action == policy.Pull {
-			return l.PullAll(d.Reason)
-		}
+	if danger := l.Danger(classify); len(danger) > 0 {
+		return danger
 	}
 
 	// Потерянные команды: биржа не ответила за отведённое время. Ступень

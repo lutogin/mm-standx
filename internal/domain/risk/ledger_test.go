@@ -180,3 +180,41 @@ func TestPartialFillsCostSeparatelyButCountAsOneEpisode(t *testing.T) {
 	require.False(t, v.Tripped)
 	require.InDelta(t, 42, v.EstimatedCostUSD, 0.001)
 }
+
+// The order update and the trade message travel different channels, and the
+// first routinely arrives ahead of the second. Suspecting the channel on that
+// difference means crying wolf on every first fill of the day.
+func TestTradeChannelIsNotSuspectedImmediately(t *testing.T) {
+	now := time.Date(2026, 8, 6, 14, 34, 38, 0, time.UTC)
+	l := risk.New(risk.Limits{MaxDailyLossUSD: 35, MaxFillsPerHour: 20, TripOnDrawdown: true})
+
+	l.OnFill(now, risk.Fill{Symbol: "XAU-USD", At: now, CostUSD: decimal.NewFromFloat(0.2), StartsEpisode: true})
+	require.False(t, l.Assess(now).TradeChannelSuspect,
+		"the trade message is milliseconds behind, not missing")
+
+	// It arrives, as it should, and the question is settled for the day.
+	l.OnTrade(now.Add(50*time.Millisecond), decimal.NewFromFloat(-0.1), decimal.NewFromFloat(0.05))
+	require.False(t, l.Assess(now.Add(time.Hour)).TradeChannelSuspect)
+}
+
+// Silence past the grace is a real fault: the daily loss then rests on the cost
+// model alone, and that has to be visible.
+func TestSilentTradeChannelIsReportedAfterTheGrace(t *testing.T) {
+	now := time.Date(2026, 8, 6, 14, 34, 38, 0, time.UTC)
+	l := risk.New(risk.Limits{MaxDailyLossUSD: 35, MaxFillsPerHour: 20, TripOnDrawdown: true})
+
+	l.OnFill(now, risk.Fill{Symbol: "XAU-USD", At: now, CostUSD: decimal.NewFromFloat(0.2), StartsEpisode: true})
+
+	require.False(t, l.Assess(now.Add(risk.TradeChannelGrace-time.Second)).TradeChannelSuspect)
+	require.True(t, l.Assess(now.Add(risk.TradeChannelGrace)).TradeChannelSuspect)
+}
+
+// State written before the field existed carries no first-episode timestamp.
+// Reading it as "long ago" would announce a broken channel on every restart.
+func TestRestoredStateWithoutATimestampIsNotSuspect(t *testing.T) {
+	now := time.Date(2026, 8, 6, 14, 34, 38, 0, time.UTC)
+	l := risk.New(risk.Limits{MaxDailyLossUSD: 35})
+
+	l.Restore(risk.State{Day: now.UTC().Truncate(24 * time.Hour), EpisodesToday: 3}, now)
+	require.False(t, l.Assess(now).TradeChannelSuspect)
+}

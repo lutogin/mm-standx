@@ -84,6 +84,15 @@ type State struct {
 	// ненулевом числе эпизодов означает неисправность канала.
 	TradeCount int `json:"trade_count"`
 
+	// FirstEpisodeAt — момент первого залива суток.
+	//
+	// Нужен, чтобы отличить неисправный канал сделок от обычного порядка
+	// доставки. Сообщение об исполнении ордера и сообщение о сделке приходят
+	// разными каналами, и первое штатно опережает второе. Без отсрочки
+	// подозрение срабатывает на каждом первом заливе — то есть ровно тогда,
+	// когда проверять ещё нечего.
+	FirstEpisodeAt time.Time `json:"first_episode_at"`
+
 	// Episodes — заливы за последний час, для скользящего счётчика.
 	Episodes []Fill `json:"episodes"`
 
@@ -137,6 +146,9 @@ func (l *Ledger) OnFill(now time.Time, f Fill) {
 	if f.StartsEpisode {
 		l.state.Episodes = append(l.state.Episodes, f)
 		l.state.EpisodesToday++
+		if l.state.FirstEpisodeAt.IsZero() {
+			l.state.FirstEpisodeAt = f.At
+		}
 	}
 	l.evict(now)
 }
@@ -176,7 +188,7 @@ func (l *Ledger) Assess(now time.Time) Verdict {
 		EstimatedCostUSD:    f(l.state.EstimatedCostUSD),
 		FillsLastHour:       len(l.state.Episodes),
 		EpisodesToday:       l.state.EpisodesToday,
-		TradeChannelSuspect: l.state.EpisodesToday > 0 && l.state.TradeCount == 0,
+		TradeChannelSuspect: l.tradeChannelSuspect(now),
 	}
 
 	// Из двух оценок берётся худшая. Биржевая точнее, когда работает,
@@ -202,6 +214,27 @@ func (l *Ledger) Assess(now time.Time) Verdict {
 		v.Tripped, v.Reason = true, l.state.TrippedReason
 	}
 	return v
+}
+
+// TradeChannelGrace — сколько ждать сообщения о сделке после первого залива.
+//
+// Порядок доставки между каналами не гарантирован, и сообщение об исполнении
+// ордера штатно опережает сообщение о сделке на десятки миллисекунд. Отсрочка
+// отделяет эту разницу от настоящей неисправности, оставаясь достаточно
+// короткой, чтобы молчащий канал был замечен в том же эпизоде.
+const TradeChannelGrace = 30 * time.Second
+
+// tradeChannelSuspect сообщает, что заливы были, а сделок канал не принёс.
+func (l *Ledger) tradeChannelSuspect(now time.Time) bool {
+	if l.state.EpisodesToday == 0 || l.state.TradeCount > 0 {
+		return false
+	}
+	// Состояние прошлого запуска могло не знать момента первого залива: поле
+	// появилось позже. Подозревать канал не на чем — дождёмся нового эпизода.
+	if l.state.FirstEpisodeAt.IsZero() {
+		return false
+	}
+	return now.Sub(l.state.FirstEpisodeAt) >= TradeChannelGrace
 }
 
 // Trip взводит остановку по внешней причине.

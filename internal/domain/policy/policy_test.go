@@ -182,3 +182,50 @@ func TestPresenceLoss(t *testing.T) {
 	require.InDelta(t, 0.5, Ladder{Layers: 2}.PresenceLoss(), 1e-9)
 	require.InDelta(t, 1.0/3, Ladder{Layers: 3, SpreadBps: 1}.PresenceLoss(), 1e-9)
 }
+
+// The risk requirement is computed for one order, but the rungs stand around
+// it, and the nearest one is half a ladder closer to the market. Anchoring
+// moves the centre out so that the binding rung — the one the market reaches
+// first — is the one the requirement was computed for.
+func TestAnchorMovesTheLadderOutward(t *testing.T) {
+	ladder := Ladder{Layers: 3, SpreadBps: 1.0}
+	bounds := Bounds{MinBps: 5.5, MaxBps: 9.5}
+
+	near := Quote{Distance: 5.5, Depth: 5.4, Margin: 3.9, Feasible: true, Reason: "risk-adjusted distance"}
+	anchored := ladder.Anchor(near, bounds)
+
+	require.True(t, anchored.Feasible)
+	require.InDelta(t, 6.5, anchored.Distance.Float64(), 1e-9,
+		"the centre sits a half-width beyond the required distance")
+
+	rungs := ladder.Distances(anchored.Distance)
+	require.InDelta(t, near.Distance.Float64(), rungs[0].Float64(), 1e-9,
+		"the nearest rung stands exactly where the risk measure allows")
+	require.LessOrEqual(t, rungs[len(rungs)-1].Float64(), bounds.MaxBps.Float64(),
+		"the outer rung must stay inside the reward band")
+
+	require.InDelta(t, near.Depth.Float64(), anchored.Depth.Float64(), 1e-9,
+		"depth keeps describing the binding rung")
+}
+
+// When the required distance leaves no room for the whole ladder inside the
+// band, there is no safe configuration and the honest answer is to stand aside.
+func TestAnchorRefusesWhenTheLadderOverflowsTheBand(t *testing.T) {
+	ladder := Ladder{Layers: 3, SpreadBps: 1.0}
+	bounds := Bounds{MinBps: 5.5, MaxBps: 9.5}
+
+	tight := Quote{Distance: 8.0, Feasible: true}
+	require.False(t, ladder.Anchor(tight, bounds).Feasible,
+		"the outer rung would land at 10 bps, past the band")
+
+	// A single rung has no width and is bound only by Target's own check.
+	require.True(t, (Ladder{Layers: 1}).Anchor(tight, bounds).Feasible)
+}
+
+// An infeasible quote carries a reason the caller logs; anchoring must not
+// replace it with one about ladder geometry.
+func TestAnchorKeepsTheOriginalRefusal(t *testing.T) {
+	refused := Quote{Feasible: false, Reason: "risk estimate is not yet based on enough observations"}
+	got := Ladder{Layers: 3, SpreadBps: 1.0}.Anchor(refused, Bounds{MinBps: 5.5, MaxBps: 9.5})
+	require.Equal(t, refused, got)
+}

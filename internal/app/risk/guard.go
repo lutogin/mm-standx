@@ -41,7 +41,12 @@ type Guard struct {
 	done        chan struct{}
 
 	announced bool
+	// nextSuspectLog прореживает предупреждение о канале сделок.
+	nextSuspectLog time.Time
 }
+
+// suspectLogInterval — как часто повторяется предупреждение о канале сделок.
+const suspectLogInterval = 10 * time.Minute
 
 // inboxSize — глубина очереди. Переполнение здесь означало бы потерю учёта
 // исполнения, поэтому запас берётся с избытком: события редки по замыслу.
@@ -224,7 +229,11 @@ func (g *Guard) evaluate(ctx context.Context) {
 	g.metrics.FillsLastHour(v.FillsLastHour)
 	g.metrics.KillSwitch(v.Tripped)
 
-	if v.TradeChannelSuspect {
+	// Вердикт выносится на каждом событии, а неисправный канал остаётся
+	// неисправным: без прореживания одно и то же предупреждение вытеснило бы
+	// из лога всё остальное ровно тогда, когда лог нужен.
+	if v.TradeChannelSuspect && !now.Before(g.nextSuspectLog) {
+		g.nextSuspectLog = now.Add(suspectLogInterval)
 		g.log.Warn("fills recorded but no trade messages received: "+
 			"the exchange trade channel may be broken, falling back to the cost model",
 			"episodes_today", v.EpisodesToday)

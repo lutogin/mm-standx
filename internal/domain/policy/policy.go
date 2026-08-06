@@ -178,6 +178,14 @@ type Ladder struct {
 	SpreadBps money.Bps
 }
 
+// HalfWidth — расстояние от центра лесенки до крайней ступени.
+func (l Ladder) HalfWidth() money.Bps {
+	if l.Layers <= 1 {
+		return 0
+	}
+	return money.Bps(float64(l.Layers-1)) * l.SpreadBps / 2
+}
+
 // Distances возвращает дистанции ступеней, центрированные вокруг target,
 // от ближней к mark до дальней.
 func (l Ladder) Distances(target money.Bps) []money.Bps {
@@ -185,12 +193,49 @@ func (l Ladder) Distances(target money.Bps) []money.Bps {
 		return []money.Bps{target}
 	}
 
-	half := money.Bps(float64(l.Layers-1)) * l.SpreadBps / 2
+	half := l.HalfWidth()
 	out := make([]money.Bps, l.Layers)
 	for i := range out {
 		out[i] = target - half + money.Bps(float64(i))*l.SpreadBps
 	}
 	return out
+}
+
+// Anchor превращает дистанцию, вычисленную для одного ордера, в центр лесенки.
+//
+// Appetite.Target отвечает на вопрос «где безопасно стоять ордеру», и ответ
+// относится к одному ордеру. Ступени же расставляются вокруг этой дистанции,
+// и ближняя оказывается на половину ширины лесенки ближе к рынку, чем позволяет
+// мера риска. Рынок достаёт первой именно её, поэтому требование риска обязано
+// относиться к ней, а центр — отодвигаться наружу.
+//
+// Depth и Margin остаются от исходной дистанции намеренно: они описывают ту
+// ступень, до которой рынку идти меньше всего, то есть связывающую.
+//
+// Дальняя ступень при этом обязана уместиться в полосу награды. Ордер за её
+// краем не приносит ничего и попадает в зону перестановки сразу после
+// размещения — бот переставлял бы его бесконечно, платя запросами за ноль.
+func (l Ladder) Anchor(q Quote, b Bounds) Quote {
+	if !q.Feasible {
+		return q
+	}
+	width := l.HalfWidth()
+	if width <= 0 {
+		return q
+	}
+
+	outer := q.Distance + 2*width
+	if outer > b.MaxBps {
+		return Quote{
+			Feasible: false,
+			Reason: fmt.Sprintf(
+				"the ladder does not fit: the near rung needs %s and the outer one would reach %s past the band at %s",
+				q.Distance, outer, b.MaxBps),
+		}
+	}
+
+	q.Distance += width
+	return q
 }
 
 // Fits сообщает, помещается ли лесенка целиком в удерживаемый диапазон.

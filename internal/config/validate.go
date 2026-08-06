@@ -10,6 +10,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"github.com/nd/mm-standx/internal/domain/money"
+	"github.com/nd/mm-standx/internal/domain/policy"
 	"github.com/nd/mm-standx/internal/domain/trading"
 )
 
@@ -251,6 +252,7 @@ func (s Symbol) validate(name string, band money.Bps) []error {
 	}
 	errs = append(errs, s.Quote.validate(prefix+".quote")...)
 	errs = append(errs, s.Appetite.validate(prefix+".appetite", band)...)
+	errs = append(errs, validateLadderFits(prefix, s.Quote, s.Appetite)...)
 	errs = append(errs, s.Uptime.validate(prefix+".uptime")...)
 	errs = append(errs, s.Volatility.validate(prefix+".volatility")...)
 	if s.Enabled {
@@ -274,6 +276,42 @@ func (q Quote) validate(prefix string) []error {
 	}
 	if q.MinRest < 0 || q.RequoteCooldown < 0 {
 		errs = append(errs, fmt.Errorf("%s: minRest and requoteCooldown must not be negative", prefix))
+	}
+	return errs
+}
+
+// validateLadderFits сверяет геометрию лесенки с мёртвой зоной и полосой награды.
+//
+// Обе проверки ловят настройку, при которой бот исправно работает и при этом
+// гарантированно не делает того, ради чего написан.
+//
+// Мёртвая зона строится вокруг центра лесенки. Если она уже половины ширины
+// лесенки, крайние ступени оказываются снаружи сразу после размещения и просят
+// перестановки бесконечно — бюджет запросов уходит на дрожание.
+//
+// Полоса награды ограничивает дальнюю ступень: до неё от ближней ровно ширина
+// лесенки, и если эта сумма не помещается между minBps и краем полосы, актор
+// не сможет выставить ни одной допустимой конфигурации — он просто замолчит
+// (policy.Ladder.Anchor), и понять почему по логу будет труднее, чем прочитать
+// отказ при запуске.
+func validateLadderFits(prefix string, q Quote, a Appetite) []error {
+	ladder := policy.Ladder{Layers: q.LadderLayers, SpreadBps: q.LadderSpreadBps}
+	half := ladder.HalfWidth()
+	if half <= 0 {
+		return nil
+	}
+
+	var errs []error
+	if a.MinDeadBandBps < half {
+		errs = append(errs, fmt.Errorf(
+			"%s: the ladder half-width (%s) exceeds appetite.minDeadBandBps (%s): "+
+				"the outer rungs would land outside the dead band and be requoted forever",
+			prefix, half, a.MinDeadBandBps))
+	}
+	if width := 2 * half; a.MinBps+width > a.MaxBps {
+		errs = append(errs, fmt.Errorf(
+			"%s: the ladder is %s wide and does not fit between appetite.minBps (%s) and maxBps (%s)",
+			prefix, width, a.MinBps, a.MaxBps))
 	}
 	return errs
 }

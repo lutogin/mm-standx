@@ -112,15 +112,35 @@ type Engine struct {
 	available decimal.Decimal
 
 	// Управляющее состояние.
-	halted          bool
-	cooldownUntil   time.Time
-	flattenInFlight bool
-	pendingFill     money.Qty
-	fillDeadline    time.Time
-	lastStatus      time.Time
-	lastAction      time.Time
-	blocked         string
-	target          policy.Quote
+	halted        bool
+	cooldownUntil time.Time
+	pendingFill   money.Qty
+	fillDeadline  time.Time
+	lastStatus    time.Time
+	lastAction    time.Time
+	blocked       string
+	target        policy.Quote
+
+	// flattenOrders — закрывающие ордера, отправленные на биржу, с моментом
+	// отправки.
+	//
+	// Память нужна ровно для одного: опознать собственное закрытие среди
+	// сообщений об исполнении. Без неё залив закрывается маркет-ордером,
+	// исполнение этого ордера приходит обратно как ещё один залив, и актор
+	// заводит эпизод, закрыть который уже нечем — позиция к тому моменту
+	// плоская. Итог — вечное «no quoting while exposure is open».
+	flattenOrders map[trading.ClOrdID]time.Time
+
+	// flattenRetryAt — момент, раньше которого второе закрытие не отправляется.
+	//
+	// Ответ на market IOC и обновление позиции приходят разными сообщениями
+	// и не мгновенно. Без паузы каждый служебный тик слал бы ещё один
+	// закрывающий ордер: reduce_only спасёт от переворота, но не от комиссии.
+	//
+	// Он же служит признаком «закрытие в полёте» для запрета котирования.
+	// Признаком нарочно выбран срок, а не флаг: флаг требует снятия сообщением,
+	// которое может не прийти, и тогда актор молчит до конца запуска.
+	flattenRetryAt time.Time
 
 	// pendingWithdraw — ордера, снятие которых не удалось отправить.
 	//
@@ -178,16 +198,17 @@ func New(p Params, deps Deps) *Engine {
 			MinRest:    p.Config.Quote.MinRest,
 			AckTimeout: p.Health.AckTimeout,
 		},
-		bids:     quotes.New(market.Buy, layers),
-		asks:     quotes.New(market.Sell, layers),
-		vol:      volatility.New(p.Volatility),
-		hour:     uptime.New(p.Program, p.Config.Uptime.TargetPct),
-		position: money.MustParseQty("0"),
-		filled:   make(map[trading.ClOrdID]money.Qty),
-		touched:  make(map[trading.ClOrdID]bool),
-		deps:     deps,
-		inbox:    make(chan events.Event, inboxSize),
-		done:     make(chan struct{}),
+		bids:          quotes.New(market.Buy, layers),
+		asks:          quotes.New(market.Sell, layers),
+		vol:           volatility.New(p.Volatility),
+		hour:          uptime.New(p.Program, p.Config.Uptime.TargetPct),
+		position:      money.MustParseQty("0"),
+		filled:        make(map[trading.ClOrdID]money.Qty),
+		touched:       make(map[trading.ClOrdID]bool),
+		flattenOrders: make(map[trading.ClOrdID]time.Time),
+		deps:          deps,
+		inbox:         make(chan events.Event, inboxSize),
+		done:          make(chan struct{}),
 	}
 }
 
@@ -319,7 +340,9 @@ func (e *Engine) closePositionOnExit(ctx context.Context) {
 
 	e.deps.Log.Error("position open on shutdown, closing at market", "symbol", e.symbol, "qty", net)
 	e.position = net
-	e.flattenInFlight = false
+	// Пауза между попытками относится к штатной работе: на выходе времени
+	// на ещё один такт нет, а позиция обязана быть закрыта.
+	e.flattenRetryAt = time.Time{}
 	e.flatten(ctx)
 }
 
@@ -475,6 +498,11 @@ func (e *Engine) onBook(ctx context.Context, ev events.BookUpdated) {
 }
 
 func (e *Engine) onOrder(ctx context.Context, ev events.OrderUpdated) {
+	if _, ours := e.flattenOrders[ev.Order.ClOrdID]; ours {
+		e.onFlattenUpdate(ctx, ev.Order)
+		return
+	}
+
 	ladder := e.ladderFor(ev.Order.Side)
 	if ladder != nil {
 		ladder.OnOrderUpdate(ev.Order, e.deps.Clock.Now())
@@ -492,6 +520,45 @@ func (e *Engine) onOrder(ctx context.Context, ev events.OrderUpdated) {
 	}
 }
 
+// onFlattenUpdate применяет сообщение о судьбе закрывающего ордера.
+//
+// Его исполнение не является заливом: стоимость закрытия уже заложена
+// в оценку, опубликованную при заливе (publishFill), а эпизод там же и заведён.
+// Пропустить этот ордер в общий путь учёта значит посчитать один залив дважды
+// и оставить эпизод незакрытым навсегда.
+func (e *Engine) onFlattenUpdate(ctx context.Context, o trading.Order) {
+	if o.FilledQty.IsPositive() {
+		e.deps.Log.Info("flatten order filled",
+			"symbol", e.symbol, "side", o.Side,
+			"qty", o.FilledQty, "price", o.AvgFillPrice)
+	}
+	if o.Status.IsTerminal() {
+		delete(e.flattenOrders, o.ClOrdID)
+		// Частичное исполнение оставляет позицию открытой. Повтор назначает
+		// служебный тик, который увидит ненулевую позицию.
+		if o.Qty.IsPositive() && o.FilledQty.Lt(o.Qty) {
+			e.deps.Log.Warn("flatten order closed short of the position",
+				"symbol", e.symbol, "filled", o.FilledQty, "requested", o.Qty)
+		}
+	}
+	e.evaluate(ctx, true)
+}
+
+// pruneFlattenOrders забывает закрывающие ордера, о которых биржа промолчала.
+//
+// Терминальное сообщение чистит запись само; предел по возрасту нужен на случай,
+// когда оно не придёт вовсе, и не даёт карте расти в течение суток работы.
+func (e *Engine) pruneFlattenOrders(now time.Time) {
+	for id, at := range e.flattenOrders {
+		if now.Sub(at) > flattenMemory {
+			delete(e.flattenOrders, id)
+		}
+	}
+}
+
+// flattenMemory — сколько помнить отправленный закрывающий ордер.
+const flattenMemory = 5 * time.Minute
+
 // onOrderRejected обрабатывает отказ биржи на этапе матчинга.
 //
 // Основной случай — отклонение post-only: котировка оказалась бы тейкером,
@@ -500,6 +567,19 @@ func (e *Engine) onOrder(ctx context.Context, ev events.OrderUpdated) {
 // две секунды значит терять присутствие впустую.
 func (e *Engine) onOrderRejected(ctx context.Context, ev events.OrderRejected) {
 	now := e.deps.Clock.Now()
+
+	// Отказ по закрывающему ордеру означает открытую позицию без закрытия.
+	// Ступеней он не касается, а повтор назначит служебный тик по истечении
+	// паузы: биржа только что отказала, и немедленная вторая попытка получит
+	// тот же ответ.
+	if _, ours := e.flattenOrders[ev.ClOrdID]; ours {
+		delete(e.flattenOrders, ev.ClOrdID)
+		e.deps.Log.Error("flatten order rejected, the position stays open",
+			"symbol", e.symbol, "cl_ord_id", ev.ClOrdID, "code", ev.Code, "reason", ev.Reason)
+		e.deps.Metrics.OrderFailed(e.symbol, "flatten")
+		return
+	}
+
 	rejected := trading.Order{ClOrdID: ev.ClOrdID, Status: trading.StatusRejected}
 
 	for _, ladder := range []*quotes.Ladder{e.bids, e.asks} {
@@ -534,9 +614,15 @@ func (e *Engine) onTick(ctx context.Context) {
 	// Повтор неудавшегося съёма идёт раньше всего остального: пока он не прошёл,
 	// в стакане стоят ордера, которые мы уже считаем снятыми.
 	e.retryWithdrawal(ctx, now)
+	e.pruneFlattenOrders(now)
 	// Дебаунс частичных исполнений: свип даёт их десятками, и закрывать
 	// каждое отдельным маркет-ордером значило бы платить комиссию многократно.
-	if e.pendingFill.IsPositive() && !now.Before(e.fillDeadline) {
+	//
+	// Позиция сверх разрешённой — тоже повод: закрывающий ордер мог быть
+	// отвергнут или исполнен частично, и без этого условия повторять его было бы
+	// некому, потому что накопленный залив обнуляется первой же попыткой.
+	// При значении по умолчанию под условие попадает любая ненулевая позиция.
+	if e.overPositionLimit() || (e.pendingFill.IsPositive() && !now.Before(e.fillDeadline)) {
 		e.flatten(ctx)
 	}
 	// Нули до готовности оценщика не должны попадать в учёт часа: иначе

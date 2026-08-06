@@ -35,7 +35,7 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 
 	// Незакрытая позиция важнее награды: котировать, имея экспозицию, значит
 	// удвоить её при следующем заливе.
-	if e.flattenInFlight || e.pendingFill.IsPositive() || e.overPositionLimit() {
+	if now.Before(e.flattenRetryAt) || e.pendingFill.IsPositive() || e.overPositionLimit() {
 		e.withdraw(ctx, e.positionCause(), "no quoting while exposure is open")
 		return
 	}
@@ -68,12 +68,24 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 		appetite.JumpMultiple *= bankedCaution
 	}
 
-	quote := e.stickyTarget(appetite.Target(conditions, e.bounds))
+	quote := e.stickyTarget(e.ladder.Anchor(appetite.Target(conditions, e.bounds), e.bounds))
 	e.reportStatus(now, conditions, estimate, quote)
 	e.reportMetrics(now, conditions, estimate, quote)
 
 	if !quote.Feasible {
 		e.withdraw(ctx, ports.CauseNoSafeDistance, quote.Reason)
+		return
+	}
+
+	thresholds := appetite.Thresholds(quote, conditions, e.bounds)
+	distances := e.ladder.Distances(quote.Distance)
+
+	// Опасность проверяется до ограничения темпа. Кулдаун существует, чтобы
+	// не жечь бюджет запросов на перестановках, но, стоя выше этой проверки,
+	// он делал актор слепым на четверть секунды после каждого действия —
+	// при обновлении стакана раз в 300 мс это ровно тот такт, ради которого
+	// быстрый сигнал и заведён.
+	if e.pullDanger(ctx, thresholds, now) {
 		return
 	}
 	// Темп перестановки ограничен независимо от частоты событий: стакан
@@ -82,9 +94,6 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 	if now.Sub(e.lastAction) < e.cfg.Quote.RequoteCooldown {
 		return
 	}
-
-	thresholds := appetite.Thresholds(quote, conditions, e.bounds)
-	distances := e.ladder.Distances(quote.Distance)
 
 	e.blocked = ""
 	plan, err := sizing.Compute(sizing.Inputs{
@@ -116,6 +125,30 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 		}
 		e.execute(ctx, side, actions, allowPlace, plan.Rungs)
 	}
+}
+
+// pullDanger снимает стороны, к ордерам которых рынок подошёл вплотную,
+// и сообщает, что съём состоялся.
+//
+// Путь отделён от общего планирования намеренно: он обязан оставаться
+// доступным независимо от ограничения темпа перестановок и от того, есть ли
+// на стороне команда в полёте.
+func (e *Engine) pullDanger(ctx context.Context, th policy.Thresholds, now time.Time) bool {
+	pulled := false
+
+	for _, side := range []market.Side{market.Buy, market.Sell} {
+		ladder := e.ladderFor(side)
+		actions := ladder.Danger(e.classifier(side, th))
+		if len(actions) == 0 {
+			continue
+		}
+		pulled = true
+		e.lastAction = now
+		// allowPlace = false: съём никогда не сопровождается размещением,
+		// а выставлять по цене, от которой мы только что убежали, — тем более.
+		e.execute(ctx, side, actions, false, nil)
+	}
+	return pulled
 }
 
 // stickyTarget удерживает целевую дистанцию, пока расчётная не отойдёт заметно.
@@ -464,31 +497,47 @@ func (e *Engine) publishFill(
 	})
 }
 
+// flattenGrace — сколько ждать PositionUpdated после залива.
+//
+// Между исполнением и обновлением позиции проходит отдельное сообщение, поэтому
+// нулевая позиция сразу после залива ещё ничего не значит. Но ждать её вечно
+// нельзя: залив мог и не открыть позиции — например, встречное исполнение
+// на другой стороне свело её в ноль. Незакрытый эпизод в этом случае навсегда
+// перекрывает котирование, потому что снять его больше некому.
+const flattenGrace = 2 * time.Second
+
 // flatten закрывает позицию рыночным ордером.
 func (e *Engine) flatten(ctx context.Context) {
-	if e.flattenInFlight {
-		return
-	}
+	now := e.deps.Clock.Now()
+
 	position := e.position
 	if position.IsZero() {
-		if e.pendingFill.IsPositive() {
+		if e.pendingFill.IsPositive() && now.Before(e.fillDeadline.Add(flattenGrace)) {
 			// Исполнение уже зафиксировано, но PositionUpdated ещё не пришёл.
 			// Следующий тик или событие позиции повторит попытку.
 			return
 		}
+		e.clearEpisode(now)
 		return
 	}
 
-	e.flattenInFlight = true
-	defer func() { e.flattenInFlight = false }()
+	if now.Before(e.flattenRetryAt) {
+		return
+	}
+	e.flattenRetryAt = now.Add(e.health.AckTimeout)
 
 	side := market.Sell
 	if position.IsNegative() {
 		side = market.Buy
 	}
 
+	// Идентификатор запоминается до отправки: сообщение об исполнении этого
+	// ордера обязано быть опознано как закрытие, а не как новый залив.
+	id := trading.ClOrdID(ulid.Make().String())
+	e.flattenOrders[id] = now
+
 	err := e.deps.Gateway.Place(ctx, ports.PlaceRequest{
-		ClOrdID:     trading.ClOrdID(ulid.Make().String()),
+		ClOrdID:     id,
 		Symbol:      e.symbol,
 		Side:        side,
 		Type:        trading.Market,
@@ -502,14 +551,35 @@ func (e *Engine) flatten(ctx context.Context) {
 		Priority:   ports.PrioritySafety,
 	})
 	if err != nil {
+		delete(e.flattenOrders, id)
 		e.deps.Log.Error("flatten failed", "symbol", e.symbol, "qty", position, "error", err)
 		return
 	}
 
 	e.pendingFill = money.MustParseQty("0")
 	e.fillDeadline = time.Time{}
-	e.cooldownUntil = e.deps.Clock.Now().Add(e.risk.PostFillCooldown)
-	e.deps.Log.Info("position closed", "symbol", e.symbol, "qty", position)
+	e.cooldownUntil = now.Add(e.risk.PostFillCooldown)
+	// Ордер отправлен, но не исполнен: подтверждение придёт отдельным сообщением,
+	// и до него позиция остаётся открытой.
+	e.deps.Log.Info("closing the position at market",
+		"symbol", e.symbol, "side", side, "qty", position, "cl_ord_id", id)
+}
+
+// clearEpisode закрывает эпизод залива, не породивший позиции.
+//
+// Проверка на положительный залив обязательна: без неё каждый тик плоского
+// актора продлевал бы паузу после залива, и котирование не возобновилось бы
+// никогда.
+func (e *Engine) clearEpisode(now time.Time) {
+	if !e.pendingFill.IsPositive() {
+		return
+	}
+	e.deps.Log.Warn("fill did not open a position, closing the episode",
+		"symbol", e.symbol, "qty", e.pendingFill)
+
+	e.pendingFill = money.MustParseQty("0")
+	e.fillDeadline = time.Time{}
+	e.cooldownUntil = now.Add(e.risk.PostFillCooldown)
 }
 
 // statusInterval — период сводки о состоянии актора.
