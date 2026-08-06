@@ -124,10 +124,19 @@ defaults:
     window: 20m
     minSamples: 40 # 2 минуты прогрева до первой котировки
     fullConfidenceAt: 100 # 5 минут до зрелой оценки
-    # Нижняя граница меры риска, живущая дольше окна. Без неё замерший рынок
-    # (выходные, ночь) даёт зрелую оценку нулевого скачка, и бот подходит
-    # вплотную ровно перед тем, как рынок оживёт. Шесть часов переносят
-    # вечернюю волатильность через ночь, а пятничную — через выходные.
+    # A floor on the risk measure that outlives the window: without it a frozen
+    # market yields a mature estimate of a near-zero jump, and the actor walks
+    # in just before the market wakes up.
+    #
+    # NOT justified by the weekend any more — that case is handled directly by
+    # program.offHours, see PLAN.md section 12.14. What justifies it is that the
+    # window is 20 minutes and forgets a burst entirely, while volatility
+    # clusters: the fill of 6 August was hours of quiet, then 5.38 bps in one
+    # tick.
+    #
+    # Six hours is also what kept the actor out of the book for hours at a
+    # stretch that same day. The trade is settled by arithmetic once the price
+    # of a Maker Hour and the fill rate are measured, not before.
     memoryHalfLife: 6h
   uptime:
     targetPct: 80 # выше 70% зачёт не растёт, разница — страховой запас

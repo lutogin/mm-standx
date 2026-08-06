@@ -215,9 +215,13 @@ func memoryConfig(halfLife time.Duration) Config {
 
 // The maturity correction cannot cover the case it was written for. Inflation
 // multiplies the measured jump, and a frozen market produces a mature estimate
-// of a jump close to zero: any multiple of zero is zero. This is precisely the
-// weekend, when the underlying markets are shut — and Monday arrives with the
-// volatility Friday had.
+// of a jump close to zero: any multiple of zero is zero.
+//
+// The case is not the weekend — that is handled by reward.Schedule, which stops
+// the actor quoting outright. It is the intraday shape the live fill of
+// 6 August took: hours of sub-basis-point ticks, then 5.38 bps in a single one.
+// The window is twenty minutes wide and would have forgotten the burst long
+// before the market did.
 func TestMemoryOutlivesTheWindow(t *testing.T) {
 	e := New(memoryConfig(6 * time.Hour))
 

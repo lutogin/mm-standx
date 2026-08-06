@@ -70,21 +70,39 @@ type Config struct {
 	// Между MinSamples и этим значением требуемый запас искусственно завышается.
 	FullConfidenceAt int
 
-	// MemoryHalfLife — полураспад памяти о крупных скачках.
+	// MemoryHalfLife is the half-life of the record of large jumps.
 	//
-	// Существует потому, что поправка на зрелость оценки не закрывает случай,
-	// ради которого написана. Inflation умножает измеренный скачок, а на
-	// замершем рынке замеры идут исправно и оценка объявляет себя зрелой при
-	// скачке, близком к нулю: любой множитель на нуле даёт ноль. Ровно этот
-	// случай и описывает выходные, когда базовые рынки закрыты, — а понедельник
-	// приходит с той же волатильностью, что была в пятницу.
+	// It exists because the maturity correction cannot cover the case it was
+	// written for. Inflation multiplies the measured jump, but on a frozen
+	// market the samples keep arriving, the estimate declares itself mature at
+	// a jump close to zero, and any multiple of zero is zero.
 	//
-	// Память устроена как затухающий рекорд: max(наблюдённый скачок,
-	// прежний рекорд с поправкой на затухание). Для меры, которая сама является
-	// максимумом, это честнее сглаживания — усреднение размывало бы ровно тот
-	// выброс, ради запоминания которого механизм и нужен.
+	// The original justification was the weekend: the reference markets shut,
+	// and Monday arrives with the volatility Friday had. **That reason is
+	// obsolete** — the shutdown is now described directly by reward.Schedule,
+	// and instruments whose reference market closes are simply not quoted while
+	// it is (PLAN.md §12.14). Do not defend this parameter with the weekend.
 	//
-	// Ноль отключает память: оценка сводится к максимуму окна.
+	// What still justifies it is shorter and sharper: the window is twenty
+	// minutes wide and forgets a burst completely, while volatility clusters —
+	// the minutes after a spike are the ones most likely to hold the next one.
+	// The live fill of 6 August took exactly that shape: hours of sub-basis-point
+	// ticks, then 5.38 bps in a single tick that swept all three rungs in 51 ms.
+	// A shorter memory would have walked the quotes back in towards the market
+	// precisely then.
+	//
+	// The cost is real and visible: through 6 August the memory, not the
+	// measured window, was what kept the actor out of the book for hours at a
+	// stretch. Whether that trade is worth it is arithmetic, not taste, and it
+	// needs two numbers we do not have yet — the price of a Maker Hour and the
+	// fill rate at a given distance. Until both are measured, leave it alone.
+	//
+	// The memory is a decaying record: max(observed jump, previous record after
+	// decay). For a measure that is itself a maximum this is more honest than
+	// smoothing, which would blur away the very outlier the mechanism exists to
+	// remember.
+	//
+	// Zero disables the memory: the estimate reduces to the window maximum.
 	MemoryHalfLife time.Duration
 }
 
