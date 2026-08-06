@@ -108,6 +108,9 @@ const (
 	CauseNoSafeDistance WithdrawCause = "no_safe_distance"
 	// CauseHourLost — час недостижим, дальнейший риск не окупается.
 	CauseHourLost WithdrawCause = "hour_lost"
+	// CauseOffHours — the reference market is shut and the hour accrues at a
+	// reduced multiplier while the fill risk stays the same.
+	CauseOffHours WithdrawCause = "off_hours"
 	// CauseSizing — размер ордера не вычислим.
 	CauseSizing WithdrawCause = "sizing"
 	// CauseBookUnreadable — стакан не читается.

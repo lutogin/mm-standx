@@ -56,11 +56,30 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 		Ready:         estimate.Ready,
 	}
 
+	hour := e.hour.Assess(now)
+
+	// The reference market is shut: the exchange scales the hour's accrual
+	// while the fill risk stays exactly the same. For gold that is a tenth,
+	// so the break-even price of a Maker Hour rises tenfold.
+	if hour.Multiplier < 1 && !e.cfg.Program.QuoteOffHours {
+		reason := fmt.Sprintf(
+			"the reference market is closed, the hour accrues at %.0f%%", hour.Multiplier*100)
+		e.reportBlocked(now, conditions, estimate, reason)
+		e.withdraw(ctx, ports.CauseOffHours, reason)
+		return
+	}
+
 	appetite := e.appetite
-	switch hour := e.hour.Assess(now); hour.Mode {
+	switch hour.Mode {
 	case uptime.Lost:
 		// Час недостижим: дальнейшее присутствие оплачивается исполнениями,
 		// а зачёта не приносит.
+		//
+		// The summary is printed before returning: without it the actor goes
+		// silent for the rest of the hour, and a deliberate refusal reads in
+		// the log exactly like a crash — the ambiguity the summary exists to
+		// remove.
+		e.reportBlocked(now, conditions, estimate, hour.Reason)
 		e.withdraw(ctx, ports.CauseHourLost, hour.Reason)
 		return
 	case uptime.Banked:
@@ -585,6 +604,25 @@ func (e *Engine) clearEpisode(now time.Time) {
 // statusInterval — период сводки о состоянии актора.
 const statusInterval = 15 * time.Second
 
+// reportBlocked prints the summary for paths that abandon the evaluation
+// before any quote geometry exists.
+//
+// Those paths never reach the geometry, and without an explicit call the actor
+// falls completely silent — for the rest of the hour when the hour is lost, and
+// for a whole weekend when the reference market is shut. A silent actor is
+// indistinguishable from a broken one.
+func (e *Engine) reportBlocked(
+	now time.Time,
+	conditions policy.Conditions,
+	estimate volatility.Estimate,
+	reason string,
+) {
+	e.blocked = reason
+	e.reportStatus(now, conditions, estimate, policy.Quote{})
+	e.reportMetrics(now, conditions, estimate, policy.Quote{})
+	e.blocked = ""
+}
+
 // reportStatus печатает, что актор думает о рынке прямо сейчас.
 //
 // Без этого теневой прогон невозможно интерпретировать: молчащий актор
@@ -613,9 +651,13 @@ func (e *Engine) reportStatus(
 		"samples", estimate.Samples,
 		"tick", estimate.Tick,
 		"confidence", fmt.Sprintf("%.0f%%", estimate.Confidence*100),
-		"hour_mode", hour.Mode,
+		// As a string, not the value: the slog JSON handler does not call
+		// String() on numeric types, and the mode printed as "0" in the live
+		// log.
+		"hour_mode", hour.Mode.String(),
 		"uptime_pct", fmt.Sprintf("%.0f", hour.QualifiedPct),
 		"maker_hours", fmt.Sprintf("%.4f", hour.MakerHours),
+		"accrual_multiplier", fmt.Sprintf("%.2f", hour.Multiplier),
 		"bids_live", e.bids.LiveCount(),
 		"asks_live", e.asks.LiveCount(),
 	}

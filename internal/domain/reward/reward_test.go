@@ -2,6 +2,7 @@ package reward
 
 import (
 	"testing"
+	"time"
 
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/require"
@@ -9,6 +10,10 @@ import (
 
 	"github.com/nd/mm-standx/internal/domain/money"
 )
+
+// midWeek is a Thursday noon: an hour when every reference market is open, so
+// the off-hours multiplier plays no part in the accrual tests.
+var midWeek = time.Date(2026, 8, 6, 12, 0, 0, 0, time.UTC)
 
 func liveCurve() Curve {
 	return Curve{BandBps: 10, MaxWeightPct: 200, MinWeightPct: 40}
@@ -116,16 +121,16 @@ func TestMakerHoursIsAStepFunctionOfUptime(t *testing.T) {
 		return out
 	}
 
-	full := p.MakerHours(uptimeSamples(100))
+	full := p.MakerHours(uptimeSamples(100), midWeek)
 	require.InDelta(t, 1.0, full, 1e-9, "continuous quoting earns one maker hour")
 
-	require.InDelta(t, full, p.MakerHours(uptimeSamples(75)), 1e-9,
+	require.InDelta(t, full, p.MakerHours(uptimeSamples(75), midWeek), 1e-9,
 		"seventy-five percent uptime earns the same as one hundred")
 
-	require.InDelta(t, 0.5, p.MakerHours(uptimeSamples(60)), 1e-9,
+	require.InDelta(t, 0.5, p.MakerHours(uptimeSamples(60), midWeek), 1e-9,
 		"between the tiers only half is credited")
 
-	require.Zero(t, p.MakerHours(uptimeSamples(40)),
+	require.Zero(t, p.MakerHours(uptimeSamples(40), midWeek),
 		"below the lowest tier nothing is credited")
 }
 
@@ -141,7 +146,7 @@ func TestDowntimeBudgetIsRealSlack(t *testing.T) {
 			samples[i] = decimal.Zero
 		}
 	}
-	require.InDelta(t, 1.0, p.MakerHours(samples), 1e-9,
+	require.InDelta(t, 1.0, p.MakerHours(samples, midWeek), 1e-9,
 		"twenty-two percent of the hour may be spent with no quotes at all")
 }
 
@@ -152,11 +157,11 @@ func TestMakerHoursRespectsHourlyCeiling(t *testing.T) {
 	for i := range samples {
 		samples[i] = decimal.NewFromInt(1_000_000)
 	}
-	require.Equal(t, p.MaxMakerHoursPerHour, p.MakerHours(samples))
+	require.Equal(t, p.MaxMakerHoursPerHour, p.MakerHours(samples, midWeek))
 }
 
 func TestMakerHoursHandlesEmptyInput(t *testing.T) {
-	require.Zero(t, silverProgram().MakerHours(nil))
+	require.Zero(t, silverProgram().MakerHours(nil, midWeek))
 }
 
 func TestRequiredQty(t *testing.T) {

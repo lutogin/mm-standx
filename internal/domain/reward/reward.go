@@ -10,6 +10,7 @@ package reward
 import (
 	"math"
 	"sort"
+	"time"
 
 	"github.com/shopspring/decimal"
 
@@ -61,6 +62,28 @@ type Program struct {
 	PerSideCap decimal.Decimal
 	// MaxMakerHoursPerHour — потолок начисления за час.
 	MaxMakerHoursPerHour float64
+
+	// OffHours describes when the reference market behind the instrument is
+	// shut. The zero value means a 24/7 market.
+	OffHours Schedule
+	// OffHoursMultiplier scales the hour's accrual while the reference market
+	// is shut. One means no reduction.
+	//
+	// StandX applies 10% to metals, oil and equities over weekends and
+	// holidays. Presence during those hours costs the same fill risk and earns
+	// a tenth, so the number belongs in the model rather than in a footnote.
+	OffHoursMultiplier float64
+}
+
+// Multiplier returns the accrual factor in force at the given instant.
+func (p Program) Multiplier(at time.Time) float64 {
+	if p.OffHoursMultiplier < 0 || p.OffHoursMultiplier >= 1 {
+		return 1
+	}
+	if p.OffHours.Closed(at) {
+		return p.OffHoursMultiplier
+	}
+	return 1
 }
 
 // ScaledQty применяет вес дистанции к размеру ордера.
@@ -103,7 +126,10 @@ func (p Program) Sample(bid, ask []Order) decimal.Decimal {
 // на соответствующей позиции, и выбирается лучший исход. Отсутствующие
 // котировки должны присутствовать в наборе нулями: именно они и делают
 // метрику зависимой от аптайма.
-func (p Program) MakerHours(samples []decimal.Decimal) float64 {
+//
+// The instant selects the off-hours multiplier: the exchange applies it to the
+// hour's outcome, after the tier maximum and the ceiling.
+func (p Program) MakerHours(samples []decimal.Decimal, at time.Time) float64 {
 	if len(samples) == 0 || !p.UnitSize.IsPositive() {
 		return 0
 	}
@@ -121,9 +147,9 @@ func (p Program) MakerHours(samples []decimal.Decimal) float64 {
 		}
 	}
 	if p.MaxMakerHoursPerHour > 0 && best > p.MaxMakerHoursPerHour {
-		return p.MaxMakerHoursPerHour
+		best = p.MaxMakerHoursPerHour
 	}
-	return best
+	return best * p.Multiplier(at)
 }
 
 // percentile возвращает значение на позиции p процентов в наборе,

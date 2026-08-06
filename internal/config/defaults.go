@@ -121,6 +121,9 @@ func defaults() *Config {
 				UnitSize:             "0",
 				PerSideCap:           "0",
 				MaxMakerHoursPerHour: 0,
+				// One describes a 24/7 market. Instruments whose reference
+				// market closes override this together with the window.
+				OffHoursMultiplier: 1,
 			},
 			Uptime: Uptime{
 				TargetPct:    80,

@@ -253,6 +253,10 @@ func (s Symbol) validate(name string, band money.Bps) []error {
 	errs = append(errs, s.Quote.validate(prefix+".quote")...)
 	errs = append(errs, s.Appetite.validate(prefix+".appetite", band)...)
 	errs = append(errs, validateLadderFits(prefix, s.Quote, s.Appetite)...)
+	// Checked for disabled instruments too: a typo in the shutdown window
+	// would otherwise surface only when the instrument is switched on, which
+	// happens in production.
+	errs = append(errs, validateOffHours(prefix+".program", s.Program)...)
 	errs = append(errs, s.Uptime.validate(prefix+".uptime")...)
 	errs = append(errs, s.Volatility.validate(prefix+".volatility")...)
 	if s.Enabled {
@@ -365,6 +369,43 @@ func (p Program) validate(prefix string) []error {
 	}
 	if p.MaxMakerHoursPerHour <= 0 {
 		errs = append(errs, fmt.Errorf("%s.maxMakerHoursPerHour must be positive for an enabled symbol", prefix))
+	}
+	return errs
+}
+
+// validateOffHours checks the shutdown schedule of the reference market.
+//
+// A multiplier without a window and a window without a multiplier are equally
+// useless and almost always mean a half-written setting, so both are required
+// together. A mistake here costs a weekend: the bot would treat the hour as a
+// full one while earning a tenth of it at unchanged fill risk.
+func validateOffHours(prefix string, p Program) []error {
+	var errs []error
+
+	schedule, err := p.Schedule()
+	if err != nil {
+		errs = append(errs, fmt.Errorf("%s.offHours: %w", prefix, err))
+		return errs
+	}
+
+	if p.OffHoursMultiplier < 0 || p.OffHoursMultiplier > 1 {
+		errs = append(errs, fmt.Errorf(
+			"%s.offHoursMultiplier (%.2f) must be within [0, 1]; one means a 24/7 market",
+			prefix, p.OffHoursMultiplier))
+	}
+
+	reduced := p.OffHoursMultiplier >= 0 && p.OffHoursMultiplier < 1
+	scheduled := !schedule.Weekly.IsZero() || len(schedule.Holidays) > 0
+
+	switch {
+	case reduced && !scheduled:
+		errs = append(errs, fmt.Errorf(
+			"%s: offHoursMultiplier is %.2f but no offHours window is set, so it would never apply",
+			prefix, p.OffHoursMultiplier))
+	case scheduled && !reduced:
+		errs = append(errs, fmt.Errorf(
+			"%s: an offHours window is set but offHoursMultiplier is %.2f, so the window has no effect",
+			prefix, p.OffHoursMultiplier))
 	}
 	return errs
 }

@@ -91,6 +91,10 @@ type Snapshot struct {
 	DowntimeBudget time.Duration
 	// MakerHours — оценка начисления по накопленной выборке.
 	MakerHours float64
+	// Multiplier is the accrual factor in force for this hour. Below one it
+	// means the reference market is shut and the hour is worth a fraction of
+	// a normal one, while the fill risk stays exactly the same.
+	Multiplier float64
 	// Reason описывает выбранный режим.
 	Reason string
 }
@@ -106,7 +110,8 @@ func (t *Tracker) Assess(now time.Time) Snapshot {
 
 	s := Snapshot{
 		ElapsedPct: elapsedPct,
-		MakerHours: t.program.MakerHours(t.samples),
+		MakerHours: t.program.MakerHours(t.samples, now),
+		Multiplier: t.program.Multiplier(now),
 	}
 	if len(t.samples) == 0 {
 		s.Reason = "no observations yet"

@@ -308,6 +308,11 @@ func buildProgram(rewardCfg config.Reward, p config.Program) (reward.Program, er
 		return reward.Program{}, fmt.Errorf("per-side cap %q: %w", p.PerSideCap, err)
 	}
 
+	schedule, err := p.Schedule()
+	if err != nil {
+		return reward.Program{}, fmt.Errorf("off-hours schedule: %w", err)
+	}
+
 	tiers := make([]reward.Tier, 0, len(rewardCfg.UptimeTiers))
 	for _, t := range rewardCfg.UptimeTiers {
 		tiers = append(tiers, reward.Tier{ThresholdPct: t.ThresholdPct, Multiplier: t.Multiplier})
@@ -323,6 +328,8 @@ func buildProgram(rewardCfg config.Reward, p config.Program) (reward.Program, er
 		UnitSize:             unit,
 		PerSideCap:           cap,
 		MaxMakerHoursPerHour: p.MaxMakerHoursPerHour,
+		OffHours:             schedule,
+		OffHoursMultiplier:   p.OffHoursMultiplier,
 	}, nil
 }
 

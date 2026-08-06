@@ -95,7 +95,12 @@ defaults:
   allocationUsd: 0
   quote:
     ladderLayers: 3 # лесенка компенсирует отсутствие amend в API
-    ladderSpreadBps: 1.0
+    # The reward band is only 10 bps wide and ends abruptly, so the width of
+    # the ladder comes straight out of the distance budget: at 1.0 the three
+    # rungs took 2 of those 10 bps. They buy no risk diversification in return
+    # — on 6 August all three went in a single sweep, 51 ms apart. A 0.4 bps
+    # step is about 1.7 ticks on gold.
+    ladderSpreadBps: 0.4
     minRest: 3200ms # ≥3с, иначе ордер не засчитывается в Maker Points
     requoteCooldown: 250ms
   # Дистанции здесь нет: она вычисляется из спреда и измеренного скачка.
@@ -106,10 +111,10 @@ defaults:
     jumpMultiple: 1.25
     floorMarginBps: 1.5 # запас когда скачок обманчиво мал (выходные, короткое окно)
     deadBandJumps: 2.0 # шире мёртвая зона → реже перестановки, дольше в стакане
-    # Не меньше половины ширины лесенки (ladderLayers-1) x ladderSpreadBps / 2,
+    # Не меньше полуширины лесенки (ladderLayers-1) x ladderSpreadBps / 2,
     # иначе крайние ступени стоят вне мёртвой зоны и переставляются бесконечно.
     # Проверяется при запуске.
-    minDeadBandBps: 1.2
+    minDeadBandBps: 0.5
     # Абсолютный пол. С появлением memoryHalfLife он перестал быть основной
     # защитой от заниженной оценки риска и связывает дистанцию редко; снижать
     # его следует по результатам суточного прогона в будни, а не умозрительно.
@@ -161,26 +166,128 @@ symbols:
   XAU-USD:
     enabled: true
     allocationUsd: 60
-    program: { unitSize: "30", perSideCap: "60", maxMakerHoursPerHour: 2 }
+    program:
+      unitSize: "30"
+      perSideCap: "60"
+      maxMakerHoursPerHour: 2
+      # The reference market is shut over the weekend: the exchange scales
+      # the hour's accrual by 0.1 while the fill risk is unchanged, so the
+      # break-even price of a Maker Hour rises tenfold. The window is
+      # deliberately wider than the venue's real hours (COMEX closes Fri
+      # 21:00 UTC and reopens Sun 22:00): erring towards "closed" costs idle
+      # time, erring the other way costs money. Narrow it once the first
+      # actual accrual has been reconciled.
+      offHoursMultiplier: 0.1
+      offHours:
+        from: "Fri 20:00"
+        to: "Mon 00:00"
+        # The exchange publishes no machine-readable holiday calendar, so this
+        # list is maintained by hand. Empty is not a claim that there are none.
+        holidays: []
   XAG-USD:
     enabled: true
     allocationUsd: 60
-    program: { unitSize: "1500", perSideCap: "3000", maxMakerHoursPerHour: 2 }
+    program:
+      unitSize: "1500"
+      perSideCap: "3000"
+      maxMakerHoursPerHour: 2
+      # The reference market is shut over the weekend: the exchange scales
+      # the hour's accrual by 0.1 while the fill risk is unchanged, so the
+      # break-even price of a Maker Hour rises tenfold. The window is
+      # deliberately wider than the venue's real hours (COMEX closes Fri
+      # 21:00 UTC and reopens Sun 22:00): erring towards "closed" costs idle
+      # time, erring the other way costs money. Narrow it once the first
+      # actual accrual has been reconciled.
+      offHoursMultiplier: 0.1
+      offHours:
+        from: "Fri 20:00"
+        to: "Mon 00:00"
+        # The exchange publishes no machine-readable holiday calendar, so this
+        # list is maintained by hand. Empty is not a claim that there are none.
+        holidays: []
   CL-USD:
     enabled: true
     allocationUsd: 60
-    program: { unitSize: "1400", perSideCap: "2800", maxMakerHoursPerHour: 2 }
+    program:
+      unitSize: "1400"
+      perSideCap: "2800"
+      maxMakerHoursPerHour: 2
+      # The reference market is shut over the weekend: the exchange scales
+      # the hour's accrual by 0.1 while the fill risk is unchanged, so the
+      # break-even price of a Maker Hour rises tenfold. The window is
+      # deliberately wider than the venue's real hours (COMEX closes Fri
+      # 21:00 UTC and reopens Sun 22:00): erring towards "closed" costs idle
+      # time, erring the other way costs money. Narrow it once the first
+      # actual accrual has been reconciled.
+      offHoursMultiplier: 0.1
+      offHours:
+        from: "Fri 20:00"
+        to: "Mon 00:00"
+        # The exchange publishes no machine-readable holiday calendar, so this
+        # list is maintained by hand. Empty is not a claim that there are none.
+        holidays: []
 
   # Акции: гэпы на открытии и закрытии базового рынка.
   TSLA-USD:
     enabled: true
     allocationUsd: 60
-    program: { unitSize: "400", perSideCap: "800", maxMakerHoursPerHour: 2 }
+    program:
+      unitSize: "400"
+      perSideCap: "800"
+      maxMakerHoursPerHour: 2
+      # The reference market is shut over the weekend: the exchange scales
+      # the hour's accrual by 0.1 while the fill risk is unchanged, so the
+      # break-even price of a Maker Hour rises tenfold. The window is
+      # deliberately wider than the venue's real hours (COMEX closes Fri
+      # 21:00 UTC and reopens Sun 22:00): erring towards "closed" costs idle
+      # time, erring the other way costs money. Narrow it once the first
+      # actual accrual has been reconciled.
+      offHoursMultiplier: 0.1
+      offHours:
+        from: "Fri 20:00"
+        to: "Mon 00:00"
+        # The exchange publishes no machine-readable holiday calendar, so this
+        # list is maintained by hand. Empty is not a claim that there are none.
+        holidays: []
   MU-USD:
     enabled: true
     allocationUsd: 60
-    program: { unitSize: "200", perSideCap: "400", maxMakerHoursPerHour: 2 }
+    program:
+      unitSize: "200"
+      perSideCap: "400"
+      maxMakerHoursPerHour: 2
+      # The reference market is shut over the weekend: the exchange scales
+      # the hour's accrual by 0.1 while the fill risk is unchanged, so the
+      # break-even price of a Maker Hour rises tenfold. The window is
+      # deliberately wider than the venue's real hours (COMEX closes Fri
+      # 21:00 UTC and reopens Sun 22:00): erring towards "closed" costs idle
+      # time, erring the other way costs money. Narrow it once the first
+      # actual accrual has been reconciled.
+      offHoursMultiplier: 0.1
+      offHours:
+        from: "Fri 20:00"
+        to: "Mon 00:00"
+        # The exchange publishes no machine-readable holiday calendar, so this
+        # list is maintained by hand. Empty is not a claim that there are none.
+        holidays: []
   SPCX-USD:
     enabled: true
     allocationUsd: 60
-    program: { unitSize: "800", perSideCap: "800", maxMakerHoursPerHour: 1 }
+    program:
+      unitSize: "800"
+      perSideCap: "800"
+      maxMakerHoursPerHour: 1
+      # The reference market is shut over the weekend: the exchange scales
+      # the hour's accrual by 0.1 while the fill risk is unchanged, so the
+      # break-even price of a Maker Hour rises tenfold. The window is
+      # deliberately wider than the venue's real hours (COMEX closes Fri
+      # 21:00 UTC and reopens Sun 22:00): erring towards "closed" costs idle
+      # time, erring the other way costs money. Narrow it once the first
+      # actual accrual has been reconciled.
+      offHoursMultiplier: 0.1
+      offHours:
+        from: "Fri 20:00"
+        to: "Mon 00:00"
+        # The exchange publishes no machine-readable holiday calendar, so this
+        # list is maintained by hand. Empty is not a claim that there are none.
+        holidays: []

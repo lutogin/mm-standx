@@ -26,6 +26,7 @@ import (
 
 	"github.com/nd/mm-standx/internal/domain/market"
 	"github.com/nd/mm-standx/internal/domain/money"
+	"github.com/nd/mm-standx/internal/domain/reward"
 	"github.com/nd/mm-standx/internal/domain/trading"
 	"github.com/nd/mm-standx/internal/secret"
 )
@@ -243,6 +244,52 @@ type Program struct {
 	PerSideCap string `koanf:"perSideCap"`
 	// MaxMakerHoursPerHour — потолок начисления за час.
 	MaxMakerHoursPerHour float64 `koanf:"maxMakerHoursPerHour"`
+
+	// OffHoursMultiplier scales the hour's accrual while the reference market
+	// is shut. One, the default, describes a 24/7 market.
+	OffHoursMultiplier float64 `koanf:"offHoursMultiplier"`
+	// OffHours is the recurring shutdown window of the reference market.
+	OffHours OffHours `koanf:"offHours"`
+	// QuoteOffHours allows quoting while the reduced multiplier is in force.
+	//
+	// Off by default. Presence during those hours carries the full fill risk
+	// and earns a fraction, so it has to be asked for explicitly.
+	QuoteOffHours bool `koanf:"quoteOffHours"`
+}
+
+// Schedule converts the configured off-hours into the domain form.
+//
+// Lives here rather than in the composition root so that validation and
+// construction read the same value: a window that parses at startup but not
+// during validation would be a defect nobody sees until a Saturday.
+func (p Program) Schedule() (reward.Schedule, error) {
+	window, err := reward.ParseWindow(p.OffHours.From, p.OffHours.To)
+	if err != nil {
+		return reward.Schedule{}, err
+	}
+
+	holidays := make([]time.Time, 0, len(p.OffHours.Holidays))
+	for _, raw := range p.OffHours.Holidays {
+		day, err := time.Parse(time.DateOnly, strings.TrimSpace(raw))
+		if err != nil {
+			return reward.Schedule{}, fmt.Errorf("holiday %q: expected a date like 2026-12-25", raw)
+		}
+		holidays = append(holidays, day)
+	}
+	return reward.Schedule{Weekly: window, Holidays: holidays}, nil
+}
+
+// OffHours describes when the reference market behind an instrument is shut.
+//
+// Bounds are written as "Fri 21:00" in UTC, and the window is allowed to wrap
+// through Sunday. An empty pair means the market never closes.
+type OffHours struct {
+	From string `koanf:"from"`
+	To   string `koanf:"to"`
+	// Holidays are ISO dates ("2026-12-25") on which the reference market is
+	// shut for the whole UTC day. The exchange publishes no machine-readable
+	// calendar, so the list is maintained by hand.
+	Holidays []string `koanf:"holidays"`
 }
 
 // Uptime — цели по присутствию в стакане и бюджет простоя.
