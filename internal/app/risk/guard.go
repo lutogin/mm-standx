@@ -24,14 +24,18 @@ const stateName = "risk-ledger"
 
 // Guard ведёт учёт и останавливает торговлю при достижении лимита.
 type Guard struct {
-	limits   domain.Limits
-	ledger   *domain.Ledger
-	store    ports.StateStore
-	bus      *events.Bus
-	clock    ports.Clock
-	metrics  ports.Metrics
-	log      *slog.Logger
-	interval time.Duration
+	limits domain.Limits
+	// notionalLimit is checked at startup rather than continuously, so the
+	// ledger has no use for it. It is carried here to be reported: a limit
+	// nobody can read off the running process is a limit nobody can trust.
+	notionalLimit float64
+	ledger        *domain.Ledger
+	store         ports.StateStore
+	bus           *events.Bus
+	clock         ports.Clock
+	metrics       ports.Metrics
+	log           *slog.Logger
+	interval      time.Duration
 
 	// Всё состояние правится только в собственной горутине: события приходят
 	// из читателей WebSocket, поэтому попадают сначала в очередь.
@@ -68,16 +72,17 @@ func New(
 		TripOnDrawdown:  cfg.KillSwitchOnDrawdown,
 	}
 	return &Guard{
-		limits:   limits,
-		ledger:   domain.New(limits),
-		store:    store,
-		bus:      bus,
-		clock:    clk,
-		metrics:  metrics,
-		log:      log.With("component", "risk"),
-		interval: interval,
-		inbox:    make(chan func(time.Time), inboxSize),
-		done:     make(chan struct{}),
+		limits:        limits,
+		notionalLimit: cfg.MaxNotionalUSD,
+		ledger:        domain.New(limits),
+		store:         store,
+		bus:           bus,
+		clock:         clk,
+		metrics:       metrics,
+		log:           log.With("component", "risk"),
+		interval:      interval,
+		inbox:         make(chan func(time.Time), inboxSize),
+		done:          make(chan struct{}),
 	}
 }
 
@@ -91,8 +96,18 @@ func (g *Guard) Start(context.Context) error {
 	g.log.Info("risk limits in force",
 		"max_daily_loss_usd", g.limits.MaxDailyLossUSD,
 		"max_fills_per_hour", g.limits.MaxFillsPerHour,
+		"max_notional_usd", g.notionalLimit,
 		"trip_on_drawdown", g.limits.TripOnDrawdown,
 		"persisted", g.store != nil)
+
+	// The same values as metrics: the startup line answers the question only
+	// while it is still in the log buffer, and every one of these can be
+	// overridden from the environment. During an incident the answer has to be
+	// available from the running process, not reconstructed from the image.
+	g.metrics.RiskLimit("max_daily_loss_usd", g.limits.MaxDailyLossUSD)
+	g.metrics.RiskLimit("max_fills_per_hour", float64(g.limits.MaxFillsPerHour))
+	g.metrics.RiskLimit("max_notional_usd", g.notionalLimit)
+	g.metrics.RiskLimit("trip_on_drawdown", boolAsFloat(g.limits.TripOnDrawdown))
 
 	g.restore()
 
@@ -261,6 +276,14 @@ func (g *Guard) persist() {
 	if err := g.store.Save(stateName, g.ledger.State()); err != nil {
 		g.log.Error("failed to persist the risk ledger", "error", err)
 	}
+}
+
+// boolAsFloat renders a flag as a gauge value.
+func boolAsFloat(v bool) float64 {
+	if v {
+		return 1
+	}
+	return 0
 }
 
 var _ ports.Runnable = (*Guard)(nil)

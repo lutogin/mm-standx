@@ -40,6 +40,7 @@ type Prometheus struct {
 	estimatedCost prometheus.Gauge
 	fillsPerHour  prometheus.Gauge
 	killSwitch    prometheus.Gauge
+	riskLimit     *prometheus.GaugeVec
 
 	ordersSent   *prometheus.CounterVec
 	ordersFailed *prometheus.CounterVec
@@ -100,6 +101,8 @@ func New() *Prometheus {
 		"Independent estimate of fill cost for the current UTC day")
 	p.fillsPerHour = plain("fills_last_hour", "Fills within the trailing hour")
 	p.killSwitch = plain("kill_switch", "1 when trading is halted by the risk guard")
+	p.riskLimit = gauge("risk_limit",
+		"Risk limit as actually in force in this process, after environment overrides", "limit")
 
 	p.ordersSent = counter("orders_sent_total", "Trading commands sent", "symbol", "side", "kind")
 	p.ordersFailed = counter("orders_failed_total",
@@ -114,6 +117,7 @@ func New() *Prometheus {
 		p.uptime, p.makerHours, p.distance, p.liveQuotes, p.quoting,
 		p.target, p.halfSpread, p.bookDepth, p.jump, p.staleness,
 		p.fills, p.shadowFills, p.flattenCost, p.realizedPnL, p.estimatedCost, p.fillsPerHour, p.killSwitch,
+		p.riskLimit,
 		p.ordersSent, p.ordersFailed, p.aloRejects, p.rateTokens, p.reconnects, p.withdrawals,
 	)
 	return p
@@ -185,6 +189,10 @@ func (p *Prometheus) RealizedPnL(usd float64)   { p.realizedPnL.Set(usd) }
 func (p *Prometheus) EstimatedCost(usd float64) { p.estimatedCost.Set(usd) }
 func (p *Prometheus) FillsLastHour(n int)       { p.fillsPerHour.Set(float64(n)) }
 func (p *Prometheus) KillSwitch(tripped bool)   { p.killSwitch.Set(boolValue(tripped)) }
+
+func (p *Prometheus) RiskLimit(name string, value float64) {
+	p.riskLimit.WithLabelValues(name).Set(value)
+}
 
 func (p *Prometheus) OrderSent(s market.Symbol, side market.Side, kind string) {
 	p.ordersSent.WithLabelValues(s.String(), string(side), kind).Inc()

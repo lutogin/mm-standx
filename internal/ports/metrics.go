@@ -69,6 +69,15 @@ type Metrics interface {
 	FillsLastHour(n int)
 	// KillSwitch — взведена ли аварийная остановка.
 	KillSwitch(tripped bool)
+	// RiskLimit publishes a limit as it is actually in force in this process.
+	//
+	// Every one of these can be overridden from the environment, so the value
+	// baked into the image answers "what was configured", not "what is
+	// running". A protection whose settings cannot be read out of the live
+	// process is verified by assuming which file it loaded and what survived
+	// the overrides — and that assumption is exactly what fails during an
+	// incident.
+	RiskLimit(name string, value float64)
 
 	// --- Нагрузка и здоровье ---
 
@@ -146,6 +155,7 @@ func (NopMetrics) RealizedPnL(float64)                               {}
 func (NopMetrics) EstimatedCost(float64)                             {}
 func (NopMetrics) FillsLastHour(int)                                 {}
 func (NopMetrics) KillSwitch(bool)                                   {}
+func (NopMetrics) RiskLimit(string, float64)                         {}
 func (NopMetrics) OrderSent(market.Symbol, market.Side, string)      {}
 func (NopMetrics) OrderFailed(market.Symbol, string)                 {}
 func (NopMetrics) ALOReject(market.Symbol)                           {}
