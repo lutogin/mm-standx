@@ -218,3 +218,52 @@ func TestRestoredStateWithoutATimestampIsNotSuspect(t *testing.T) {
 	l.Restore(risk.State{Day: now.UTC().Truncate(24 * time.Hour), EpisodesToday: 3}, now)
 	require.False(t, l.Assess(now).TradeChannelSuspect)
 }
+
+// An open leg is not a loss.
+//
+// The cash flow shows minus the whole notional between the fill and the close,
+// and the two are 340 milliseconds apart. Read as a result it trips a thirty
+// dollar daily limit on a three hundred dollar round trip — which is exactly
+// what halted the live bot on 7 August, on the first fill after deploy.
+func TestOpenLegDoesNotTripTheSwitch(t *testing.T) {
+	now := at(12, 29)
+	l := risk.New(risk.Limits{MaxDailyLossUSD: 30, MaxFillsPerHour: 20, TripOnDrawdown: true})
+
+	buy := func(qty, notional, fee string) risk.Execution {
+		return risk.Execution{
+			QtyBase: usd(qty), CashUSD: usd("-" + notional), FeeUSD: usd(fee),
+		}
+	}
+
+	l.OnTrade(now, buy("0.061", "263.24", "0.0263"))
+	require.False(t, l.Assess(now).Tripped, "a bought leg is a position, not a loss")
+	require.InDelta(t, 0, l.Assess(now).ReportedNetUSD, 1e-9, "nothing is realised yet")
+
+	l.OnTrade(now, buy("0.009", "38.84", "0.0039"))
+	require.False(t, l.Assess(now).Tripped)
+
+	// The close brings the position back to flat and the round trip is realised.
+	l.OnTrade(now, risk.Execution{
+		QtyBase: usd("-0.070"), CashUSD: usd("302.008"), FeeUSD: usd("0.1208"),
+	})
+
+	v := l.Assess(now)
+	require.False(t, v.Tripped)
+	require.InDelta(t, -0.221, v.ReportedNetUSD, 0.005, "the episode cost, as measured by hand")
+	require.InDelta(t, 0, v.OpenLegUSD, 1e-9, "nothing left open")
+}
+
+// A leg that never closes must stay visible rather than quietly vanish from the
+// daily result: a lost execution message understates the loss by that leg.
+func TestUnclosedLegStaysVisible(t *testing.T) {
+	now := at(12, 29)
+	l := risk.New(limits())
+
+	l.OnTrade(now, risk.Execution{
+		QtyBase: usd("0.061"), CashUSD: usd("-263.24"), FeeUSD: usd("0.0263"),
+	})
+
+	v := l.Assess(now)
+	require.InDelta(t, 0, v.ReportedNetUSD, 1e-9)
+	require.InDelta(t, -263.27, v.OpenLegUSD, 0.01, "the leg is reported, not counted as loss")
+}

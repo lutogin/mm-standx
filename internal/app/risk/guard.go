@@ -298,9 +298,12 @@ func (g *Guard) persist() {
 func (g *Guard) execution(t trading.Trade) domain.Execution {
 	notional := t.Qty.Decimal().Abs().Mul(t.Price.Decimal())
 
+	qty := t.Qty.Decimal().Abs()
 	cash := notional
 	if t.Side == market.Buy {
 		cash = cash.Neg()
+	} else {
+		qty = qty.Neg()
 	}
 
 	fee := t.Fee.Abs()
@@ -311,7 +314,7 @@ func (g *Guard) execution(t trading.Trade) domain.Execution {
 		}
 		fee = notional.Mul(rate.Ratio())
 	}
-	return domain.Execution{CashUSD: cash, FeeUSD: fee}
+	return domain.Execution{QtyBase: qty, CashUSD: cash, FeeUSD: fee}
 }
 
 // boolAsFloat renders a flag as a gauge value.

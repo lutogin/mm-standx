@@ -84,6 +84,16 @@ type State struct {
 	// ненулевом числе эпизодов означает неисправность канала.
 	TradeCount int `json:"trade_count"`
 
+	// OpenQty и OpenCashUSD — незакрытая нога: сколько базового актива куплено
+	// сверх проданного и во что это обошлось.
+	//
+	// Держатся отдельно от результата намеренно. Стратегия возвращается
+	// в плоскую позицию за доли секунды, поэтому ненулевое значение здесь
+	// живёт мгновения; застрявшее говорит, что какое-то исполнение до нас
+	// не дошло, и результат за сутки занижен на эту ногу.
+	OpenQty     decimal.Decimal `json:"open_qty"`
+	OpenCashUSD decimal.Decimal `json:"open_cash_usd"`
+
 	// FirstEpisodeAt — момент первого залива суток.
 	//
 	// Нужен, чтобы отличить неисправный канал сделок от обычного порядка
@@ -130,6 +140,12 @@ func (l *Ledger) State() State { return l.state }
 
 // Execution — одно исполнение, приведённое к деньгам.
 type Execution struct {
+	// QtyBase — знаковое количество: покупка положительна, продажа отрицательна.
+	//
+	// Нужно, чтобы отличить незакрытую ногу от результата. Денежный поток сам
+	// по себе результатом не является: после покупки он показывает минус на весь
+	// нотионал, и до встречной продажи это не убыток, а открытая позиция.
+	QtyBase decimal.Decimal
 	// CashUSD — знаковый денежный поток: продажа приносит, покупка уносит.
 	CashUSD decimal.Decimal
 	// FeeUSD — комиссия, всегда расход.
@@ -155,8 +171,21 @@ type Execution struct {
 // завысить остаток лимита.
 func (l *Ledger) OnTrade(now time.Time, e Execution) {
 	l.roll(now)
-	l.state.ReportedNetUSD = l.state.ReportedNetUSD.Add(e.CashUSD).Sub(e.FeeUSD.Abs())
 	l.state.TradeCount++
+
+	l.state.OpenQty = l.state.OpenQty.Add(e.QtyBase)
+	l.state.OpenCashUSD = l.state.OpenCashUSD.Add(e.CashUSD).Sub(e.FeeUSD.Abs())
+
+	// Поток становится результатом только когда позиция вернулась в ноль.
+	//
+	// Иначе первое же исполнение эпизода выглядит как убыток на весь нотионал:
+	// покупка 0.07 унции золота это минус 302 USD, и остановка по дневному
+	// убытку в 30 срабатывает через 340 мс после залива, ещё до встречной
+	// продажи. Ровно это и случилось 7 августа.
+	if l.state.OpenQty.IsZero() {
+		l.state.ReportedNetUSD = l.state.ReportedNetUSD.Add(l.state.OpenCashUSD)
+		l.state.OpenCashUSD = decimal.Zero
+	}
 }
 
 // OnFill учитывает исполнение нашей котировки.
@@ -191,6 +220,9 @@ type Verdict struct {
 	EpisodesToday int
 	// TradeChannelSuspect сообщает, что заливы были, а сообщений о сделках нет.
 	TradeChannelSuspect bool
+	// OpenLegUSD — незакрытая нога в деньгах. Ненулевая дольше секунды означает
+	// потерянное сообщение об исполнении и заниженный результат.
+	OpenLegUSD float64
 }
 
 // Assess выносит вердикт и, при достижении лимита, взводит остановку.
@@ -209,6 +241,7 @@ func (l *Ledger) Assess(now time.Time) Verdict {
 		FillsLastHour:       len(l.state.Episodes),
 		EpisodesToday:       l.state.EpisodesToday,
 		TradeChannelSuspect: l.tradeChannelSuspect(now),
+		OpenLegUSD:          f(l.state.OpenCashUSD),
 	}
 
 	// Из двух оценок берётся худшая. Биржевая точнее, когда работает,
