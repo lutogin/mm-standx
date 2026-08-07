@@ -133,7 +133,7 @@ jobs:
           set -euo pipefail
           printf '%s' "$DOCKERHUB_TOKEN" | ssh \
             -o BatchMode=yes -o StrictHostKeyChecking=yes \
-            "mmdeploy@${VPS_HOST}" \
+            "root@${VPS_HOST}" \
             "docker login --username '$DOCKERHUB_USERNAME' --password-stdin"
 
       - name: Deploy
@@ -143,15 +143,24 @@ jobs:
         run: |
           set -euo pipefail
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
-            "mmdeploy@${VPS_HOST}" 'bash -s' <<'REMOTE'
+            "root@${VPS_HOST}" 'bash -s' <<'REMOTE'
           set -Eeuo pipefail
-          cd /opt/mm-standx
+
+          test -f /root/opt/mm-standx/docker-compose.yml || {
+            echo "missing /root/opt/mm-standx/docker-compose.yml" >&2
+            exit 1
+          }
+          test -f /root/opt/mm-standx/.env || {
+            echo "missing /root/opt/mm-standx/.env" >&2
+            exit 1
+          }
 
           previous_image="$(docker image inspect lutogin/mm-standx:latest \
             --format '{{.Id}}' 2>/dev/null || true)"
 
-          docker compose pull mmbot
-          docker compose up -d --remove-orphans mmbot
+          docker compose --project-directory /root/opt/mm-standx pull mmbot
+          docker compose --project-directory /root/opt/mm-standx \
+            up -d --remove-orphans mmbot
 
           for _ in $(seq 1 60); do
             status="$(docker inspect --format '{{.State.Health.Status}}' mmbot \
@@ -165,11 +174,13 @@ jobs:
             sleep 2
           done
 
-          docker compose logs --no-color --tail=100 mmbot >&2 || true
+          docker compose --project-directory /root/opt/mm-standx \
+            logs --no-color --tail=100 mmbot >&2 || true
 
           if [[ -n "$previous_image" ]]; then
             docker tag "$previous_image" lutogin/mm-standx:latest
-            docker compose up -d --force-recreate mmbot
+            docker compose --project-directory /root/opt/mm-standx \
+              up -d --force-recreate mmbot
           fi
 
           exit 1
