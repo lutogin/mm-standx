@@ -139,13 +139,17 @@ type Engine struct {
 	// плоская. Итог — вечное «no quoting while exposure is open».
 	flattenOrders map[trading.ClOrdID]time.Time
 
-	// flattenRetryAt — момент, раньше которого второе закрытие не отправляется.
+	// flattenRetryAt is the earliest time for a position-based recovery close.
 	//
 	// Ответ на market IOC и обновление позиции приходят разными сообщениями
 	// и не мгновенно. Без паузы каждый служебный тик слал бы ещё один
 	// закрывающий ордер: reduce_only спасёт от переворота, но не от комиссии.
 	//
-	// Он же служит признаком «закрытие в полёте» для запрета котирования.
+	// A newly observed fill delta bypasses this deadline and is closed
+	// immediately. The deadline only prevents the slower position snapshot from
+	// duplicating that close while its acknowledgement is in flight.
+	//
+	// It also serves as the "close in flight" signal that blocks quoting.
 	// Признаком нарочно выбран срок, а не флаг: флаг требует снятия сообщением,
 	// которое может не прийти, и тогда актор молчит до конца запуска.
 	flattenRetryAt time.Time
@@ -511,12 +515,20 @@ func (e *Engine) onOrder(ctx context.Context, ev events.OrderUpdated) {
 		return
 	}
 
+	_, knownQuote := e.filled[ev.Order.ClOrdID]
+	matched := false
 	ladder := e.ladderFor(ev.Order.Side)
 	if ladder != nil {
-		ladder.OnOrderUpdate(ev.Order, e.deps.Clock.Now())
+		_, matched = ladder.OnOrderUpdate(ev.Order, e.deps.Clock.Now())
 	}
-	if ev.Order.FilledQty.IsPositive() {
+	if ev.Order.FilledQty.IsPositive() && (knownQuote || matched) {
 		e.onFill(ctx, ev.Order)
+	} else if ev.Order.FilledQty.IsPositive() {
+		// PositionUpdated remains the authority for account exposure and will
+		// flatten an unexpected position. It must not turn a manual or replayed
+		// terminal order into a quote-fill episode in the risk ledger.
+		e.deps.Log.Warn("ignoring fill update for an untracked order",
+			"symbol", e.symbol, "cl_ord_id", ev.Order.ClOrdID)
 	}
 	// Порядок важен: исполнение учитывается до уборки, иначе последнее
 	// сообщение по ордеру — оно же и терминальное — потеряло бы свой объём.
@@ -623,13 +635,10 @@ func (e *Engine) onTick(ctx context.Context) {
 	// в стакане стоят ордера, которые мы уже считаем снятыми.
 	e.retryWithdrawal(ctx, now)
 	e.pruneFlattenOrders(now)
-	// Дебаунс частичных исполнений: свип даёт их десятками, и закрывать
-	// каждое отдельным маркет-ордером значило бы платить комиссию многократно.
-	//
-	// Позиция сверх разрешённой — тоже повод: закрывающий ордер мог быть
-	// отвергнут или исполнен частично, и без этого условия повторять его было бы
-	// некому, потому что накопленный залив обнуляется первой же попыткой.
-	// При значении по умолчанию под условие попадает любая ненулевая позиция.
+	// Immediate closes are sent from onFill. This path reconciles residual
+	// exposure after the acknowledgement timeout, or closes an unexpected
+	// position whose order update was not observed. With the default position
+	// limit, every non-zero position is handled here.
 	if e.overPositionLimit() || (e.pendingFill.IsPositive() && !now.Before(e.fillDeadline)) {
 		e.flatten(ctx)
 	}

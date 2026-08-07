@@ -94,6 +94,21 @@ func TestDangerPullsTheEntireSide(t *testing.T) {
 	}
 }
 
+// Panic starts one observed jump before the market reaches the quote. The
+// entire side must leave there, not one rung at a time after the requote
+// throttle, because a single sweep reaches every rung in the ladder.
+func TestPanicPullsTheEntireSideBeforeTheMarketReachesTheQuote(t *testing.T) {
+	l := fullLadder(t)
+
+	actions := l.Plan(epoch.Add(time.Second), desired(), atDistance(2.0), rules())
+	require.Len(t, actions, 3, "panic must pull the whole side before the quote is touched")
+	for _, a := range actions {
+		require.Equal(t, Cancel, a.Kind)
+		require.Equal(t, policy.UrgencySafety, a.Urgency)
+		require.Equal(t, "price approaching", a.Reason)
+	}
+}
+
 // A pull must ignore both the round-robin pacing and the minimum rest time:
 // once the market is on top of the quote, presence stops being valuable.
 func TestPullIgnoresMinimumRestTime(t *testing.T) {
@@ -114,14 +129,17 @@ func TestFreshOrdersAreLeftAloneUnlessThreatened(t *testing.T) {
 		"after minRest the same drift must trigger a requote")
 }
 
-// Approaching price outranks the rest rule: the cost of waiting is a fill.
-func TestSafetyRequoteBypassesMinimumRest(t *testing.T) {
+// Approaching price outranks the rest rule and round-robin pacing: the cost of
+// waiting is a fill across the same sweep.
+func TestSafetyPullBypassesMinimumRest(t *testing.T) {
 	l := fullLadder(t)
 
 	actions := l.Plan(epoch.Add(time.Second), desired(), atDistance(2.0), rules())
-	require.Len(t, actions, 1)
-	require.Equal(t, Cancel, actions[0].Kind, "approaching price must cancel first")
-	require.Equal(t, policy.UrgencySafety, actions[0].Urgency)
+	require.Len(t, actions, 3)
+	for _, a := range actions {
+		require.Equal(t, Cancel, a.Kind, "approaching price must cancel first")
+		require.Equal(t, policy.UrgencySafety, a.Urgency)
+	}
 }
 
 // Outward drift carries no execution risk, so the replacement goes up before

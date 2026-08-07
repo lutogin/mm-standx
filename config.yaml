@@ -81,7 +81,9 @@ risk:
   fees: { makerBps: 1, takerBps: 4 }
   marginMode: isolated # isolated изолирует риск между инструментами
   flattenPolicy: immediate_market
-  flattenDebounce: 150ms # свип даёт десятки частичных исполнений — агрегируем
+  # Every observed fill delta is closed immediately. Zero also makes the
+  # position-based fallback retry as soon as a PositionUpdated event arrives.
+  flattenDebounce: 0ms
   postFillCooldown: 3s
   killSwitchOnDrawdown: true
 

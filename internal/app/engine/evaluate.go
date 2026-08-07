@@ -361,6 +361,10 @@ func (e *Engine) place(
 		e.deps.Metrics.OrderFailed(e.symbol, "place")
 		return
 	}
+	// Register ownership before the asynchronous order update is handled.
+	// Besides cumulative-fill accounting, the presence of the key prevents a
+	// foreign or replayed terminal order from opening a fill episode.
+	e.filled[id] = money.MustParseQty("0")
 	e.deps.Metrics.OrderSent(e.symbol, side, "place")
 	e.deps.Metrics.QuoteDistance(e.symbol, side, float64(action.Distance))
 	// Логируется и успех: в боевом режиме заглушка молчит, и без этой записи
@@ -482,11 +486,13 @@ func (e *Engine) retryWithdrawal(ctx context.Context, now time.Time) {
 	e.sendWithdrawal(ctx, ids)
 }
 
-// onFill накапливает исполнение и назначает срок закрытия.
+// onFill accounts for a newly observed fill delta and closes it immediately.
 //
-// Дебаунс существует потому, что свип даёт десятки частичных исполнений подряд.
-// Закрывать каждое отдельным маркет-ордером значило бы платить тейкерскую
-// комиссию столько же раз.
+// FilledQty is cumulative, so every delta is sent once as a reduce-only IOC.
+// Waiting to aggregate partial fills leaves directional exposure open during
+// the exact move that reached the quote. Taker fees are proportional to
+// notional, while that exposure can move again before the position stream or
+// service tick arrives.
 func (e *Engine) onFill(ctx context.Context, order trading.Order) {
 	// Биржа присылает накопленный объём исполнения, а не приращение: каждое
 	// следующее сообщение по тому же ордеру повторяет всё, что уже было.
@@ -510,6 +516,11 @@ func (e *Engine) onFill(ctx context.Context, order trading.Order) {
 		"qty", delta, "price", order.AvgFillPrice, "new_episode", startsEpisode)
 
 	e.publishFill(ctx, order, delta, startsEpisode, now)
+	// The matching engine has applied the quote fill before publishing this
+	// update, so a reduce-only close can be submitted without waiting for the
+	// slower position channel. New fill deltas deliberately bypass
+	// flattenRetryAt; that deadline only suppresses position-based duplicates.
+	e.submitFlatten(ctx, order.Side.Opposite(), delta, now, "fill delta")
 	e.withdraw(ctx, ports.CauseFilled, "closing the position")
 }
 
@@ -560,7 +571,11 @@ func (e *Engine) publishFill(
 // перекрывает котирование, потому что снять его больше некому.
 const flattenGrace = 2 * time.Second
 
-// flatten закрывает позицию рыночным ордером.
+// flatten reconciles any residual position with a market order.
+//
+// The immediate close is submitted directly from onFill. This slower path is
+// retained for a rejected or partially filled close, an unexpected external
+// position, or a missed order update.
 func (e *Engine) flatten(ctx context.Context) {
 	now := e.deps.Clock.Now()
 
@@ -578,15 +593,39 @@ func (e *Engine) flatten(ctx context.Context) {
 	if now.Before(e.flattenRetryAt) {
 		return
 	}
-	e.flattenRetryAt = now.Add(e.health.AckTimeout)
 
 	side := market.Sell
 	if position.IsNegative() {
 		side = market.Buy
 	}
 
-	// Идентификатор запоминается до отправки: сообщение об исполнении этого
-	// ордера обязано быть опознано как закрытие, а не как новый залив.
+	if !e.submitFlatten(ctx, side, position.Abs(), now, "position reconciliation") {
+		return
+	}
+
+	e.pendingFill = money.MustParseQty("0")
+	e.fillDeadline = time.Time{}
+	e.cooldownUntil = now.Add(e.risk.PostFillCooldown)
+}
+
+// submitFlatten sends one reduce-only IOC close and remembers its identity.
+//
+// The identifier is stored before the request: its fill report must be
+// recognized as a close rather than as a new quote fill. flattenRetryAt is set
+// even on a transport error because placement errors can be ambiguous; the
+// position-based path waits for reconciliation before risking a duplicate.
+func (e *Engine) submitFlatten(
+	ctx context.Context,
+	side market.Side,
+	qty money.Qty,
+	now time.Time,
+	reason string,
+) bool {
+	if !side.Valid() || !qty.IsPositive() {
+		return false
+	}
+
+	e.flattenRetryAt = now.Add(e.health.AckTimeout)
 	id := trading.ClOrdID(ulid.Make().String())
 	e.flattenOrders[id] = now
 
@@ -596,27 +635,26 @@ func (e *Engine) flatten(ctx context.Context) {
 		Side:        side,
 		Type:        trading.Market,
 		TimeInForce: trading.IOC,
-		Qty:         position.Abs(),
-		// reduce_only исключает переворот позиции, если количество устарело
-		// к моменту, когда ордер дойдёт до матчинга.
-		ReduceOnly: true,
-		MarginMode: e.risk.MarginMode,
-		Leverage:   e.cfg.SymbolRisk.Leverage,
-		Priority:   ports.PrioritySafety,
+		Qty:         qty,
+		ReduceOnly:  true,
+		MarginMode:  e.risk.MarginMode,
+		Leverage:    e.cfg.SymbolRisk.Leverage,
+		Priority:    ports.PrioritySafety,
 	})
 	if err != nil {
 		delete(e.flattenOrders, id)
-		e.deps.Log.Error("flatten failed", "symbol", e.symbol, "qty", position, "error", err)
-		return
+		e.deps.Log.Error("flatten failed",
+			"symbol", e.symbol, "side", side, "qty", qty, "reason", reason, "error", err)
+		e.deps.Metrics.OrderFailed(e.symbol, "flatten")
+		return false
 	}
 
-	e.pendingFill = money.MustParseQty("0")
-	e.fillDeadline = time.Time{}
-	e.cooldownUntil = now.Add(e.risk.PostFillCooldown)
-	// Ордер отправлен, но не исполнен: подтверждение придёт отдельным сообщением,
-	// и до него позиция остаётся открытой.
+	if until := now.Add(e.risk.PostFillCooldown); until.After(e.cooldownUntil) {
+		e.cooldownUntil = until
+	}
 	e.deps.Log.Info("closing the position at market",
-		"symbol", e.symbol, "side", side, "qty", position, "cl_ord_id", id)
+		"symbol", e.symbol, "side", side, "qty", qty, "reason", reason, "cl_ord_id", id)
+	return true
 }
 
 // clearEpisode закрывает эпизод залива, не породивший позиции.

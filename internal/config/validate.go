@@ -210,10 +210,10 @@ func (r Risk) validate() []error {
 	if r.MarginMode != trading.Cross && r.MarginMode != trading.Isolated {
 		errs = append(errs, fmt.Errorf("risk.marginMode: want cross or isolated, got %q", r.MarginMode))
 	}
-	switch r.FlattenPolicy {
-	case "immediate_market", "passive_then_market", "hybrid":
-	default:
-		errs = append(errs, fmt.Errorf("risk.flattenPolicy: unsupported value %q", r.FlattenPolicy))
+	if r.FlattenPolicy != "immediate_market" {
+		errs = append(errs, fmt.Errorf(
+			"risk.flattenPolicy: only %q is implemented, got %q",
+			"immediate_market", r.FlattenPolicy))
 	}
 	if r.FlattenDebounce < 0 {
 		errs = append(errs, errors.New("risk.flattenDebounce must not be negative"))

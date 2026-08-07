@@ -57,6 +57,16 @@ func TestLoadAppliesDefaultsToSymbols(t *testing.T) {
 	require.Equal(t, defaults().Defaults.Volatility.MinSamples, btc.Volatility.MinSamples)
 }
 
+// Advertising an unimplemented flatten policy is unsafe: the process would
+// start successfully and still execute the immediate-market path. Reject such
+// a configuration until the alternative policy has an implementation.
+func TestOnlyImplementedFlattenPolicyIsAccepted(t *testing.T) {
+	cfg := defaults()
+	cfg.Risk.FlattenPolicy = "hybrid"
+
+	require.ErrorContains(t, cfg.Validate(), "only \"immediate_market\" is implemented")
+}
+
 func TestEnabledSymbols(t *testing.T) {
 	cfg, err := Load(writeConfig(t, minimalConfig+`
   ETH-USD:

@@ -22,17 +22,26 @@ import (
 
 // fakeSource replays a scripted sequence of snapshots, one per Snapshot call.
 type fakeSource struct {
+	mu     sync.Mutex
 	frames [][]ports.MetricSample
 	n      int
 }
 
 func (f *fakeSource) Snapshot() []ports.MetricSample {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.n >= len(f.frames) {
 		return nil
 	}
 	out := f.frames[f.n]
 	f.n++
 	return out
+}
+
+func (f *fakeSource) taken() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.n
 }
 
 func gauge(v float64) []ports.MetricSample {
@@ -97,7 +106,7 @@ func TestGaugeIsSummarisedByQuantiles(t *testing.T) {
 
 	c, dir := collector(t, src)
 	require.NoError(t, c.Start(t.Context()))
-	require.Eventually(t, func() bool { return src.n >= 10 }, time.Second, 5*time.Millisecond)
+	require.Eventually(t, func() bool { return src.taken() >= 10 }, time.Second, 5*time.Millisecond)
 	require.NoError(t, c.Stop(t.Context()))
 
 	recs := read(t, dir)
@@ -128,7 +137,7 @@ func TestCounterCountsEventsThatCreatedTheSeries(t *testing.T) {
 
 	c, dir := collector(t, src)
 	require.NoError(t, c.Start(t.Context()))
-	require.Eventually(t, func() bool { return src.n >= 3 }, time.Second, 5*time.Millisecond)
+	require.Eventually(t, func() bool { return src.taken() >= 3 }, time.Second, 5*time.Millisecond)
 	require.NoError(t, c.Stop(t.Context()))
 
 	recs := read(t, dir)
@@ -148,7 +157,7 @@ func TestCounterResetDoesNotProduceNegativeDelta(t *testing.T) {
 
 	c, dir := collector(t, src)
 	require.NoError(t, c.Start(t.Context()))
-	require.Eventually(t, func() bool { return src.n >= 3 }, time.Second, 5*time.Millisecond)
+	require.Eventually(t, func() bool { return src.taken() >= 3 }, time.Second, 5*time.Millisecond)
 	require.NoError(t, c.Stop(t.Context()))
 
 	require.GreaterOrEqual(t, *read(t, dir)[0].Delta, 0.0, "never a negative count")
@@ -194,13 +203,13 @@ func TestSnapshotIsWrittenOnceThenThrottled(t *testing.T) {
 
 	c, dir := collector(t, src)
 	require.NoError(t, c.Start(t.Context()))
-	require.Eventually(t, func() bool { return src.n >= 40 }, time.Second, 5*time.Millisecond)
+	require.Eventually(t, func() bool { return src.taken() >= 40 }, time.Second, 5*time.Millisecond)
 
 	info, err := os.Stat(filepath.Join(dir, "current.json"))
 	require.NoError(t, err, "the first snapshot is immediate")
 	first := info.ModTime()
 
-	require.Eventually(t, func() bool { return src.n >= 40 }, time.Second, 5*time.Millisecond)
+	require.Eventually(t, func() bool { return src.taken() >= 40 }, time.Second, 5*time.Millisecond)
 	info, err = os.Stat(filepath.Join(dir, "current.json"))
 	require.NoError(t, err)
 	require.Equal(t, first, info.ModTime(), "forty samples, still one write")

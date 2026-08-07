@@ -126,17 +126,23 @@ func TestClosingOrderFillDoesNotOpenAnEpisode(t *testing.T) {
 
 	// A quote is hit and the exchange reports the resulting short.
 	e.onFill(ctx, fill("quote-1", market.Sell, "0.008", "4276.1"))
-	e.position = money.MustParseQty("-0.008")
 	require.Equal(t, 1, *episodes)
 
-	// The debounce expires and the actor closes at market.
+	// The close is submitted from the fill delta without waiting for the
+	// position stream or the service tick.
+	closing := gw.marketOrders()
+	require.Len(t, closing, 1, "the position must be closed immediately and exactly once")
+	require.True(t, closing[0].ReduceOnly)
+	require.Equal(t, market.Buy, closing[0].Side)
+	require.Equal(t, money.MustParseQty("0.008"), closing[0].Qty)
+
+	// A lagging position snapshot must not duplicate the close while its
+	// acknowledgement is in flight.
+	e.position = money.MustParseQty("-0.008")
 	clk.advance(200 * time.Millisecond)
 	e.onTick(ctx)
-
-	closing := gw.marketOrders()
-	require.Len(t, closing, 1, "the position must be closed exactly once")
-	require.True(t, closing[0].ReduceOnly)
-	require.True(t, e.pendingFill.IsZero())
+	require.Len(t, gw.marketOrders(), 1)
+	require.True(t, e.pendingFill.IsPositive(), "the episode remains open during reconciliation")
 
 	// The exchange reports the close: the position goes flat and the closing
 	// order comes back filled.
@@ -146,7 +152,11 @@ func TestClosingOrderFillDoesNotOpenAnEpisode(t *testing.T) {
 	})
 
 	require.Equal(t, 1, *episodes, "the close is part of the episode, not a new one")
-	require.True(t, e.pendingFill.IsZero(), "the closing fill must not re-arm the episode")
+	require.True(t, e.pendingFill.IsPositive(), "the closing fill must not start a second episode")
+
+	clk.advance(flattenGrace)
+	e.onTick(ctx)
+	require.True(t, e.pendingFill.IsZero(), "a confirmed flat position closes the episode")
 
 	// And the actor is free to quote again once the cooldown expires.
 	clk.advance(e.risk.PostFillCooldown + time.Second)
@@ -164,6 +174,8 @@ func TestFillWithoutAPositionClearsTheEpisode(t *testing.T) {
 
 	e.onFill(ctx, fill("quote-1", market.Sell, "0.008", "4276.1"))
 	require.True(t, e.pendingFill.IsPositive())
+	require.Len(t, gw.marketOrders(), 1,
+		"the reduce-only close is attempted immediately because the position stream may be late")
 
 	// Within the grace the actor waits: the position update may still be in flight.
 	clk.advance(200 * time.Millisecond)
@@ -173,7 +185,61 @@ func TestFillWithoutAPositionClearsTheEpisode(t *testing.T) {
 	clk.advance(flattenGrace)
 	e.onTick(ctx)
 	require.True(t, e.pendingFill.IsZero(), "the episode must not outlive the grace")
-	require.Empty(t, gw.marketOrders(), "there was no position to close")
+	require.Len(t, gw.marketOrders(), 1, "no position-based retry is needed when the account stays flat")
+}
+
+// Each update contains accumulated volume. Every newly observed delta is
+// closed immediately; already-accounted volume is never sent twice.
+func TestEveryPartialFillDeltaIsFlattenedImmediately(t *testing.T) {
+	ctx := context.Background()
+	e, gw, _, episodes := fillEngine(t)
+
+	e.onFill(ctx, fill("quote-1", market.Sell, "0.003", "4276.1"))
+	e.onFill(ctx, fill("quote-1", market.Sell, "0.008", "4276.1"))
+	e.onFill(ctx, fill("quote-1", market.Sell, "0.008", "4276.1"))
+
+	closing := gw.marketOrders()
+	require.Len(t, closing, 2, "the repeated cumulative report must not create a third close")
+	require.Equal(t, money.MustParseQty("0.003"), closing[0].Qty)
+	require.Equal(t, money.MustParseQty("0.005"), closing[1].Qty)
+	for _, order := range closing {
+		require.Equal(t, market.Buy, order.Side)
+		require.True(t, order.ReduceOnly)
+	}
+	require.Equal(t, 1, *episodes, "partials from one sweep remain one risk episode")
+}
+
+// User or replayed orders share the account stream with bot quotes. Exposure
+// is still handled through PositionUpdated, but they must not be counted as
+// quote-fill episodes or trigger a duplicate close from this path.
+func TestUnknownFilledOrderDoesNotOpenAQuoteEpisode(t *testing.T) {
+	ctx := context.Background()
+	e, gw, _, episodes := fillEngine(t)
+
+	e.onOrder(ctx, events.OrderUpdated{
+		Order: fill("manual-order", market.Buy, "0.008", "4276.1"),
+	})
+
+	require.Empty(t, gw.marketOrders())
+	require.Zero(t, *episodes)
+}
+
+// A terminal update may be replayed by a reconnected stream. The first report
+// empties the rung; the replay is then untracked and must not close/count twice.
+func TestReplayedTerminalFillIsIgnored(t *testing.T) {
+	ctx := context.Background()
+	e, gw, clk, episodes := fillEngine(t)
+
+	e.bids.OnPlaceSent(0, "quote-1", money.MustParsePrice("4275"), money.MustParseQty("0.008"), clk.now)
+	e.bids.OnOrderUpdate(trading.Order{ClOrdID: "quote-1", Status: trading.StatusOpen}, clk.now)
+	e.filled["quote-1"] = money.MustParseQty("0")
+
+	ev := events.OrderUpdated{Order: fill("quote-1", market.Buy, "0.008", "4276.1")}
+	e.onOrder(ctx, ev)
+	e.onOrder(ctx, ev)
+
+	require.Len(t, gw.marketOrders(), 1)
+	require.Equal(t, 1, *episodes)
 }
 
 // The exchange reports accumulated volume, and the close is one order among
@@ -201,5 +267,7 @@ func TestRepeatedClosingReportsSendOneOrder(t *testing.T) {
 	for _, o := range gw.marketOrders() {
 		e.onOrder(ctx, events.OrderUpdated{Order: fill(o.ClOrdID, market.Buy, "0.008", "4276.8")})
 	}
+	e.position = money.MustParseQty("0")
+	e.onTick(ctx)
 	require.True(t, e.pendingFill.IsZero())
 }

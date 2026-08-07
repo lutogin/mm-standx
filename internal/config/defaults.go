@@ -63,7 +63,7 @@ func defaults() *Config {
 			MaxFillsPerHour:      20,
 			MarginMode:           trading.Isolated,
 			FlattenPolicy:        "immediate_market",
-			FlattenDebounce:      150 * time.Millisecond,
+			FlattenDebounce:      0,
 			PostFillCooldown:     3 * time.Second,
 			KillSwitchOnDrawdown: true,
 			// Ставки одинаковы для всех рынков StandX, см. PLAN.md §1.3.

@@ -129,10 +129,11 @@ func liveRung(e *Engine, side market.Side, id trading.ClOrdID, price string, at 
 	l.OnOrderUpdate(trading.Order{ClOrdID: id, Status: trading.StatusOpen}, at)
 }
 
-// The requote cooldown exists to protect the request budget, not to delay the
-// emergency pull. While it guarded both, every action left the actor blind for
-// a quarter of a second — longer than the interval between book updates.
-func TestDangerPullIsNotDelayedByTheRequoteCooldown(t *testing.T) {
+// The requote cooldown exists to protect the request budget, not to delay a
+// panic pull. This rung is still one measured jump away from being touched;
+// waiting until the pull threshold would spend the only warning the fast book
+// signal provides.
+func TestPanicPullIsNotDelayedByTheRequoteCooldown(t *testing.T) {
 	ctx := context.Background()
 	e, gw, clk := dangerEngine(t)
 
@@ -143,7 +144,7 @@ func TestDangerPullIsNotDelayedByTheRequoteCooldown(t *testing.T) {
 	e.evaluate(ctx, false)
 
 	require.Contains(t, gw.cancelled, trading.ClOrdID("ask-1"),
-		"a rung the market has reached must be pulled regardless of the cooldown")
+		"a rung inside the panic zone must be pulled regardless of the cooldown")
 }
 
 // The cooldown must still do its job on the reward path, or the actor would

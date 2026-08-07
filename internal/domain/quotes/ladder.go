@@ -167,22 +167,27 @@ func (l *Ladder) PullAll(reason string) []Action {
 // к одному числу — значит потерять одну из двух ролей.
 type Classifier func(Slot) policy.Decision
 
-// Danger возвращает команды на снятие стороны, если хотя бы одна живая ступень
-// признана опасной.
+// Danger returns commands for pulling the side when at least one live rung is
+// classified as requiring cancel-first safety handling.
 //
 // Проверка вынесена из Plan отдельным методом, потому что вызывается раньше
 // ограничения темпа перестановок: кулдаун существует, чтобы не жечь бюджет
 // запросов, и задерживать им аварийный съём — значит применять экономию там,
 // где она стоит залива.
 //
-// Опасность рассматривается по всем ступеням сразу: пока мы аккуратно
-// переставляем одну, остальные стоят под тем же рынком.
+// Panic is deliberately side-wide. Moving one rung at a time is an uptime
+// optimization, but once the market is within one measured jump of any rung,
+// the remaining rungs are exposed to the same move. Waiting for the pull
+// threshold means waiting until the market has already reached the quote.
 func (l *Ladder) Danger(classify Classifier) []Action {
 	for i := range l.Slots {
 		if l.Slots[i].Phase != Live {
 			continue
 		}
-		if d := classify(l.Slots[i]); d.Action == policy.Pull {
+		d := classify(l.Slots[i])
+		if d.Action != policy.Hold &&
+			d.Urgency == policy.UrgencySafety &&
+			d.Sequence == policy.CancelFirst {
 			return l.PullAll(d.Reason)
 		}
 	}
