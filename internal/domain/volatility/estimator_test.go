@@ -285,3 +285,102 @@ func TestMemoryIsOptional(t *testing.T) {
 	require.Zero(t, est.MemoryBps)
 	require.Zero(t, est.JumpBps)
 }
+
+// --- The record bounded by the live window ---
+
+func boundedConfig(halfLife time.Duration, multiple float64) Config {
+	c := memoryConfig(halfLife)
+	c.MemoryWindowMultiple = multiple
+	return c
+}
+
+// calm returns a path that jitters by a fraction of a basis point, the way a
+// quiet gold session actually looks. A perfectly flat path is a different case
+// and is covered separately.
+func calm(n int) []float64 {
+	out := make([]float64, n)
+	for i := range out {
+		if i%2 == 0 {
+			out[i] = 0.5
+		} else {
+			out[i] = -0.5
+		}
+	}
+	return out
+}
+
+// The live episode of 7 August, reproduced.
+//
+// One tick of 15 bps, then a market that goes quiet at half a basis point. The
+// window forgets the spike after twenty minutes; the unbounded record kept
+// demanding fifteen for most of a working day, and the actor stood aside for
+// 8.4 hours while the window reported a tenth of that.
+func TestBoundedRecordFollowsTheWindowBackDown(t *testing.T) {
+	spike := append(append(calm(50), 15.0), calm(1200)...)
+
+	unbounded := New(memoryConfig(6 * time.Hour))
+	at := feed(unbounded, money.MustParsePrice("100"), spike)
+	loose := unbounded.Estimate(at)
+
+	bounded := New(boundedConfig(6*time.Hour, 3))
+	at = feed(bounded, money.MustParsePrice("100"), spike)
+	tight := bounded.Estimate(at)
+
+	require.InDelta(t, 0.5, loose.WindowMaxBps.Float64(), 0.05,
+		"the spike has left the window in both, the market is calm")
+	require.Greater(t, loose.JumpBps.Float64(), 13.0,
+		"unbounded, one observation still governs an hour later")
+	require.InDelta(t, 1.5, tight.JumpBps.Float64(), 0.15,
+		"bounded, the record may claim three times what the window shows")
+}
+
+// While the burst is still inside the window the bound must not touch it:
+// that is the moment the record exists for.
+func TestBoundDoesNotWeakenProtectionDuringTheBurst(t *testing.T) {
+	e := New(boundedConfig(6*time.Hour, 3))
+	at := feed(e, money.MustParsePrice("100"), append(append(calm(50), 15.0), calm(50)...))
+
+	est := e.Estimate(at)
+	require.InDelta(t, 15.0, est.WindowMaxBps.Float64(), 0.1)
+	require.InDelta(t, 15.0, est.JumpBps.Float64(), 0.1,
+		"full protection while the market has just shown what it can do")
+}
+
+// A window that has not warmed up says nothing about the market, and reading
+// its maximum as evidence of calm would erase the record exactly when it is the
+// only thing left — right after a reconnect.
+func TestBoundIsNotAppliedBeforeTheEstimateIsReady(t *testing.T) {
+	e := New(boundedConfig(6*time.Hour, 3))
+	at := feed(e, money.MustParsePrice("100"), append(append(calm(50), 15.0), calm(50)...))
+
+	e.Reset()
+	after := at.Add(time.Minute)
+	est := e.Estimate(after)
+
+	require.False(t, est.Ready, "the window was cleared by the reconnect")
+	require.Greater(t, est.JumpBps.Float64(), 14.0,
+		"the record survives the reconnect unbounded")
+}
+
+// A market that has not moved at all carries no information about magnitude.
+// Bounding by its maximum would multiply nothing by three and erase the record
+// — precisely the frozen-market case it was written to cover.
+func TestFrozenMarketDoesNotEraseTheRecord(t *testing.T) {
+	e := New(boundedConfig(6*time.Hour, 3))
+	at := feed(e, money.MustParsePrice("100"), append(append(calm(50), 15.0), flat(1200)...))
+
+	est := e.Estimate(at)
+	require.Zero(t, est.WindowMaxBps, "nothing moved for the whole window")
+	require.Greater(t, est.JumpBps.Float64(), 13.0,
+		"a frozen market must not be read as a safe one")
+}
+
+// Zero keeps the previous behaviour, so the bound can be switched off in place.
+func TestZeroMultipleLeavesTheRecordUnbounded(t *testing.T) {
+	spike := append(append(calm(50), 15.0), calm(1200)...)
+
+	off := New(boundedConfig(6*time.Hour, 0))
+	at := feed(off, money.MustParsePrice("100"), spike)
+
+	require.Greater(t, off.Estimate(at).JumpBps.Float64(), 13.0)
+}

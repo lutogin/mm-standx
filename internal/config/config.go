@@ -213,6 +213,14 @@ type Appetite struct {
 	DeadBandJumps float64 `koanf:"deadBandJumps"`
 	// MinDeadBandBps — нижняя граница мёртвой зоны.
 	MinDeadBandBps money.Bps `koanf:"minDeadBandBps"`
+
+	// ReentryDeadBandBps — насколько требуемая дистанция обязана не дотягивать
+	// до края полосы, чтобы актор вернулся в рынок после отказа.
+	//
+	// Мёртвая зона для решения «котировать или нет». Без неё хвост спреда
+	// перебрасывает порог по нескольку раз в минуту, и лесенка снимается
+	// и выставляется впустую. Ноль отключает гистерезис.
+	ReentryDeadBandBps money.Bps `koanf:"reentryDeadBandBps"`
 	// MinBps — ближе к mark не подходим ни при каких условиях.
 	// Страхует случай, когда измеренный риск обманчиво мал.
 	MinBps money.Bps `koanf:"minBps"`
@@ -234,6 +242,11 @@ type Volatility struct {
 	// даёт зрелую оценку нулевого скачка, и бот подходит к цене вплотную
 	// ровно перед тем, как рынок оживёт.
 	MemoryHalfLife time.Duration `koanf:"memoryHalfLife"`
+
+	// MemoryWindowMultiple bounds the decaying record by the live window: it may
+	// never claim more than this multiple of the window maximum. Zero disables
+	// the bound. See volatility.Config.MemoryWindowMultiple.
+	MemoryWindowMultiple float64 `koanf:"memoryWindowMultiple"`
 }
 
 // Program — параметры начисления инструмента, публикуемые StandX.

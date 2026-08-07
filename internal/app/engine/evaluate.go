@@ -87,7 +87,8 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 		appetite.JumpMultiple *= bankedCaution
 	}
 
-	quote := e.stickyTarget(e.ladder.Anchor(appetite.Target(conditions, e.bounds), e.bounds))
+	bounds := e.quotingBounds()
+	quote := e.stickyTarget(e.ladder.Anchor(appetite.Target(conditions, bounds), bounds))
 	e.reportStatus(now, conditions, estimate, quote)
 	e.reportMetrics(now, conditions, estimate, quote)
 
@@ -155,6 +156,29 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 		}
 		e.execute(ctx, side, actions, allowPlace, plan.Rungs)
 	}
+}
+
+// quotingBounds сужает полосу, пока актор вне рынка.
+//
+// Порог осуществимости — единственное решение в этом контуре без мёртвой зоны,
+// и рынок стоит ровно на нём. Требуемая дистанция складывается из половины
+// спреда, а тот гуляет широко: 6 августа в двенадцатом часу медиана была
+// 1.99 bps при максимуме 3.40. Каждый заход хвоста за край полосы снимал всю
+// лесенку, каждый возврат выставлял её заново — 564 съёма за час при аптайме
+// 99%. Присутствие сохранялось, но ордера жили в среднем 6.4 секунды при
+// программном требовании в три, а на дрожание уходило 13% бюджета запросов.
+//
+// Асимметрия здесь та же, что и во всём остальном контуре: уходим по обычному
+// порогу и немедленно, возвращаемся только когда до края есть запас.
+func (e *Engine) quotingBounds() policy.Bounds {
+	bounds := e.bounds
+	if e.target.Feasible {
+		return bounds
+	}
+	if inset := bounds.MaxBps - e.appetite.ReentryDeadBandBps; inset > bounds.MinBps {
+		bounds.MaxBps = inset
+	}
+	return bounds
 }
 
 // pullDanger снимает стороны, к ордерам которых рынок подошёл вплотную,

@@ -30,10 +30,11 @@ type sample struct {
 // Максимум окна вдобавок обладает нужным поведением во времени: после крупного
 // скачка осторожность сохраняется до конца окна, а затем спадает сама.
 type Estimator struct {
-	window     time.Duration
-	minSamples int
-	fullAt     int
-	halfLife   time.Duration
+	window         time.Duration
+	minSamples     int
+	fullAt         int
+	halfLife       time.Duration
+	windowMultiple float64
 
 	samples  []sample
 	lastMark money.Price
@@ -104,14 +105,31 @@ type Config struct {
 	//
 	// Zero disables the memory: the estimate reduces to the window maximum.
 	MemoryHalfLife time.Duration
+
+	// MemoryWindowMultiple bounds the record by the live window: the memory may
+	// never claim more than this multiple of the window maximum.
+	//
+	// It exists because the half-life alone cannot express what the record is
+	// for. Six hours was chosen to carry Friday's volatility across the weekend,
+	// and it does not even do that — 51 hours of decay leave 0.3% of the record.
+	// What it does instead is hand one outlier control of the risk measure for
+	// most of a working day: on 7 August a one-minute spike kept the actor out
+	// of the book for 8.4 hours while the window reported a tenth of the value.
+	//
+	// The bound replaces the guess with a comparison. Details and the parallel
+	// with EWMA and GARCH are in the estimator's bounded method.
+	//
+	// Zero disables the bound and restores the unconditional record.
+	MemoryWindowMultiple float64
 }
 
 func New(cfg Config) *Estimator {
 	return &Estimator{
-		window:     cfg.Window,
-		minSamples: cfg.MinSamples,
-		fullAt:     max(cfg.FullConfidenceAt, cfg.MinSamples),
-		halfLife:   cfg.MemoryHalfLife,
+		window:         cfg.Window,
+		minSamples:     cfg.MinSamples,
+		fullAt:         max(cfg.FullConfidenceAt, cfg.MinSamples),
+		halfLife:       cfg.MemoryHalfLife,
+		windowMultiple: cfg.MemoryWindowMultiple,
 	}
 }
 
@@ -272,12 +290,13 @@ func (e *Estimator) Estimate(now time.Time) Estimate {
 	sort.Slice(jumps, func(i, j int) bool { return jumps[i] < jumps[j] })
 	out.P95Bps = jumps[min(int(0.95*float64(len(jumps))), len(jumps)-1)]
 
-	// Память служит нижней границей: спокойное окно не отменяет того,
-	// что рынок уже показывал несколькими часами раньше.
-	out.JumpBps = max(out.WindowMaxBps, out.MemoryBps)
-
 	out.Confidence = min(float64(out.Samples)/float64(e.fullAt), 1)
 	out.Ready = out.Samples >= e.minSamples
+
+	// Память служит нижней границей: спокойное окно не отменяет того,
+	// что рынок уже показывал несколькими часами раньше. Но и требовать
+	// сколько угодно она не вправе — см. windowMultiple.
+	out.JumpBps = max(out.WindowMaxBps, e.bounded(out))
 
 	// Малая выборка систематически недооценивает хвост: по n замерам виден
 	// в лучшем случае квантиль (1 − 1/n), всё что реже — не наблюдалось вовсе.
@@ -285,6 +304,39 @@ func (e *Estimator) Estimate(now time.Time) Estimate {
 	// раздувается в той же пропорции.
 	out.Inflation = 1 + (1 - out.Confidence)
 	return out
+}
+
+// bounded limits what the decaying record may claim over the live window.
+//
+// A decaying maximum has a property no volatility estimator should have: it
+// does not revert. Subsequent observations cannot lower it — only the clock
+// can. One outlier therefore governs the risk measure for a fixed stretch of
+// wall time no matter what the market does afterwards, and on 7 August that
+// stretch was 8.4 hours after a spike that lasted a minute, while the window
+// had been reporting a tenth of the value for half an hour.
+//
+// Standard estimators — EWMA of squared returns, GARCH — avoid this by
+// reverting towards the recent level: every calm observation pulls the estimate
+// down, and decay counts in observations rather than hours. Bounding the record
+// by a multiple of the window maximum buys the same property in one comparison:
+// the memory converges to what the market currently shows instead of to zero on
+// a schedule.
+//
+// The bound is deliberately not applied while the estimate is still warming up.
+// An empty or short window says nothing about the market, and reading its
+// maximum as evidence of calm would erase the record exactly when it is the only
+// thing left — right after a reconnect, which tends to coincide with the
+// turbulence that caused it.
+// A window whose maximum is exactly zero is the second exemption. A market that
+// has not moved at all across the whole window carries no information about
+// magnitude, and multiplying that nothing by anything still yields nothing —
+// the very failure the record was written to cover. There the record stands
+// unbounded and the absolute floor (policy.Bounds.MinBps) backs it up.
+func (e *Estimator) bounded(out Estimate) money.Bps {
+	if e.windowMultiple <= 0 || !out.Ready || out.WindowMaxBps <= 0 {
+		return out.MemoryBps
+	}
+	return min(out.MemoryBps, out.WindowMaxBps*money.Bps(e.windowMultiple))
 }
 
 // EffectiveJump возвращает меру риска с поправкой на незрелость оценки.

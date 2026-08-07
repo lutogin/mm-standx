@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"testing"
@@ -66,10 +67,11 @@ func dangerEngine(t *testing.T) (*Engine, *recordingGateway, *testClock) {
 				},
 			},
 			Appetite: policy.Appetite{
-				JumpMultiple:   1.25,
-				FloorMarginBps: 1.5,
-				DeadBandJumps:  2.0,
-				MinDeadBandBps: 1.2,
+				JumpMultiple:       1.25,
+				FloorMarginBps:     1.5,
+				DeadBandJumps:      2.0,
+				MinDeadBandBps:     1.2,
+				ReentryDeadBandBps: 1.0,
 			},
 			Bounds: policy.Bounds{MinBps: 5.5, MaxBps: 9.5},
 			Volatility: volatility.Config{
@@ -223,4 +225,75 @@ func TestClosedMarketIsReportedInTheStatusLog(t *testing.T) {
 
 	require.Contains(t, buf.String(), "engine status")
 	require.Contains(t, buf.String(), "the reference market is closed")
+}
+
+// wideBook replaces the book with one whose half spread is the given width in
+// basis points, which is what actually pushes the requirement over the band.
+func wideBook(e *Engine, halfSpreadBps float64, at time.Time) {
+	mark := 4276.0
+	off := mark * halfSpreadBps / 10_000
+	e.book = market.NewBook("XAU-USD",
+		[]market.Level{{
+			Price: money.MustParsePrice(fmt.Sprintf("%.4f", mark-off)),
+			Qty:   money.MustParseQty("1"),
+		}},
+		[]market.Level{{
+			Price: money.MustParsePrice(fmt.Sprintf("%.4f", mark+off)),
+			Qty:   money.MustParseQty("1"),
+		}},
+		at)
+}
+
+// The feasibility threshold was the one decision in this loop without a dead
+// band, and the market sat on it: on 6 August the half spread swung between
+// 0.12 and 3.40 bps within an hour, and every excursion past the band pulled the
+// whole ladder and every return placed it again — 564 withdrawals in one hour at
+// 99% uptime.
+func TestQuotingDoesNotResumeInsideTheReentryDeadBand(t *testing.T) {
+	ctx := context.Background()
+	e, gw, clk := dangerEngine(t)
+	e.available = decimal.NewFromInt(1000)
+
+	// Wide enough that the requirement no longer fits the band: with a jump of
+	// 0.23 bps the fixed part is 1.79, so nine of half spread puts it at 10.8.
+	wideBook(e, 9.0, clk.now)
+	e.evaluate(ctx, true)
+	require.False(t, e.target.Feasible, "the actor steps aside on the excursion")
+
+	// The spread comes back to just inside the band. Without hysteresis this is
+	// where the ladder went back up, only to come off on the next tick.
+	before := len(gw.placed)
+	wideBook(e, 7.0, clk.now)
+	clk.advance(time.Second)
+	e.evaluate(ctx, true)
+	require.Equal(t, before, len(gw.placed),
+		"barely inside is not far enough to re-enter")
+
+	// Clear of the band by the dead band: now it is worth going back in.
+	wideBook(e, 5.0, clk.now)
+	clk.advance(time.Second)
+	e.evaluate(ctx, true)
+	require.Greater(t, len(gw.placed), before, "clear of the edge, quoting resumes")
+}
+
+// Leaving keeps no dead band at all: the same asymmetry as everywhere else in
+// this loop, caution immediately and greed on delay.
+func TestLeavingTheBandIsImmediate(t *testing.T) {
+	ctx := context.Background()
+	e, gw, clk := dangerEngine(t)
+	e.available = decimal.NewFromInt(1000)
+
+	wideBook(e, 5.0, clk.now)
+	e.evaluate(ctx, true)
+	require.True(t, e.target.Feasible)
+	liveRung(e, market.Buy, "bid-1", "4273", clk.now)
+	liveRung(e, market.Sell, "ask-1", "4279", clk.now)
+
+	wideBook(e, 9.0, clk.now)
+	clk.advance(time.Second)
+	e.evaluate(ctx, true)
+
+	require.False(t, e.target.Feasible)
+	require.ElementsMatch(t, []trading.ClOrdID{"bid-1", "ask-1"}, gw.cancelled,
+		"no dead band on the way out")
 }

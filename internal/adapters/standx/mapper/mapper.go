@@ -133,9 +133,9 @@ func Trade(d dto.Trade) (trading.Trade, error) {
 		Side:     market.Side(d.Side),
 		Price:    price,
 		Qty:      qty,
-		Fee:      optDecimal(d.Fee),
+		Fee:      optDecimal(d.FeeValue()),
 		FeeAsset: d.FeeAsset,
-		PnL:      optDecimal(d.PnL),
+		PnL:      optDecimal(d.PnLValue()),
 		Time:     optTime(d.Time),
 	}, nil
 }

@@ -40,6 +40,15 @@ type Collector struct {
 	hour   time.Time
 	series map[string]*series
 
+	// carry — последнее значение каждого накопительного счётчика, перенесённое
+	// через границу часа.
+	//
+	// Без него приращение считалось от первого значения, увиденного внутри
+	// часа, а ряд с метками материализуется в реестре только при первом
+	// событии. Первое событие каждой серии поэтому становилось базой и
+	// пропадало из отчёта: залив 6 августа в 14:34 дал в свёртке delta 0.
+	carry map[string]float64
+
 	// lastCurrent — когда снимок текущего часа записывался в последний раз.
 	lastCurrent time.Time
 
@@ -75,6 +84,7 @@ func New(
 		log:      log.With("component", "stats"),
 		interval: interval,
 		series:   make(map[string]*series),
+		carry:    make(map[string]float64),
 		done:     make(chan struct{}),
 	}
 }
@@ -146,6 +156,13 @@ func (c *Collector) sample(now time.Time) {
 		acc, ok := c.series[key]
 		if !ok {
 			acc = &series{name: s.Name, labels: s.Labels, kind: s.Kind}
+			// База накопительного счётчика — то, чем он закончил прошлый час,
+			// а не то, чем начал этот. Ряда могло не быть в реестре вовсе:
+			// он появляется вместе с первым событием, и это событие обязано
+			// попасть в отчёт.
+			if s.Kind == ports.KindCounter {
+				acc.first, acc.seen = c.carry[key], true
+			}
 			c.series[key] = acc
 		}
 
@@ -252,6 +269,12 @@ func (c *Collector) flush(now time.Time, partial bool) {
 	}
 
 	records := c.snapshot(partial)
+	// Счётчики переносятся в следующий час до очистки накопителей.
+	for key, acc := range c.series {
+		if acc.kind == ports.KindCounter && acc.seen {
+			c.carry[key] = acc.last
+		}
+	}
 	c.series = make(map[string]*series)
 
 	if err := c.append(records); err != nil {

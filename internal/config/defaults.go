@@ -101,8 +101,13 @@ func defaults() *Config {
 				// помещаться в мёртвую зону, иначе они просят перестановки сразу
 				// после размещения. Согласованность проверяется при запуске.
 				MinDeadBandBps: 1.2,
-				MinBps:         5.5,
-				MaxBps:         9.5,
+				// Измерено 6-7 августа: половина спреда ходит от 0.12 до 3.5 bps
+				// внутри часа, медиана около 1. Одного базисного пункта хватает,
+				// чтобы обычный размах перестал перебрасывать порог, и мало,
+				// чтобы заметно сократить время в рынке.
+				ReentryDeadBandBps: 1.0,
+				MinBps:             5.5,
+				MaxBps:             9.5,
 			},
 			Volatility: Volatility{
 				// Окно в двадцать минут при такте в три секунды даёт до 400
@@ -111,11 +116,21 @@ func defaults() *Config {
 				Window:           20 * time.Minute,
 				MinSamples:       40,
 				FullConfidenceAt: 100,
-				// Полураспад в шесть часов переносит вечернюю волатильность
-				// через ночь и пятничную — через выходные, оставляя от неё
-				// к понедельнику около одной восьмой. Спокойный рынок при этом
-				// всё равно позволяет подойти ближе, только не за один час.
+				// Six hours was never derived. It was chosen to carry Friday's
+				// volatility across the weekend and does not do that either:
+				// 51 hours of decay leave 0.3% of the record. What it actually
+				// does is carry an evening through the night — 10 hours leave
+				// about a third.
+				//
+				// The number stays because the bound below, not the half-life,
+				// is what keeps a single outlier from governing the estimate.
+				// Revisit it once the price of a Maker Hour and the fill rate
+				// are measured; until then it is a guess either way.
 				MemoryHalfLife: 6 * time.Hour,
+				// The record may claim at most three times what the live window
+				// shows. Without the bound one outlier governs the estimate for a
+				// fixed stretch of wall time regardless of what follows it.
+				MemoryWindowMultiple: 3,
 			},
 			Program: Program{
 				UnitSize:             "0",

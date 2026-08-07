@@ -339,6 +339,16 @@ func (a Appetite) validate(prefix string, band money.Bps) []error {
 	if a.MinDeadBandBps <= 0 {
 		errs = append(errs, fmt.Errorf("%s.minDeadBandBps must be positive", prefix))
 	}
+	if a.ReentryDeadBandBps < 0 {
+		errs = append(errs, fmt.Errorf("%s.reentryDeadBandBps must not be negative", prefix))
+	}
+	// Сужение не вправе съесть полосу целиком: иначе после первого же отказа
+	// вернуться будет некуда, и гистерезис превратится в остановку навсегда.
+	if a.MaxBps-a.ReentryDeadBandBps <= a.MinBps {
+		errs = append(errs, fmt.Errorf(
+			"%s: reentryDeadBandBps (%s) leaves no room between minBps (%s) and maxBps (%s)",
+			prefix, a.ReentryDeadBandBps, a.MinBps, a.MaxBps))
+	}
 	if a.MinBps < 0 {
 		errs = append(errs, fmt.Errorf("%s.minBps must not be negative", prefix))
 	}
@@ -448,6 +458,14 @@ func (v Volatility) validate(prefix string) []error {
 		errs = append(errs, fmt.Errorf(
 			"%s: memoryHalfLife (%s) shorter than window (%s) can never bind the estimate",
 			prefix, v.MemoryHalfLife, v.Window))
+	}
+	// Below one the bound would put the record under the very window maximum it
+	// is meant to outlive, which is the same as switching the memory off — but
+	// silently, and only in the calm periods where it is needed most.
+	if v.MemoryWindowMultiple != 0 && v.MemoryWindowMultiple < 1 {
+		errs = append(errs, fmt.Errorf(
+			"%s.memoryWindowMultiple (%.2f) must be at least 1, or 0 to disable the bound",
+			prefix, v.MemoryWindowMultiple))
 	}
 	return errs
 }

@@ -178,6 +178,15 @@ func (h *handler) handleTrade(ctx context.Context, msg message) {
 		h.log.Error("failed to map trade", "error", err)
 		return
 	}
+	// Нулевая комиссия означает, что поле разобрано не тем именем: тейкер
+	// стоит 4 bps, бесплатных исполнений у StandX нет. Печатается сырое
+	// сообщение, потому что угадывать имена дальше дешевле один раз увидев их.
+	if trade.Fee.IsZero() {
+		h.warnOnce(&h.tradeShapeWarned, "trade parsed with a zero fee: "+
+			"the exchange is using field names we do not read, and the risk "+
+			"ledger is falling back to the cost model",
+			"payload", truncate(msg.Data))
+	}
 	events.Publish(h.bus, ctx, events.TradeExecuted{Trade: trade})
 }
 

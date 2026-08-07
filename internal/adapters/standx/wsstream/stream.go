@@ -10,6 +10,7 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nd/mm-standx/internal/adapters/wsconn"
@@ -66,6 +67,19 @@ type handler struct {
 	// lastSeq отслеживает сквозную нумерацию сообщений соединения.
 	seqMu   sync.Mutex
 	lastSeq int64
+
+	// tradeShapeWarned гасит повтор предупреждения о разборе сделки: форма
+	// сообщения одна на всё соединение, и печатать её на каждой сделке значит
+	// заполнить лог одним и тем же.
+	tradeShapeWarned atomic.Bool
+}
+
+// warnOnce печатает предупреждение первый раз и молчит дальше.
+func (h *handler) warnOnce(flag *atomic.Bool, msg string, attrs ...any) {
+	if flag.Swap(true) {
+		return
+	}
+	h.log.Warn(msg, attrs...)
 }
 
 // OnConnect выполняет авторизацию и подписку на каналы.
