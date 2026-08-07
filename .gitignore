@@ -18,7 +18,7 @@ coverage.*
 *.bolt
 
 # Инструменты
-/graphify-out/
+# /graphify-out/
 .DS_Store
 
 /test/live/data/session.json

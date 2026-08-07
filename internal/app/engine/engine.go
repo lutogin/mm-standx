@@ -15,6 +15,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"github.com/nd/mm-standx/internal/config"
+	"github.com/nd/mm-standx/internal/domain/economics"
 	"github.com/nd/mm-standx/internal/domain/market"
 	"github.com/nd/mm-standx/internal/domain/money"
 	"github.com/nd/mm-standx/internal/domain/policy"
@@ -73,6 +74,7 @@ type Params struct {
 	Appetite   policy.Appetite
 	Bounds     policy.Bounds
 	Volatility volatility.Config
+	Economics  economics.Gate
 
 	// MaxNetPosition — экспозиция, выше которой актор перестаёт котировать
 	// и закрывает позицию. Ноль означает, что позиция не допускается вовсе:
@@ -90,6 +92,7 @@ type Engine struct {
 	live   bool
 
 	program        reward.Program
+	economics      economics.Gate
 	appetite       policy.Appetite
 	bounds         policy.Bounds
 	maxNetPosition money.Qty
@@ -112,14 +115,16 @@ type Engine struct {
 	available decimal.Decimal
 
 	// Управляющее состояние.
-	halted        bool
-	cooldownUntil time.Time
-	pendingFill   money.Qty
-	fillDeadline  time.Time
-	lastStatus    time.Time
-	lastAction    time.Time
-	blocked       string
-	target        policy.Quote
+	halted         bool
+	cooldownUntil  time.Time
+	pendingFill    money.Qty
+	fillDeadline   time.Time
+	lastStatus     time.Time
+	lastAction     time.Time
+	blocked        string
+	target         policy.Quote
+	fillEpisodes   []time.Time
+	fillBurstUntil time.Time
 
 	// sizeLimit и perSide — чем ограничен размер стороны и каким он вышел.
 	//
@@ -189,6 +194,10 @@ type Engine struct {
 // New собирает актора.
 func New(p Params, deps Deps) *Engine {
 	layers := max(p.Config.Quote.LadderLayers, 1)
+	minTierMultiplier := 0.0
+	if p.Live && p.Economics.BreakEvenUSDPerMakerHour > 0 {
+		minTierMultiplier = p.Economics.MinimumTierMultiplier()
+	}
 
 	if deps.Metrics == nil {
 		deps.Metrics = ports.NopMetrics{}
@@ -210,10 +219,17 @@ func New(p Params, deps Deps) *Engine {
 			MinRest:    p.Config.Quote.MinRest,
 			AckTimeout: p.Health.AckTimeout,
 		},
-		bids:          quotes.New(market.Buy, layers),
-		asks:          quotes.New(market.Sell, layers),
-		vol:           volatility.New(p.Volatility),
-		hour:          uptime.New(p.Program, p.Config.Uptime.TargetPct),
+		bids: quotes.New(market.Buy, layers),
+		asks: quotes.New(market.Sell, layers),
+		vol:  volatility.New(p.Volatility),
+		hour: uptime.New(p.Program, uptime.Policy{
+			TargetPct:         p.Config.Uptime.TargetPct,
+			HardFloorPct:      p.Config.Uptime.HardFloorPct,
+			ReservePct:        p.Config.Uptime.ReservePct,
+			MinTierMultiplier: minTierMultiplier,
+			SampleInterval:    tickInterval,
+		}),
+		economics:     p.Economics,
 		position:      money.MustParseQty("0"),
 		filled:        make(map[trading.ClOrdID]money.Qty),
 		touched:       make(map[trading.ClOrdID]bool),
@@ -228,6 +244,21 @@ func (e *Engine) Name() string { return "engine[" + e.symbol.String() + "]" }
 
 // Start подписывается на события и запускает цикл.
 func (e *Engine) Start(context.Context) error {
+	if e.economics.BreakEvenUSDPerMakerHour > 0 {
+		prefix := "economics." + e.symbol.String() + "."
+		e.deps.Log.Info("economic gate in force",
+			"symbol", e.symbol,
+			"reward_rate_lower_bound_usd_per_maker_hour", e.economics.RewardRateLowerBoundUSDPerMakerHour,
+			"break_even_usd_per_maker_hour", e.economics.BreakEvenUSDPerMakerHour,
+			"calibration_max_allocation_usd", e.economics.CalibrationMaxAllocationUSD,
+			"allocation_usd", e.cfg.AllocationUSD)
+		e.deps.Metrics.RiskLimit(prefix+"reward_rate_lower_bound_usd_per_maker_hour",
+			e.economics.RewardRateLowerBoundUSDPerMakerHour)
+		e.deps.Metrics.RiskLimit(prefix+"break_even_usd_per_maker_hour",
+			e.economics.BreakEvenUSDPerMakerHour)
+		e.deps.Metrics.RiskLimit(prefix+"calibration_max_allocation_usd",
+			e.economics.CalibrationMaxAllocationUSD)
+	}
 	e.subscribe()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -642,11 +673,10 @@ func (e *Engine) onTick(ctx context.Context) {
 	if e.overPositionLimit() || (e.pendingFill.IsPositive() && !now.Before(e.fillDeadline)) {
 		e.flatten(ctx)
 	}
-	// Нули до готовности оценщика не должны попадать в учёт часа: иначе
-	// при старте в середине часа актор мгновенно объявит его потерянным.
-	if e.vol.Estimate(now).Ready {
-		e.sampleUptime(now)
-	}
+	// Warm-up is real downtime from the programme's point of view. Omitting it
+	// manufactured uptime after every start and restart in the middle of an
+	// hour, so every tick is sampled even before the risk estimate is ready.
+	e.sampleUptime(now)
 	e.evaluate(ctx, true)
 }
 

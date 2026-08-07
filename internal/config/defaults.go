@@ -58,13 +58,16 @@ func defaults() *Config {
 			},
 		},
 		Risk: Risk{
-			MaxDailyLossUSD:      500,
+			MaxDailyLossUSD:      10,
 			MaxNotionalUSD:       120_000,
-			MaxFillsPerHour:      20,
+			MaxFillsPerHour:      6,
 			MarginMode:           trading.Isolated,
 			FlattenPolicy:        "immediate_market",
 			FlattenDebounce:      0,
 			PostFillCooldown:     3 * time.Second,
+			FillBurstLimit:       2,
+			FillBurstWindow:      10 * time.Minute,
+			FillBurstCooldown:    20 * time.Minute,
 			KillSwitchOnDrawdown: true,
 			// Ставки одинаковы для всех рынков StandX, см. PLAN.md §1.3.
 			Fees: Fees{MakerBps: 1, TakerBps: 4},
@@ -83,6 +86,11 @@ func defaults() *Config {
 		Defaults: Symbol{
 			Enabled:       false,
 			AllocationUSD: 0,
+			Economics: Economics{
+				RewardRateLowerBoundUSDPerMakerHour: 0,
+				BreakEvenUSDPerMakerHour:            22,
+				CalibrationMaxAllocationUSD:         60,
+			},
 			Quote: Quote{
 				LadderLayers:    3,
 				LadderSpreadBps: 1.0,

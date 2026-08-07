@@ -146,6 +146,9 @@ type Risk struct {
 	FlattenPolicy        string             `koanf:"flattenPolicy"`
 	FlattenDebounce      time.Duration      `koanf:"flattenDebounce"`
 	PostFillCooldown     time.Duration      `koanf:"postFillCooldown"`
+	FillBurstLimit       int                `koanf:"fillBurstLimit"`
+	FillBurstWindow      time.Duration      `koanf:"fillBurstWindow"`
+	FillBurstCooldown    time.Duration      `koanf:"fillBurstCooldown"`
 	KillSwitchOnDrawdown bool               `koanf:"killSwitchOnDrawdown"`
 	Fees                 Fees               `koanf:"fees"`
 }
@@ -181,12 +184,24 @@ type Health struct {
 type Symbol struct {
 	Enabled       bool       `koanf:"enabled"`
 	AllocationUSD float64    `koanf:"allocationUsd"`
+	Economics     Economics  `koanf:"economics"`
 	Quote         Quote      `koanf:"quote"`
 	Appetite      Appetite   `koanf:"appetite"`
 	Volatility    Volatility `koanf:"volatility"`
 	Program       Program    `koanf:"program"`
 	Uptime        Uptime     `koanf:"uptime"`
 	SymbolRisk    SymbolRisk `koanf:"risk"`
+}
+
+// Economics contains the measured unit economics for one market.
+//
+// RewardRateLowerBoundUSDPerMakerHour is intentionally a lower confidence
+// bound, not a point estimate. Scaling on one unusually good day would convert
+// uncertainty directly into fill losses.
+type Economics struct {
+	RewardRateLowerBoundUSDPerMakerHour float64 `koanf:"rewardRateLowerBoundUsdPerMakerHour"`
+	BreakEvenUSDPerMakerHour            float64 `koanf:"breakEvenUsdPerMakerHour"`
+	CalibrationMaxAllocationUSD         float64 `koanf:"calibrationMaxAllocationUsd"`
 }
 
 // Quote — геометрия лесенки и темп перестановки.

@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/nd/mm-standx/internal/domain/market"
+	"github.com/nd/mm-standx/internal/secret"
 )
 
 // minimalConfig — валидная основа, поверх которой тесты добавляют отклонения.
@@ -65,6 +66,30 @@ func TestOnlyImplementedFlattenPolicyIsAccepted(t *testing.T) {
 	cfg.Risk.FlattenPolicy = "hybrid"
 
 	require.ErrorContains(t, cfg.Validate(), "only \"immediate_market\" is implemented")
+}
+
+func liveEconomicConfig(allocation, rewardLowerBound float64) *Config {
+	cfg := defaults()
+	cfg.Runtime.Mode = ModeLive
+	cfg.Exchange.WalletPrivateKey = secret.New("test-only-key")
+	symbol := cfg.Defaults
+	symbol.Enabled = true
+	symbol.AllocationUSD = allocation
+	symbol.Economics.RewardRateLowerBoundUSDPerMakerHour = rewardLowerBound
+	symbol.Program = Program{UnitSize: "30", PerSideCap: "60", MaxMakerHoursPerHour: 2, OffHoursMultiplier: 1}
+	cfg.Symbols = map[string]Symbol{"XAU-USD": symbol}
+	return cfg
+}
+
+func TestLiveScalingRequiresARewardLowerBoundAboveBreakEven(t *testing.T) {
+	unknown := liveEconomicConfig(1_000, 0)
+	require.ErrorContains(t, unknown.Validate(), "exceeds the 60.00 USD calibration cap")
+
+	unprofitable := liveEconomicConfig(1_000, 20)
+	require.ErrorContains(t, unprofitable.Validate(), "below the 22.00 USD/MH break-even")
+
+	profitable := liveEconomicConfig(1_000, 30)
+	require.NoError(t, profitable.Validate())
 }
 
 func TestEnabledSymbols(t *testing.T) {

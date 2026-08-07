@@ -86,6 +86,7 @@ type pending struct {
 // Client — торговый WebSocket-клиент.
 type Client struct {
 	loop       *wsconn.Loop
+	sender     wsconn.Sender
 	sessionID  string
 	tokens     ports.TokenProvider
 	signer     ports.BodySigner
@@ -123,6 +124,7 @@ func New(
 		pending:    make(map[string]*pending),
 	}
 	c.loop = wsconn.New("order-api", cfg.WSAPIURL, cfg, c, bus, clock, log)
+	c.sender = c.loop
 	return c
 }
 
@@ -270,18 +272,45 @@ func (c *Client) Cancel(ctx context.Context, id trading.ClOrdID, p ports.Priorit
 // gateway.Router.
 func (c *Client) CancelBatch(ctx context.Context, ids []trading.ClOrdID, p ports.Priority) error {
 	var errs []error
+	prepared := make([]*preparedCall, 0, len(ids))
 	for _, id := range ids {
-		if err := c.Cancel(ctx, id, p); err != nil {
+		call, err := c.prepare(ctx, methodOrderCancel, dto.CancelOrderRequest{ClOrdID: id.String()}, id, p)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if err := c.send(ctx, call); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		prepared = append(prepared, call)
+	}
+	// Every frame is already on the wire before the first acknowledgement is
+	// awaited. Responses are buffered per request, so their arrival order does
+	// not matter and the whole batch is bounded by one ACK window.
+	for _, call := range prepared {
+		if err := c.await(ctx, call); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
 }
 
-// call отправляет команду и ждёт подтверждения приёма.
+type preparedCall struct {
+	method    string
+	clOrdID   trading.ClOrdID
+	requestID string
+	frame     request
+	waiter    <-chan response
+	sentAt    time.Time
+}
+
+// call sends one command and returns as soon as the frame leaves the process.
 //
-// Ожидается только первый ответ: итог матчинга приходит асинхронно событием,
-// и держать вызывающего до него значило бы блокировать контур котирования.
+// Both acceptance and the matching outcome arrive through OnMessage. Waiting
+// for the first ACK here blocked the symbol actor for up to two seconds, during
+// which it could not process a book move or execute a panic cancel. The order
+// port promises transmission errors, not synchronous matching outcomes.
 func (c *Client) call(
 	ctx context.Context,
 	method string,
@@ -289,63 +318,112 @@ func (c *Client) call(
 	clOrdID trading.ClOrdID,
 	priority ports.Priority,
 ) error {
+	call, err := c.prepare(ctx, method, params, clOrdID, priority)
+	if err != nil {
+		return err
+	}
+	if err := c.send(ctx, call); err != nil {
+		return err
+	}
+	c.scheduleForget(call.requestID)
+	return nil
+}
+
+func (c *Client) prepare(
+	ctx context.Context,
+	method string,
+	params any,
+	clOrdID trading.ClOrdID,
+	priority ports.Priority,
+) (*preparedCall, error) {
 	// Считает ли биржа сообщения торгового канала в тот же бюджет кредитов,
 	// что и REST, документация не уточняет. Считаем, что да: переоценка расхода
 	// стоит доли миллисекунды, недооценка — отказа с кодом 429.
 	if err := c.limiter.Acquire(ctx, priority); err != nil {
-		return fmt.Errorf("%s %s: rate shaper: %w: %w", method, clOrdID, ErrNotSent, err)
+		return nil, fmt.Errorf("%s %s: rate shaper: %w: %w", method, clOrdID, ErrNotSent, err)
 	}
 
 	payload, err := json.Marshal(params)
 	if err != nil {
-		return fmt.Errorf("%s %s: marshal params: %w: %w", method, clOrdID, ErrNotSent, err)
+		return nil, fmt.Errorf("%s %s: marshal params: %w: %w", method, clOrdID, ErrNotSent, err)
 	}
 	// Подписывается ровно та строка params, которая уйдёт в сеть.
 	headers, err := c.signer.Sign(payload)
 	if err != nil {
-		return fmt.Errorf("%s %s: sign: %w: %w", method, clOrdID, ErrNotSent, err)
+		return nil, fmt.Errorf("%s %s: sign: %w: %w", method, clOrdID, ErrNotSent, err)
 	}
 	requestID, err := auth.NewRequestID()
 	if err != nil {
-		return fmt.Errorf("%s %s: %w: %w", method, clOrdID, ErrNotSent, err)
+		return nil, fmt.Errorf("%s %s: %w: %w", method, clOrdID, ErrNotSent, err)
 	}
 
 	waiter := c.remember(requestID, clOrdID)
-	defer c.scheduleForget(requestID)
-
-	err = c.loop.SendJSON(ctx, request{
-		SessionID: c.sessionID,
-		RequestID: requestID,
-		Method:    method,
-		Header: map[string]string{
-			// Версию схемы документация торгового канала не упоминает, но REST
-			// её требует, и лишнее поле безопаснее отсутствующего.
-			"x-request-sign-version": headers.Version,
-			"x-request-id":           headers.RequestID,
-			"x-request-timestamp":    fmt.Sprint(headers.Timestamp),
-			"x-request-signature":    headers.Signature,
+	return &preparedCall{
+		method:    method,
+		clOrdID:   clOrdID,
+		requestID: requestID,
+		waiter:    waiter,
+		frame: request{
+			SessionID: c.sessionID,
+			RequestID: requestID,
+			Method:    method,
+			Header: map[string]string{
+				// Версию схемы документация торгового канала не упоминает, но REST
+				// её требует, и лишнее поле безопаснее отсутствующего.
+				"x-request-sign-version": headers.Version,
+				"x-request-id":           headers.RequestID,
+				"x-request-timestamp":    fmt.Sprint(headers.Timestamp),
+				"x-request-signature":    headers.Signature,
+			},
+			Params: string(payload),
 		},
-		Params: string(payload),
-	})
-	if err != nil {
-		c.forget(requestID)
+	}, nil
+}
+
+func (c *Client) send(ctx context.Context, call *preparedCall) error {
+	if err := c.sender.SendJSON(ctx, call.frame); err != nil {
+		c.forget(call.requestID)
 		// Ошибка записи в сокет означает, что кадр не ушёл: библиотека
 		// не рапортует успех при частичной отправке.
-		return fmt.Errorf("%s %s: send: %w: %w", method, clOrdID, ErrNotSent, err)
+		return fmt.Errorf("%s %s: send: %w: %w", call.method, call.clOrdID, ErrNotSent, err)
+	}
+	call.sentAt = c.clock.Now()
+	return nil
+}
+
+func (c *Client) await(ctx context.Context, call *preparedCall) error {
+	defer c.scheduleForget(call.requestID)
+
+	// A later call in the batch may already have its ACK buffered by the time
+	// the loop reaches it. Consume that response before judging the wall-clock
+	// deadline; it arrived on time even if an earlier request was slow.
+	select {
+	case resp := <-call.waiter:
+		return callResponseError(call, resp)
+	default:
+	}
+
+	remaining := c.ackTimeout - c.clock.Now().Sub(call.sentAt)
+	if remaining <= 0 {
+		return fmt.Errorf("%s %s: %w within %s", call.method, call.clOrdID, ErrAckTimeout, c.ackTimeout)
 	}
 
 	select {
-	case resp := <-waiter:
-		if resp.Code != 0 {
-			return fmt.Errorf("%s %s: exchange rejected the request: code %d: %s",
-				method, clOrdID, resp.Code, resp.Message)
-		}
-		return nil
-	case <-c.clock.After(c.ackTimeout):
-		return fmt.Errorf("%s %s: %w within %s", method, clOrdID, ErrAckTimeout, c.ackTimeout)
+	case resp := <-call.waiter:
+		return callResponseError(call, resp)
+	case <-c.clock.After(remaining):
+		return fmt.Errorf("%s %s: %w within %s", call.method, call.clOrdID, ErrAckTimeout, c.ackTimeout)
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func callResponseError(call *preparedCall, resp response) error {
+	if resp.Code != 0 {
+		return fmt.Errorf("%s %s: exchange rejected the request: code %d: %s",
+			call.method, call.clOrdID, resp.Code, resp.Message)
+	}
+	return nil
 }
 
 func (c *Client) remember(requestID string, clOrdID trading.ClOrdID) <-chan response {

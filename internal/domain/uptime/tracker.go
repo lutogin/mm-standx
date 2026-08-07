@@ -1,13 +1,9 @@
-// Package uptime ведёт учёт присутствия в стакане и планирует поведение
-// внутри календарного часа.
-//
-// Учёт устроен так же, как у биржи: выборка величины min(bid, ask) с постоянным
-// шагом. Совпадение метода принципиально — расхождение нашей оценки с отчётом
-// StandX означает ошибку в модели, и обнаружить её нужно раньше, чем она станет
-// расхождением в деньгах.
+// Package uptime tracks qualifying presence and chooses the safest useful mode
+// inside each UTC scoring hour.
 package uptime
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -15,20 +11,15 @@ import (
 	"github.com/nd/mm-standx/internal/domain/reward"
 )
 
-// Mode — режим поведения на остаток часа.
+// Mode is the quoting mode for the remainder of the hour.
 type Mode uint8
 
 const (
-	// Earning — обычная работа: котируем ради зачёта.
+	// Earning means that presence can still secure an economically eligible tier.
 	Earning Mode = iota
-	// Banked — порог уже взят, дальнейший аптайм ничего не добавит.
-	//
-	// Зачёт ступенчатый: сто процентов присутствия дают ровно столько же,
-	// сколько семьдесят. Набрав запас, разумно отойти дальше от рынка —
-	// награда та же, риск меньше.
+	// Banked means that the configured safety target has already been secured.
 	Banked
-	// Lost — час недостижим математически. Продолжать значит платить
-	// за исполнения, не получая взамен ничего.
+	// Lost means that no economically eligible tier remains reachable.
 	Lost
 )
 
@@ -43,120 +34,196 @@ func (m Mode) String() string {
 	}
 }
 
-// Tracker накапливает выборку за текущий час.
+// Policy controls the safety margin above the programme thresholds.
+type Policy struct {
+	// TargetPct is the preferred full-tier target.
+	TargetPct float64
+	// HardFloorPct is the lowest presence accepted as a safely secured full tier.
+	HardFloorPct float64
+	// ReservePct is added to lower-tier thresholds when enough time remains.
+	ReservePct float64
+	// MinTierMultiplier excludes tiers whose reduced accrual cannot cover risk.
+	MinTierMultiplier float64
+	// SampleInterval is the actor's fixed observation cadence.
+	SampleInterval time.Duration
+}
+
+// Tracker accumulates the normalized sample grid for the current UTC hour.
 type Tracker struct {
 	program reward.Program
-	// targetPct — доля часа, которую считаем целью. Выше порога лучшего
-	// тира, чтобы дрожание вокруг границы не стоило половины зачёта.
-	targetPct float64
+	policy  Policy
 
-	hour    time.Time
-	samples []decimal.Decimal
-	nonZero int
+	hour     time.Time
+	samples  []decimal.Decimal
+	nonZero  int
+	lastSlot int
 }
 
-// New создаёт учёт для инструмента.
-func New(program reward.Program, targetPct float64) *Tracker {
-	return &Tracker{program: program, targetPct: targetPct}
+// New creates an hourly tracker.
+func New(program reward.Program, policy Policy) *Tracker {
+	if policy.SampleInterval <= 0 {
+		policy.SampleInterval = time.Second
+	}
+	return &Tracker{program: program, policy: policy, lastSlot: -1}
 }
 
-// Sample фиксирует очередное наблюдение. Нулевое значение означает отсутствие
-// квалифицирующих котировок и учитывается наравне с остальными: именно нули
-// и делают метрику зависимой от присутствия.
+// Sample records one observation. Missing grid slots, including every slot
+// before a mid-hour process start, are inserted as zero. This is deliberately
+// pessimistic: a restart must never manufacture uptime that the exchange did
+// not observe.
 func (t *Tracker) Sample(now time.Time, value decimal.Decimal) {
-	hour := now.UTC().Truncate(time.Hour)
-	if !hour.Equal(t.hour) {
-		t.hour = hour
-		t.samples = t.samples[:0]
-		t.nonZero = 0
+	t.resetHour(now)
+	slot := t.slot(now)
+	t.fillBefore(slot)
+
+	if slot == t.lastSlot && len(t.samples) > 0 {
+		previous := t.samples[len(t.samples)-1]
+		if previous.IsPositive() && !value.IsPositive() {
+			t.nonZero--
+		} else if !previous.IsPositive() && value.IsPositive() {
+			t.nonZero++
+		}
+		t.samples[len(t.samples)-1] = value
+		return
 	}
 
 	t.samples = append(t.samples, value)
 	if value.IsPositive() {
 		t.nonZero++
 	}
+	t.lastSlot = slot
 }
 
-// Snapshot — состояние часа.
+func (t *Tracker) resetHour(now time.Time) {
+	hour := now.UTC().Truncate(time.Hour)
+	if !hour.Equal(t.hour) {
+		t.hour = hour
+		t.samples = t.samples[:0]
+		t.nonZero = 0
+		t.lastSlot = -1
+	}
+}
+
+func (t *Tracker) slot(now time.Time) int {
+	hour := now.UTC().Truncate(time.Hour)
+	elapsed := now.UTC().Sub(hour)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	return int(elapsed / t.policy.SampleInterval)
+}
+
+func (t *Tracker) fillBefore(slot int) {
+	for missing := t.lastSlot + 1; missing < slot; missing++ {
+		t.samples = append(t.samples, decimal.Zero)
+		t.lastSlot = missing
+	}
+}
+
+// Snapshot is the current state of the scoring hour.
 type Snapshot struct {
 	Mode Mode
-	// QualifiedPct — доля наблюдений с живыми котировками.
+	// QualifiedPct is the share of observed grid slots with two-sided liquidity.
 	QualifiedPct float64
-	// ElapsedPct — какая часть часа прошла.
+	// ElapsedPct is the elapsed share of the UTC hour.
 	ElapsedPct float64
-	// BestPossiblePct — предел присутствия, если котировать без перерыва
-	// до конца часа.
+	// BankedPct is the absolute share of the hour already observed as qualified.
+	BankedPct float64
+	// BestPossiblePct is the ceiling if every remaining slot qualifies.
 	BestPossiblePct float64
-	// DowntimeBudget — сколько ещё можно простоять, не потеряв цель.
+	// DowntimeBudget is the remaining time that can be idle without losing the
+	// active safety target.
 	DowntimeBudget time.Duration
-	// MakerHours — оценка начисления по накопленной выборке.
+	// MakerHours is the conservative estimate from the normalized samples.
 	MakerHours float64
-	// Multiplier is the accrual factor in force for this hour. Below one it
-	// means the reference market is shut and the hour is worth a fraction of
-	// a normal one, while the fill risk stays exactly the same.
+	// Multiplier is the reference-market accrual factor for this hour.
 	Multiplier float64
-	// Reason описывает выбранный режим.
-	Reason string
+	// TierThresholdPct and TierMultiplier identify the tier currently pursued.
+	TierThresholdPct float64
+	TierMultiplier   float64
+	// TargetPct is the safety-adjusted presence target currently pursued.
+	TargetPct float64
+	Reason    string
 }
 
-// Assess оценивает час и выбирает режим на остаток.
-//
-// Здесь и живёт основная альфа стратегии. Ступенчатый зачёт превращает час
-// в задачу с тремя исходами, и в двух из трёх правильное действие —
-// уменьшить риск, а не наращивать присутствие.
+// Assess evaluates the hour and chooses the best economically eligible tier.
 func (t *Tracker) Assess(now time.Time) Snapshot {
+	// Completed slots since the last actor sample are zero. The current slot is
+	// left untouched because its observation may arrive later in the same tick.
+	t.resetHour(now)
+	t.fillBefore(t.slot(now))
+
 	elapsed := now.UTC().Sub(now.UTC().Truncate(time.Hour))
 	elapsedPct := float64(elapsed) / float64(time.Hour) * 100
+	bankedPct := float64(t.nonZero) * float64(t.policy.SampleInterval) / float64(time.Hour) * 100
+	if bankedPct > elapsedPct {
+		bankedPct = elapsedPct
+	}
 
 	s := Snapshot{
-		ElapsedPct: elapsedPct,
-		MakerHours: t.program.MakerHours(t.samples, now),
-		Multiplier: t.program.Multiplier(now),
+		ElapsedPct:      elapsedPct,
+		BankedPct:       bankedPct,
+		BestPossiblePct: bankedPct + (100 - elapsedPct),
+		MakerHours:      t.program.MakerHours(t.samples, now),
+		Multiplier:      t.program.Multiplier(now),
 	}
-	if len(t.samples) == 0 {
-		s.Reason = "no observations yet"
-		s.DowntimeBudget = time.Hour
+	if len(t.samples) > 0 {
+		s.QualifiedPct = float64(t.nonZero) / float64(len(t.samples)) * 100
+	}
+
+	tier, target, ok := t.bestTier(s.BestPossiblePct)
+	if !ok {
+		s.Mode = Lost
+		s.Reason = "no economically eligible uptime tier remains reachable"
+		return s
+	}
+	s.TierThresholdPct = tier.ThresholdPct
+	s.TierMultiplier = tier.Multiplier
+	s.TargetPct = target
+
+	if s.BankedPct >= target {
+		s.Mode = Banked
+		s.Reason = fmt.Sprintf("%.0f%% safety target for the %.2fx tier is secured", target, tier.Multiplier)
 		return s
 	}
 
-	s.QualifiedPct = float64(t.nonZero) / float64(len(t.samples)) * 100
-	// Доля часа, набранная к текущему моменту, и потолок при безупречной
-	// работе до конца часа.
-	bankedOfHour := s.QualifiedPct * elapsedPct / 100
-	s.BestPossiblePct = bankedOfHour + (100 - elapsedPct)
-
-	lowest := t.lowestThreshold()
-	switch {
-	case bankedOfHour >= t.targetPct:
-		s.Mode = Banked
-		s.Reason = "target already secured, further uptime adds nothing"
-
-	case s.BestPossiblePct < lowest:
-		// Даже безупречная работа до конца часа не дотянет до нижнего тира.
-		s.Mode = Lost
-		s.Reason = "hour is unreachable, further risk buys nothing"
-
-	default:
-		s.Mode = Earning
-		s.Reason = "accumulating uptime"
-	}
-
-	// Бюджет простоя: сколько времени можно не котировать, оставаясь у цели.
-	if slack := s.BestPossiblePct - t.targetPct; slack > 0 {
+	s.Mode = Earning
+	s.Reason = fmt.Sprintf("accumulating uptime for the %.2fx tier", tier.Multiplier)
+	if slack := s.BestPossiblePct - target; slack > 0 {
 		s.DowntimeBudget = time.Duration(slack / 100 * float64(time.Hour))
 	}
 	return s
 }
 
-func (t *Tracker) lowestThreshold() float64 {
-	lowest := 100.0
-	for _, tier := range t.program.Tiers {
-		if tier.ThresholdPct < lowest {
-			lowest = tier.ThresholdPct
+// bestTier returns the strongest eligible reachable tier and its active safety
+// target. If the preferred reserve is no longer reachable, the programme
+// threshold remains the last-resort target rather than abandoning a payable
+// hour early.
+func (t *Tracker) bestTier(bestPossible float64) (reward.Tier, float64, bool) {
+	for i, tier := range t.program.Tiers {
+		if tier.Multiplier+1e-12 < t.policy.MinTierMultiplier {
+			continue
 		}
+
+		desired := tier.ThresholdPct + t.policy.ReservePct
+		floor := tier.ThresholdPct
+		if i == 0 {
+			desired = t.policy.TargetPct
+			floor = t.policy.HardFloorPct
+		}
+		if desired > 100 {
+			desired = 100
+		}
+		if bestPossible < floor {
+			continue
+		}
+		if bestPossible < desired {
+			desired = floor
+		}
+		return tier, desired, true
 	}
-	return lowest
+	return reward.Tier{}, 0, false
 }
 
-// Samples возвращает число наблюдений в текущем часе.
+// Samples returns the normalized observation count in the current hour.
 func (t *Tracker) Samples() int { return len(t.samples) }

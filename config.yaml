@@ -69,13 +69,13 @@ risk:
   # худшая из двух оценок. Взведённая остановка переживает перезапуск.
   # На время калибровки — доля депозита, а не круглое число: при 95 DUSD
   # на счёте лимит в 500 не сработал бы никогда.
-  maxDailyLossUsd: 35
+  maxDailyLossUsd: 10
   # Проверяется на старте: сумма allocationUsd × leverage по включённым
   # инструментам не должна превышать этот потолок.
   maxNotionalUsd: 120000
   # Не денежный лимит, а детектор рассогласования модели с рынком: стратегия
   # построена на том, что исполнения редки.
-  maxFillsPerHour: 20
+  maxFillsPerHour: 6
   # Ставки StandX, одинаковые для всех рынков. Нужны для независимой оценки
   # стоимости залива, см. PLAN.md §1.3.
   fees: { makerBps: 1, takerBps: 4 }
@@ -85,6 +85,12 @@ risk:
   # position-based fallback retry as soon as a PositionUpdated event arrives.
   flattenDebounce: 0ms
   postFillCooldown: 3s
+  # Two independent fill episodes in ten minutes indicate a temporary regime
+  # mismatch. Step away for twenty minutes, then re-evaluate current data; this
+  # is deliberately self-resetting and does not wedge the bot for the day.
+  fillBurstLimit: 2
+  fillBurstWindow: 10m
+  fillBurstCooldown: 20m
   killSwitchOnDrawdown: true
 
 health:
@@ -99,6 +105,13 @@ health:
 defaults:
   enabled: false
   allocationUsd: 0
+  economics:
+    # Until the daily pool is observed, only the small calibration allocation
+    # may go live. After enough days, set the conservative lower bound here;
+    # scaling is blocked unless it covers the measured 22 USD/MH fill cost.
+    rewardRateLowerBoundUsdPerMakerHour: 0
+    breakEvenUsdPerMakerHour: 22
+    calibrationMaxAllocationUsd: 60
   quote:
     ladderLayers: 3 # лесенка компенсирует отсутствие amend в API
     # The reward band is only 10 bps wide and ends abruptly, so the width of

@@ -34,6 +34,9 @@ StandX, зарабатывает Maker Hours и Maker Points, и при этом
 | Метрики | `adapters/metrics`, `app/telemetry` | Prometheus на `:9090/metrics`, 21 показатель |
 | Память о волатильности | `domain/volatility` | затухающий рекорд, ограниченный 3× максимумом живого окна |
 | Расписание базового рынка | `domain/reward` | вне часов XAU котировки снимаются, множитель 0.1 не покупается полным риском |
+| Conservative profitability gate | `domain/economics`, `app/engine` | unknown reward rate permits only the 60 USD calibration allocation; scaling requires a lower bound above break-even |
+| Calendar-hour uptime normalization | `domain/uptime` | process start, restart, warm-up and missed actor ticks are counted as zero rather than manufactured uptime |
+| Transient fill-burst breaker | `app/engine` | 2 episodes in 10 minutes pause quoting for 20 minutes and then release automatically |
 
 ### Выбранный инструмент — XAU-USD
 
@@ -89,6 +92,13 @@ day», размер пула «is not fixed». Значит `$/MH` зависи�
 **Стратегия окупается тогда и только тогда, когда фактическая ставка пула
 превышает 22 USD за Maker Hour.** Ниже — не окупается ни при каком депозите.
 
+The invariant is enforced in live mode, not left as an operator note. With
+`rewardRateLowerBoundUsdPerMakerHour: 0`, live allocation is capped at 60 USD
+for calibration. Scaling is accepted only after a conservative lower bound is
+configured above 22 USD/MH. A 0.5x uptime tier or reduced market-hours
+multiplier must cover the same threshold after its multiplier, because fill
+risk does not fall with accrual.
+
 Поправка на VPS обоснована разбором 96 заливов: **46% из них произошли, когда
 команда отмены уже была отправлена и летела**. Сокращение задержки с 404 мс
 (из которых ~250 мс — дорога за точку входа CDN, §2.5) до ~150 мс убирает
@@ -106,23 +116,20 @@ day», размер пула «is not fixed». Значит `$/MH` зависи�
    биржи после первого дня работы: начисленные DUSD делятся на начисленные MH.
 2. **Доля отказов ALO в потоке.** Заглушка принимает всё; биржа отвергнет часть
    ордеров, потому что за 400 мс стакан ушёл. Это прямой вычет из присутствия.
-3. **§12.3, суммируются ли ордера одной стороны.** На этом стоит вся лесенка:
-   если не суммируются, три ступени дают столько же, сколько одна.
-
 **Дефекты, найденные и незакрытые:**
 
-4. **Зависание актора не ловит никто.** Файл биения пишет отдельная горутина,
+3. **Зависание актора не ловит никто.** Файл биения пишет отдельная горутина,
    не связанная с торговым циклом, поэтому заблокировавшийся актор при живом
    процессе выглядит здоровым и для сторожа, и для `/healthz`. Лечится
    привязкой биения к такту актора.
-5. **Ротация WebSocket на 20-м часе ни разу не выполнялась.** Срок отсчитывается
+4. **Ротация WebSocket на 20-м часе ни разу не выполнялась.** Срок отсчитывается
    от установки соединения, а не от старта процесса, и до него не доживали.
 
 **Отложено осознанно:**
 
-7. Аллокатора капитала между инструментами нет и пока не нужно: инструмент один,
+5. Аллокатора капитала между инструментами нет и пока не нужно: инструмент один,
    суммарный нотионал проверяется на старте.
-8. `minBps: 5.5` остаётся жёстким. Экономический порог «ближе не окупается»
+6. `minBps: 5.5` остаётся жёстким. Экономический порог «ближе не окупается»
    вычислим только после калибровки `$/MH` (§4.6).
 
 ### Как запускается
@@ -249,6 +256,14 @@ MakerHours = min( max( X₇₀/Unit × 1.0 , X₅₀/Unit × 0.5 ), maxMakerHour
 пропорционально уменьшает MH. Минимальные размеры ордеров при этом ничтожны
 (0.0001 BTC ≈ $6, 0.001 XAG ≈ $0.06), а потолок висящих ордеров — 100 на
 инструмент, так что лесенка из трёх ступеней не создаёт ограничений.
+
+At the current 70% margin utilization and 4x leverage, an unconstrained account
+provides roughly `balance × 2.8` of combined two-sided notional. Using the XAU
+table value of 19.1k notional per Maker Hour/day, 1,000 DUSD is approximately
+0.15 MH/day (4.4 MH/month) and 10,000 DUSD approximately 1.47 MH/day
+(44 MH/month) before real uptime and ALO rejects. The 250 MH MM0 fee tier would
+therefore need about 57k DUSD in this idealized linear estimate, not 10k. None
+of these balances repairs a reward rate below the 22 USD/MH break-even.
 
 Комиссии одинаковы для всех рынков: мейкер 1 bp, тейкер 4 bps. Последняя цифра —
 прямая стоимость каждого закрытия по маркету после залива.
@@ -1100,14 +1115,17 @@ reward:                                     # параметры програм�
     - { thresholdPct: 50, multiplier: 0.5 }
 
 risk:
-  maxDailyLossUsd: 500
+  maxDailyLossUsd: 10
   maxNotionalUsd: 120000
-  maxFillsPerHour: 20
+  maxFillsPerHour: 6
   killSwitchOnDrawdown: true
   marginMode: isolated                      # isolated | cross
   flattenPolicy: immediate_market
   flattenDebounceMs: 0                      # первое закрытие без задержки
   postFillCooldownMs: 3000
+  fillBurstLimit: 2
+  fillBurstWindow: 10m
+  fillBurstCooldown: 20m
 
 health:
   markStaleMs: 2000
@@ -1115,6 +1133,10 @@ health:
   ackTimeoutMs: 2000
 
 defaults: &defaults                         # наследуется каждым символом
+  economics:
+    rewardRateLowerBoundUsdPerMakerHour: 0 # unknown: calibration only
+    breakEvenUsdPerMakerHour: 22
+    calibrationMaxAllocationUsd: 60
   quote:
     targetBps: 7.5                          # где хотим стоять
     minKeepBps: 5.0                         # ближе — перекотировка
@@ -1325,6 +1347,11 @@ symbols:
 | **Исполнение закрывающего ордера учитывалось как залив** | Первый боевой прогон 6 августа: после закрытия позиции актор заводил эпизод, снять который было нечем — позиция уже плоская, а `pendingFill` обнуляется только отправкой закрытия. Котирование прекратилось навсегда, в логе осталась одна тишина. Заодно каждый залив считался защитным контуром дважды | Идентификаторы закрывающих ордеров запоминаются до отправки и разбираются отдельным путём; эпизод, не породивший позиции, снимается по истечении отсрочки |
 | Кулдаун перестановки закрывал и аварийный съём | Проверка опасности жила внутри `Ladder.Plan`, ниже ограничения темпа: после каждого действия актор был слеп 250 мс при обновлении стакана раз в 300 мс | `Ladder.Danger` вынесен отдельным методом и вызывается до кулдауна |
 | **Паническая зона снимала по одной ступени** | `Ladder.Danger` срабатывал только после входа за `pullBps`, то есть когда рынок уже дошёл до котировки. Между `panicBps` и `pullBps` три ступени снимались round-robin и под ограничением темпа — свип успевал исполнить их все | Любое cancel-first решение в зоне `panic` снимает всю сторону одним пакетом; round-robin остаётся только для штатной перестановки |
+| **The WS cancel pipeline was sequential** | The fallback described itself as pipelined but called `Cancel` in a loop, waiting one ACK per rung. Later rungs remained live for multiple network round trips | Request preparation, frame send and ACK wait are split; every frame is sent before the first ACK wait, with one shared ACK window |
+| **The symbol actor waited for every single WS ACK** | After writing a normal place or cancel frame it could spend up to two seconds unable to consume book updates, so a panic signal sat in the inbox | Single WS commands return after the frame is written; acceptance and rejection remain asynchronous events. Only the fallback cancel batch waits, once for the shared ACK window |
+| **A mid-hour restart manufactured uptime** | Samples started at process startup, then their qualified ratio was multiplied by the whole elapsed hour. Starting at minute 35 with only positive samples credited the missing 35 minutes as qualified | Uptime uses a fixed UTC grid; every pre-start, warm-up and missed slot is inserted as zero. The conservative loss of pre-restart credit is intentional |
+| **A short fill regime could become either immediate re-entry or a permanent stop** | The 3-second post-fill pause was too short for a regime change, while the hourly guard required manual intervention | Two independent episodes in ten minutes trigger a 20-minute transient breaker; it releases by wall time and the 6-fill hourly guard remains the hard failure detector |
+| **Profitability existed only in documentation** | A live allocation could be raised while the reward rate was unknown or below the measured 22 USD/MH cost | The live economics gate caps unknown-rate calibration at 60 USD and rejects scaling below the conservative break-even lower bound |
 | **Политика immediate market ждала дебаунс и позицию** | Первое закрытие отправлялось не из исполнения, а после `flattenDebounce` и очередного тика/`PositionUpdated`. Экспозиция оставалась открытой внутри того же скачка, который уже пробил котировку | Каждое приращение накопленного `FilledQty` немедленно получает встречный reduce-only IOC; позиционный путь остался страховочным повтором |
 | Чужой или повторный терминальный ордер мог считаться заливом | Актор подписан на весь поток инструмента, а принадлежность лесенке перед `onFill` не проверялась. Повтор `filled` после очистки ступени снова нес полный накопленный объём | Идентификатор регистрируется при размещении; неизвестные исполнения не входят в счётчик котировок, а экспозиция всё равно закрывается по `PositionUpdated` |
 | Мера риска относилась к центру лесенки | Ближняя ступень стояла на полширины лесенки ближе к рынку, чем разрешала оценка риска — то есть на 1 bps из 5.5 | `policy.Ladder.Anchor` отодвигает центр наружу; дальняя ступень обязана уместиться в полосу награды, иначе котирования нет |
@@ -1355,6 +1382,9 @@ symbols:
 | **Память о волатильности живёт дольше окна** | Поправка на зрелость умножает скачок, а на замершем рынке он близок к нулю: множитель нуля есть ноль (§4.6) |
 | **Память переживает реконнект, окно — нет** | Разрыв не свидетельствует о спокойном рынке; забыв рекорд, бот подошёл бы ближе именно там, где оснований меньше всего (§4.6) |
 | **Повтор съёма без предела попыток** | Ордер в стакане исполняется независимо от числа наших неудач; отступ растёт, а список чистится по ответу биржи (§4.2) |
+| **Unknown downtime is zero, never earned uptime** | Preserving pre-restart credit would require durable tick-level state. Losing one partial hour is cheaper and safer than risking fills for an hour that only appears reachable locally |
+| **Standard tier is conditional on unit economics** | Its 0.5x accrual carries the same fill exposure. It is pursued only when the configured reward lower bound still exceeds break-even after the tier multiplier |
+| **Capital scaling is code-gated** | Reward and fill cost are linear in notional, so deposit size cannot repair negative unit economics. Unknown rates stay at calibration size |
 
 | Дрожание целевой дистанции | Теневой прогон дал 18 970 команд за 175 с — 110 в секунду при лимите 15 | Цель удерживается, пока расчётная не отойдёт заметно; плюс темп перестановки. Стало 40 команд |
 | Заглушка dry_run не подтверждала ордера | Ступени зависали в `Placing` до таймаута; теневой режим мерил частоту таймаутов, а не аптайм | Заглушка воспроизводит жизненный цикл собственных ордеров |

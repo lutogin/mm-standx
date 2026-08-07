@@ -69,7 +69,8 @@ type Metrics interface {
 	FillsLastHour(n int)
 	// KillSwitch — взведена ли аварийная остановка.
 	KillSwitch(tripped bool)
-	// RiskLimit publishes a limit as it is actually in force in this process.
+	// RiskLimit publishes a protective or economic limit as it is actually in
+	// force in this process.
 	//
 	// Every one of these can be overridden from the environment, so the value
 	// baked into the image answers "what was configured", not "what is
@@ -120,6 +121,12 @@ const (
 	// CauseOffHours — the reference market is shut and the hour accrues at a
 	// reduced multiplier while the fill risk stays the same.
 	CauseOffHours WithdrawCause = "off_hours"
+	// CauseEconomics — the conservative reward lower bound does not cover the
+	// measured cost of fill risk, or the calibration allocation is exceeded.
+	CauseEconomics WithdrawCause = "economics"
+	// CauseFillBurst — several independent fills arrived inside the transient
+	// burst window and quoting is cooling down before a fresh evaluation.
+	CauseFillBurst WithdrawCause = "fill_burst"
 	// CauseSizing — размер ордера не вычислим.
 	CauseSizing WithdrawCause = "sizing"
 	// CauseBookUnreadable — стакан не читается.

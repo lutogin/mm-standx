@@ -35,8 +35,10 @@ func (c *testClock) Sleep(context.Context, time.Duration) error { return nil }
 func (c *testClock) advance(d time.Duration)                    { c.now = c.now.Add(d) }
 
 type recordingGateway struct {
-	placed    []ports.PlaceRequest
-	cancelled []trading.ClOrdID
+	placed      []ports.PlaceRequest
+	cancelled   []trading.ClOrdID
+	cancelCalls int
+	batchCalls  int
 }
 
 func (g *recordingGateway) Place(_ context.Context, req ports.PlaceRequest) error {
@@ -45,11 +47,13 @@ func (g *recordingGateway) Place(_ context.Context, req ports.PlaceRequest) erro
 }
 
 func (g *recordingGateway) Cancel(_ context.Context, id trading.ClOrdID, _ ports.Priority) error {
+	g.cancelCalls++
 	g.cancelled = append(g.cancelled, id)
 	return nil
 }
 
 func (g *recordingGateway) CancelBatch(_ context.Context, ids []trading.ClOrdID, _ ports.Priority) error {
+	g.batchCalls++
 	g.cancelled = append(g.cancelled, ids...)
 	return nil
 }
@@ -207,6 +211,29 @@ func TestEveryPartialFillDeltaIsFlattenedImmediately(t *testing.T) {
 		require.True(t, order.ReduceOnly)
 	}
 	require.Equal(t, 1, *episodes, "partials from one sweep remain one risk episode")
+}
+
+// Several independent fills indicate a temporary regime mismatch. The actor
+// must step away, but the pause is time-bounded so it cannot become the
+// permanent silent state seen in the first live run.
+func TestFillBurstCooldownResetsWithoutOperatorIntervention(t *testing.T) {
+	ctx := context.Background()
+	e, _, clk, _ := fillEngine(t)
+	e.risk.FillBurstLimit = 2
+	e.risk.FillBurstWindow = 10 * time.Minute
+	e.risk.FillBurstCooldown = 20 * time.Minute
+
+	e.onFill(ctx, fill("quote-1", market.Sell, "0.008", "4276.1"))
+	e.clearEpisode(clk.now)
+	clk.advance(5 * time.Minute)
+	e.onFill(ctx, fill("quote-2", market.Sell, "0.008", "4276.1"))
+
+	require.Equal(t, clk.now.Add(20*time.Minute), e.fillBurstUntil)
+	require.True(t, clk.now.Before(e.fillBurstUntil))
+
+	clk.advance(20*time.Minute + time.Second)
+	require.False(t, clk.now.Before(e.fillBurstUntil),
+		"the transient breaker must release itself after the configured cooldown")
 }
 
 // User or replayed orders share the account stream with bot quotes. Exposure

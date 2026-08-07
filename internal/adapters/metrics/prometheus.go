@@ -102,7 +102,7 @@ func New() *Prometheus {
 	p.fillsPerHour = plain("fills_last_hour", "Fills within the trailing hour")
 	p.killSwitch = plain("kill_switch", "1 when trading is halted by the risk guard")
 	p.riskLimit = gauge("risk_limit",
-		"Risk limit as actually in force in this process, after environment overrides", "limit")
+		"Protective or economic limit in force after environment overrides", "limit")
 
 	p.ordersSent = counter("orders_sent_total", "Trading commands sent", "symbol", "side", "kind")
 	p.ordersFailed = counter("orders_failed_total",

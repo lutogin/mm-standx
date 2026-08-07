@@ -16,6 +16,7 @@ import (
 	"github.com/nd/mm-standx/internal/domain/market"
 	"github.com/nd/mm-standx/internal/domain/money"
 	"github.com/nd/mm-standx/internal/domain/policy"
+	"github.com/nd/mm-standx/internal/domain/quotes"
 	"github.com/nd/mm-standx/internal/domain/reward"
 	"github.com/nd/mm-standx/internal/domain/trading"
 	"github.com/nd/mm-standx/internal/domain/uptime"
@@ -147,6 +148,27 @@ func TestPanicPullIsNotDelayedByTheRequoteCooldown(t *testing.T) {
 		"a rung inside the panic zone must be pulled regardless of the cooldown")
 }
 
+// A panic pull is one exchange batch, not one acknowledged request per rung.
+// The latter keeps the final orders exposed for several network round trips.
+func TestPanicPullCancelsEveryExposedRungInOneBatch(t *testing.T) {
+	ctx := context.Background()
+	e, gw, clk := dangerEngine(t)
+	e.bids = quotes.New(market.Buy, 3)
+	e.asks = quotes.New(market.Sell, 3)
+
+	for i, id := range []trading.ClOrdID{"ask-1", "ask-2", "ask-3"} {
+		e.asks.OnPlaceSent(i, id, money.MustParsePrice("4277"), money.MustParseQty("0.008"), clk.now)
+		e.asks.OnOrderUpdate(trading.Order{ClOrdID: id, Status: trading.StatusOpen}, clk.now)
+	}
+
+	e.evaluate(ctx, false)
+
+	require.Equal(t, 1, gw.batchCalls)
+	require.Zero(t, gw.cancelCalls)
+	require.ElementsMatch(t,
+		[]trading.ClOrdID{"ask-1", "ask-2", "ask-3"}, gw.cancelled)
+}
+
 // The cooldown must still do its job on the reward path, or the actor would
 // requote on every book update and exhaust the request budget in a minute.
 func TestSafeRungIsNotRequotedDuringTheCooldown(t *testing.T) {
@@ -176,7 +198,9 @@ func offHoursEngine(t *testing.T) (*Engine, *recordingGateway, *testClock) {
 	require.NoError(t, err)
 	e.program.OffHours = reward.Schedule{Weekly: window}
 	e.program.OffHoursMultiplier = 0.1
-	e.hour = uptime.New(e.program, 80)
+	e.hour = uptime.New(e.program, uptime.Policy{
+		TargetPct: 80, HardFloorPct: 72, ReservePct: 8, SampleInterval: tickInterval,
+	})
 	return e, gw, clk
 }
 

@@ -1,0 +1,150 @@
+{
+  "generated_at": "2026-08-07T21:32:35.294718+00:00",
+  "nodes": {
+    "cmd_standxctl_latency": {
+      "code_fingerprint": "690e39af1ec74229a766963fa5b021150126946f0866919224b778318eacf6e9",
+      "label": "latency.go",
+      "last": "2026-08-07T21:24:43.048563+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-07T21:24:43.048563+00:00",
+          "outcome": "useful",
+          "q": "Что улучшить для извлечения большей прибыли и минимизации издержек и риска с учетом промо StandX?"
+        }
+      ],
+      "score": 0.999873721,
+      "source_file": "cmd/standxctl/latency.go",
+      "status": "tentative",
+      "uses": 1
+    },
+    "engine_engine_onfill": {
+      "code_fingerprint": "b56ca4e10b30630e93253f78c8f2aeb981b2690b3b1d5d3b4ac9a0221c9db116",
+      "label": ".onFill()",
+      "last": "2026-08-07T21:00:56.866476+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-07T21:00:56.866476+00:00",
+          "outcome": "useful",
+          "q": "Audit the StandX maker bot to prevent fills, flatten immediately, and recover safely after volatility spikes"
+        }
+      ],
+      "score": 0.999492455,
+      "source_file": "internal/app/engine/evaluate.go",
+      "status": "tentative",
+      "uses": 1
+    },
+    "internal_domain_sizing_sizing_compute": {
+      "code_fingerprint": "60fd6e4ba7d4ae9941c4c94c07b503dbf0f4ab3bf4b128ff11458c354a476b68",
+      "label": "Compute()",
+      "last": "2026-08-07T21:24:43.048563+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-07T21:24:43.048563+00:00",
+          "outcome": "useful",
+          "q": "Что улучшить для извлечения большей прибыли и минимизации издержек и риска с учетом промо StandX?"
+        }
+      ],
+      "score": 0.999873721,
+      "source_file": "internal/domain/sizing/sizing.go",
+      "status": "tentative",
+      "uses": 1
+    },
+    "plan_maker_hours_formula": {
+      "code_fingerprint": "ac9ca3e752f5671d42d657d9872190335a600035cabb3b2f5dacb3906a08b8e8",
+      "label": "Maker Hours Formula",
+      "last": "2026-08-07T21:24:43.048563+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-07T21:24:43.048563+00:00",
+          "outcome": "useful",
+          "q": "Что улучшить для извлечения большей прибыли и минимизации издержек и риска с учетом промо StandX?"
+        }
+      ],
+      "score": 0.999873721,
+      "source_file": "PLAN.md",
+      "status": "tentative",
+      "uses": 1
+    },
+    "plan_reconciliation": {
+      "code_fingerprint": "ac9ca3e752f5671d42d657d9872190335a600035cabb3b2f5dacb3906a08b8e8",
+      "label": "Exchange State Reconciliation",
+      "last": "2026-08-07T21:00:56.866476+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-07T21:00:56.866476+00:00",
+          "outcome": "useful",
+          "q": "Audit the StandX maker bot to prevent fills, flatten immediately, and recover safely after volatility spikes"
+        }
+      ],
+      "score": 0.999492455,
+      "source_file": "PLAN.md",
+      "status": "tentative",
+      "uses": 1
+    },
+    "plan_volatility_memory": {
+      "code_fingerprint": "ac9ca3e752f5671d42d657d9872190335a600035cabb3b2f5dacb3906a08b8e8",
+      "label": "Long-Lived Volatility Memory",
+      "last": "2026-08-07T21:00:56.866476+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-07T21:00:56.866476+00:00",
+          "outcome": "useful",
+          "q": "Audit the StandX maker bot to prevent fills, flatten immediately, and recover safely after volatility spikes"
+        }
+      ],
+      "score": 0.999492455,
+      "source_file": "PLAN.md",
+      "status": "tentative",
+      "uses": 1
+    },
+    "quotes_ladder_danger": {
+      "code_fingerprint": "8d3c9397af195eff8fbe87fdd0092d85eb3136643576c817319c4fd40de61ea9",
+      "label": ".Danger()",
+      "last": "2026-08-07T21:00:56.866476+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-07T21:00:56.866476+00:00",
+          "outcome": "useful",
+          "q": "Audit the StandX maker bot to prevent fills, flatten immediately, and recover safely after volatility spikes"
+        }
+      ],
+      "score": 0.999492455,
+      "source_file": "internal/domain/quotes/ladder.go",
+      "status": "tentative",
+      "uses": 1
+    },
+    "reward_curve_weight": {
+      "code_fingerprint": "e8876186953d83e6582b58dc5ec8deb08d9da5fc935492f59951109a3accc91e",
+      "label": ".Weight()",
+      "last": "2026-08-07T21:24:43.048563+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-07T21:24:43.048563+00:00",
+          "outcome": "useful",
+          "q": "Что улучшить для извлечения большей прибыли и минимизации издержек и риска с учетом промо StandX?"
+        }
+      ],
+      "score": 0.999873721,
+      "source_file": "internal/domain/reward/reward.go",
+      "status": "tentative",
+      "uses": 1
+    },
+    "uptime_tracker": {
+      "code_fingerprint": "852f4c8bafd7f61c2c9f30f525a14ba7cc98d7636095eb6cc438cb6ca82749fc",
+      "label": "Tracker",
+      "last": "2026-08-07T21:24:43.048563+00:00",
+      "provenance": [
+        {
+          "date": "2026-08-07T21:24:43.048563+00:00",
+          "outcome": "useful",
+          "q": "Что улучшить для извлечения большей прибыли и минимизации издержек и риска с учетом промо StandX?"
+        }
+      ],
+      "score": 0.999873721,
+      "source_file": "internal/domain/uptime/tracker.go",
+      "status": "tentative",
+      "uses": 1
+    }
+  },
+  "version": 1
+}

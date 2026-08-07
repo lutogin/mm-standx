@@ -55,6 +55,12 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 		JumpBps:       estimate.EffectiveJump(),
 		Ready:         estimate.Ready,
 	}
+	if now.Before(e.fillBurstUntil) {
+		reason := fmt.Sprintf("fill burst cooldown is active until %s", e.fillBurstUntil.UTC().Format(time.RFC3339))
+		e.reportBlocked(now, conditions, estimate, reason, e.geometry(e.appetite, conditions))
+		e.withdraw(ctx, ports.CauseFillBurst, reason)
+		return
+	}
 
 	hour := e.hour.Assess(now)
 
@@ -85,6 +91,15 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 	case uptime.Banked:
 		// Цель взята, дополнительный аптайм ничего не добавляет — отходим.
 		appetite.JumpMultiple *= bankedCaution
+	}
+
+	if e.live && e.economics.BreakEvenUSDPerMakerHour > 0 {
+		decision := e.economics.Evaluate(e.cfg.AllocationUSD, hour.TierMultiplier, hour.Multiplier)
+		if !decision.Allowed {
+			e.reportBlocked(now, conditions, estimate, decision.Reason, e.geometry(appetite, conditions))
+			e.withdraw(ctx, ports.CauseEconomics, decision.Reason)
+			return
+		}
 	}
 
 	bounds := e.quotingBounds()
@@ -188,21 +203,41 @@ func (e *Engine) quotingBounds() policy.Bounds {
 // доступным независимо от ограничения темпа перестановок и от того, есть ли
 // на стороне команда в полёте.
 func (e *Engine) pullDanger(ctx context.Context, th policy.Thresholds, now time.Time) bool {
-	pulled := false
+	type cancelIntent struct {
+		side   market.Side
+		action quotes.Action
+	}
+
+	var intents []cancelIntent
+	var ids []trading.ClOrdID
 
 	for _, side := range []market.Side{market.Buy, market.Sell} {
 		ladder := e.ladderFor(side)
 		actions := ladder.Danger(e.classifier(side, th))
-		if len(actions) == 0 {
-			continue
+		for _, action := range actions {
+			intents = append(intents, cancelIntent{side: side, action: action})
+			ids = append(ids, action.ClOrdID)
+			ladder.OnCancelSent(action.Slot, now)
 		}
-		pulled = true
-		e.lastAction = now
-		// allowPlace = false: съём никогда не сопровождается размещением,
-		// а выставлять по цене, от которой мы только что убежали, — тем более.
-		e.execute(ctx, side, actions, false, nil)
 	}
-	return pulled
+	if len(ids) == 0 {
+		return false
+	}
+
+	e.lastAction = now
+	// One exchange batch is the safety invariant here. Waiting for one ACK per
+	// rung leaves the later rungs live for N network round trips during the same
+	// sweep that triggered the panic pull.
+	if !e.sendWithdrawal(ctx, ids) {
+		return true
+	}
+	for _, intent := range intents {
+		e.deps.Metrics.OrderSent(e.symbol, intent.side, "cancel")
+		e.deps.Log.Info("quote cancelled",
+			"symbol", e.symbol, "side", intent.side, "slot", intent.action.Slot,
+			"reason", intent.action.Reason)
+	}
+	return true
 }
 
 // stickyTarget удерживает целевую дистанцию, пока расчётная не отойдёт заметно.
@@ -420,15 +455,16 @@ const (
 // она стоит под тем самым движением, ради которого съём и затевался. Сверка
 // обнаружила бы расхождение, но лишь через несколько секунд — а повтор
 // безопасен, потому что отмена идемпотентна (PLAN.md §2.2).
-func (e *Engine) sendWithdrawal(ctx context.Context, ids []trading.ClOrdID) {
+func (e *Engine) sendWithdrawal(ctx context.Context, ids []trading.ClOrdID) bool {
 	if err := e.deps.Gateway.CancelBatch(ctx, ids, ports.PrioritySafety); err != nil {
 		e.deps.Log.Error("withdrawal failed, retrying",
 			"symbol", e.symbol, "count", len(ids), "attempt", e.withdrawAttempts+1, "error", err)
 		e.deps.Metrics.OrderFailed(e.symbol, "cancel_batch")
 		e.queueWithdrawal(ids)
-		return
+		return false
 	}
 	e.forgetWithdrawal(ids)
+	return true
 }
 
 // queueWithdrawal добавляет идентификаторы в очередь повтора и назначает срок.
@@ -505,6 +541,9 @@ func (e *Engine) onFill(ctx context.Context, order trading.Order) {
 
 	now := e.deps.Clock.Now()
 	startsEpisode := !e.pendingFill.IsPositive()
+	if startsEpisode {
+		e.recordFillEpisode(now)
+	}
 
 	e.pendingFill = e.pendingFill.Add(delta)
 	if e.fillDeadline.IsZero() || e.fillDeadline.Before(now) {
@@ -522,6 +561,32 @@ func (e *Engine) onFill(ctx context.Context, order trading.Order) {
 	// flattenRetryAt; that deadline only suppresses position-based duplicates.
 	e.submitFlatten(ctx, order.Side.Opposite(), delta, now, "fill delta")
 	e.withdraw(ctx, ports.CauseFilled, "closing the position")
+}
+
+// recordFillEpisode applies a transient, self-resetting circuit breaker. It is
+// intentionally separate from the persistent hourly kill switch: a short
+// volatility regime should pause quoting and then be re-evaluated, while a
+// sustained model failure still requires operator intervention.
+func (e *Engine) recordFillEpisode(now time.Time) {
+	if e.risk.FillBurstLimit < 2 || e.risk.FillBurstWindow <= 0 || e.risk.FillBurstCooldown <= 0 {
+		return
+	}
+	cutoff := now.Add(-e.risk.FillBurstWindow)
+	kept := e.fillEpisodes[:0]
+	for _, at := range e.fillEpisodes {
+		if at.After(cutoff) {
+			kept = append(kept, at)
+		}
+	}
+	e.fillEpisodes = append(kept, now)
+	if len(e.fillEpisodes) < e.risk.FillBurstLimit {
+		return
+	}
+
+	e.fillBurstUntil = now.Add(e.risk.FillBurstCooldown)
+	e.deps.Log.Warn("fill burst detected, entering a transient cooldown",
+		"symbol", e.symbol, "episodes", len(e.fillEpisodes),
+		"window", e.risk.FillBurstWindow, "until", e.fillBurstUntil.UTC())
 }
 
 // publishFill сообщает защитному контуру о заливе вместе с оценкой стоимости.
@@ -743,6 +808,8 @@ func (e *Engine) reportStatus(
 		// String() on numeric types, and the mode printed as "0" in the live
 		// log.
 		"hour_mode", hour.Mode.String(),
+		"hour_tier", fmt.Sprintf("%.2fx", hour.TierMultiplier),
+		"hour_target_pct", fmt.Sprintf("%.0f", hour.TargetPct),
 		"uptime_pct", fmt.Sprintf("%.0f", hour.QualifiedPct),
 		"maker_hours", fmt.Sprintf("%.4f", hour.MakerHours),
 		"accrual_multiplier", fmt.Sprintf("%.2f", hour.Multiplier),

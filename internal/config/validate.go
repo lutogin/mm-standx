@@ -9,6 +9,7 @@ import (
 
 	"github.com/shopspring/decimal"
 
+	"github.com/nd/mm-standx/internal/domain/economics"
 	"github.com/nd/mm-standx/internal/domain/money"
 	"github.com/nd/mm-standx/internal/domain/policy"
 	"github.com/nd/mm-standx/internal/domain/trading"
@@ -33,7 +34,7 @@ func (c *Config) Validate() error {
 		if sym.Enabled {
 			enabled++
 		}
-		errs = append(errs, sym.validate(name, c.Reward.BandBps)...)
+		errs = append(errs, sym.validate(name, c.Reward.BandBps, c.Reward.UptimeTiers, c.IsLive())...)
 	}
 	if enabled == 0 && c.IsLive() {
 		errs = append(errs, errors.New("runtime.mode=live but no symbol is enabled"))
@@ -218,6 +219,18 @@ func (r Risk) validate() []error {
 	if r.FlattenDebounce < 0 {
 		errs = append(errs, errors.New("risk.flattenDebounce must not be negative"))
 	}
+	if r.PostFillCooldown < 0 {
+		errs = append(errs, errors.New("risk.postFillCooldown must not be negative"))
+	}
+	if r.FillBurstLimit < 2 {
+		errs = append(errs, errors.New("risk.fillBurstLimit must be at least 2"))
+	}
+	if r.FillBurstWindow <= 0 {
+		errs = append(errs, errors.New("risk.fillBurstWindow must be positive"))
+	}
+	if r.FillBurstCooldown <= 0 {
+		errs = append(errs, errors.New("risk.fillBurstCooldown must be positive"))
+	}
 	// Комиссии входят в независимую оценку стоимости залива. Ноль отключил бы
 	// её молча, и защита осталась бы зависеть от одного непроверенного канала.
 	if r.Fees.MakerBps < 0 || r.Fees.TakerBps <= 0 {
@@ -243,13 +256,14 @@ func (h Health) validate() []error {
 	return errs
 }
 
-func (s Symbol) validate(name string, band money.Bps) []error {
+func (s Symbol) validate(name string, band money.Bps, tiers []UptimeTier, live bool) []error {
 	var errs []error
 	prefix := "symbols." + name
 
 	if s.Enabled && s.AllocationUSD <= 0 {
 		errs = append(errs, fmt.Errorf("%s.allocationUsd must be positive for an enabled symbol", prefix))
 	}
+	errs = append(errs, s.Economics.validate(prefix+".economics")...)
 	errs = append(errs, s.Quote.validate(prefix+".quote")...)
 	errs = append(errs, s.Appetite.validate(prefix+".appetite", band)...)
 	errs = append(errs, validateLadderFits(prefix, s.Quote, s.Appetite)...)
@@ -258,6 +272,11 @@ func (s Symbol) validate(name string, band money.Bps) []error {
 	// happens in production.
 	errs = append(errs, validateOffHours(prefix+".program", s.Program)...)
 	errs = append(errs, s.Uptime.validate(prefix+".uptime")...)
+	if len(tiers) > 0 && s.Uptime.HardFloorPct < tiers[0].ThresholdPct {
+		errs = append(errs, fmt.Errorf(
+			"%s.uptime.hardFloorPct (%.1f) must not be below the best tier threshold (%.1f)",
+			prefix, s.Uptime.HardFloorPct, tiers[0].ThresholdPct))
+	}
 	errs = append(errs, s.Volatility.validate(prefix+".volatility")...)
 	if s.Enabled {
 		errs = append(errs, s.Program.validate(prefix+".program")...)
@@ -265,6 +284,30 @@ func (s Symbol) validate(name string, band money.Bps) []error {
 
 	if s.SymbolRisk.Leverage < 1 {
 		errs = append(errs, fmt.Errorf("%s.risk.leverage must be at least 1", prefix))
+	}
+	if live && s.Enabled {
+		gate := economics.Gate{
+			RewardRateLowerBoundUSDPerMakerHour: s.Economics.RewardRateLowerBoundUSDPerMakerHour,
+			BreakEvenUSDPerMakerHour:            s.Economics.BreakEvenUSDPerMakerHour,
+			CalibrationMaxAllocationUSD:         s.Economics.CalibrationMaxAllocationUSD,
+		}
+		if decision := gate.Evaluate(s.AllocationUSD, 1, 1); !decision.Allowed {
+			errs = append(errs, fmt.Errorf("%s: live quoting is economically blocked: %s", prefix, decision.Reason))
+		}
+	}
+	return errs
+}
+
+func (e Economics) validate(prefix string) []error {
+	var errs []error
+	if e.RewardRateLowerBoundUSDPerMakerHour < 0 {
+		errs = append(errs, fmt.Errorf("%s.rewardRateLowerBoundUsdPerMakerHour must not be negative", prefix))
+	}
+	if e.BreakEvenUSDPerMakerHour <= 0 {
+		errs = append(errs, fmt.Errorf("%s.breakEvenUsdPerMakerHour must be positive", prefix))
+	}
+	if e.CalibrationMaxAllocationUSD <= 0 {
+		errs = append(errs, fmt.Errorf("%s.calibrationMaxAllocationUsd must be positive", prefix))
 	}
 	return errs
 }

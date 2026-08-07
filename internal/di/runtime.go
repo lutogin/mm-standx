@@ -25,6 +25,7 @@ import (
 	"github.com/nd/mm-standx/internal/app/telemetry"
 	"github.com/nd/mm-standx/internal/app/watchdog"
 	"github.com/nd/mm-standx/internal/config"
+	"github.com/nd/mm-standx/internal/domain/economics"
 	"github.com/nd/mm-standx/internal/domain/market"
 	"github.com/nd/mm-standx/internal/domain/money"
 	"github.com/nd/mm-standx/internal/domain/policy"
@@ -284,6 +285,11 @@ func provideEngines(
 					FullConfidenceAt:     symCfg.Volatility.FullConfidenceAt,
 					MemoryHalfLife:       symCfg.Volatility.MemoryHalfLife,
 					MemoryWindowMultiple: symCfg.Volatility.MemoryWindowMultiple,
+				},
+				Economics: economics.Gate{
+					RewardRateLowerBoundUSDPerMakerHour: symCfg.Economics.RewardRateLowerBoundUSDPerMakerHour,
+					BreakEvenUSDPerMakerHour:            symCfg.Economics.BreakEvenUSDPerMakerHour,
+					CalibrationMaxAllocationUSD:         symCfg.Economics.CalibrationMaxAllocationUSD,
 				},
 				MaxNetPosition: maxPosition,
 			},
