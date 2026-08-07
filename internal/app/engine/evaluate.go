@@ -132,9 +132,20 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 		// Причина обязана быть видна: молчащий актор иначе выглядит одинаково
 		// и когда он корректно воздерживается, и когда он сломан.
 		e.blocked = "sizing: " + err.Error()
+		e.sizeLimit, e.perSide = "", money.Qty{}
 		e.withdraw(ctx, ports.CauseSizing, err.Error())
 		return
 	}
+	// Which constraint actually bound the size, kept for the status line.
+	//
+	// The answer decides how much of the deposit may be allocated at all.
+	// Resting orders lock margin, so the exchange's available balance falls as
+	// soon as quotes go up; if that balance is what binds, raising the
+	// allocation makes the size oscillate instead of growing, and an
+	// oscillating size lowers the reward — the exchange scores a percentile of
+	// the samples, which lands on the low ones. Whether it binds cannot be
+	// derived, only observed (PLAN.md §12.5).
+	e.sizeLimit, e.perSide = plan.Reason, plan.PerSide
 
 	for _, side := range []market.Side{market.Buy, market.Sell} {
 		ladder := e.ladderFor(side)
@@ -640,6 +651,7 @@ func (e *Engine) reportStatus(
 
 	hour := e.hour.Assess(now)
 	bidDepth, askDepth := e.bookDepth()
+	available, _ := e.available.Float64()
 	attrs := []any{
 		"symbol", e.symbol,
 		"mark", e.mark,
@@ -660,6 +672,12 @@ func (e *Engine) reportStatus(
 		"accrual_multiplier", fmt.Sprintf("%.2f", hour.Multiplier),
 		"bids_live", e.bids.LiveCount(),
 		"asks_live", e.asks.LiveCount(),
+		// Свободная маржа и связывающее размер ограничение: без них нельзя
+		// понять, сколько депозита допустимо выделить, а с ними это видно
+		// за сутки наблюдения.
+		"available_usd", fmt.Sprintf("%.0f", available),
+		"per_side", e.perSide,
+		"size_limit", e.sizeLimit,
 	}
 	if !e.live {
 		attrs = append(attrs, "shadow_fills", e.shadowFills)
