@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"github.com/nd/mm-standx/internal/config"
+	"github.com/nd/mm-standx/internal/domain/market"
 	domain "github.com/nd/mm-standx/internal/domain/risk"
+	"github.com/nd/mm-standx/internal/domain/trading"
 	"github.com/nd/mm-standx/internal/events"
 	"github.com/nd/mm-standx/internal/ports"
 )
@@ -29,13 +31,16 @@ type Guard struct {
 	// ledger has no use for it. It is carried here to be reported: a limit
 	// nobody can read off the running process is a limit nobody can trust.
 	notionalLimit float64
-	ledger        *domain.Ledger
-	store         ports.StateStore
-	bus           *events.Bus
-	clock         ports.Clock
-	metrics       ports.Metrics
-	log           *slog.Logger
-	interval      time.Duration
+	// fees — ставки комиссий, по которым считается стоимость исполнения,
+	// когда биржа её не присылает.
+	fees     config.Fees
+	ledger   *domain.Ledger
+	store    ports.StateStore
+	bus      *events.Bus
+	clock    ports.Clock
+	metrics  ports.Metrics
+	log      *slog.Logger
+	interval time.Duration
 
 	// Всё состояние правится только в собственной горутине: события приходят
 	// из читателей WebSocket, поэтому попадают сначала в очередь.
@@ -74,6 +79,7 @@ func New(
 	return &Guard{
 		limits:        limits,
 		notionalLimit: cfg.MaxNotionalUSD,
+		fees:          cfg.Fees,
 		ledger:        domain.New(limits),
 		store:         store,
 		bus:           bus,
@@ -126,8 +132,9 @@ func (g *Guard) Start(context.Context) error {
 			})
 		}),
 		events.Subscribe(g.bus, g.Name(), func(_ context.Context, ev events.TradeExecuted) {
+			exec := g.execution(ev.Trade)
 			g.submit(func(now time.Time) {
-				g.ledger.OnTrade(now, ev.Trade.PnL, ev.Trade.Fee)
+				g.ledger.OnTrade(now, exec)
 			})
 		}),
 	}
@@ -276,6 +283,35 @@ func (g *Guard) persist() {
 	if err := g.store.Save(stateName, g.ledger.State()); err != nil {
 		g.log.Error("failed to persist the risk ledger", "error", err)
 	}
+}
+
+// execution переводит исполнение в деньги.
+//
+// Знак берётся от стороны: продажа приносит денег, покупка уносит. Комиссия
+// считается по ставке, соответствующей роли в сделке — биржа её не присылает,
+// но присылает флаг `is_taker`, а ставки одинаковы для всех рынков StandX
+// и заданы конфигурацией.
+//
+// Если комиссия всё же пришла, берётся она: собственный расчёт нужен как
+// замена отсутствующему полю, а не как замена биржевому ответу. Так же
+// поступает и REST-путь, где поле есть.
+func (g *Guard) execution(t trading.Trade) domain.Execution {
+	notional := t.Qty.Decimal().Abs().Mul(t.Price.Decimal())
+
+	cash := notional
+	if t.Side == market.Buy {
+		cash = cash.Neg()
+	}
+
+	fee := t.Fee.Abs()
+	if fee.IsZero() {
+		rate := g.fees.MakerBps
+		if t.IsTaker {
+			rate = g.fees.TakerBps
+		}
+		fee = notional.Mul(rate.Ratio())
+	}
+	return domain.Execution{CashUSD: cash, FeeUSD: fee}
 }
 
 // boolAsFloat renders a flag as a gauge value.

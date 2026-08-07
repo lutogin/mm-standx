@@ -64,7 +64,7 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 	if hour.Multiplier < 1 && !e.cfg.Program.QuoteOffHours {
 		reason := fmt.Sprintf(
 			"the reference market is closed, the hour accrues at %.0f%%", hour.Multiplier*100)
-		e.reportBlocked(now, conditions, estimate, reason)
+		e.reportBlocked(now, conditions, estimate, reason, e.geometry(e.appetite, conditions))
 		e.withdraw(ctx, ports.CauseOffHours, reason)
 		return
 	}
@@ -79,7 +79,7 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 		// silent for the rest of the hour, and a deliberate refusal reads in
 		// the log exactly like a crash — the ambiguity the summary exists to
 		// remove.
-		e.reportBlocked(now, conditions, estimate, hour.Reason)
+		e.reportBlocked(now, conditions, estimate, hour.Reason, e.geometry(appetite, conditions))
 		e.withdraw(ctx, ports.CauseHourLost, hour.Reason)
 		return
 	case uptime.Banked:
@@ -651,11 +651,25 @@ func (e *Engine) reportBlocked(
 	conditions policy.Conditions,
 	estimate volatility.Estimate,
 	reason string,
+	quote policy.Quote,
 ) {
 	e.blocked = reason
-	e.reportStatus(now, conditions, estimate, policy.Quote{})
-	e.reportMetrics(now, conditions, estimate, policy.Quote{})
+	e.reportStatus(now, conditions, estimate, quote)
+	e.reportMetrics(now, conditions, estimate, quote)
 	e.blocked = ""
+}
+
+// geometry считает, где стояла бы котировка, не трогая состояние.
+//
+// Нужна воротам часа. Они обрывают расчёт раньше геометрии, и сводка тогда
+// сообщает только про час, умалчивая, пустил бы вообще рынок. При разборе
+// 7 августа это стоило дня догадок: в логе стояло «hour is unreachable»,
+// а блокировала на самом деле дистанция.
+//
+// Липкая цель здесь намеренно не применяется: она хранит защёлку гистерезиса,
+// и трогать её ради наблюдения значило бы менять решение отчётом о нём.
+func (e *Engine) geometry(a policy.Appetite, c policy.Conditions) policy.Quote {
+	return e.ladder.Anchor(a.Target(c, e.bounds), e.bounds)
 }
 
 // reportStatus печатает, что актор думает о рынке прямо сейчас.

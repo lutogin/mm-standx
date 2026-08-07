@@ -190,3 +190,63 @@ func TestTargetRestsInsideItsOwnDeadBand(t *testing.T) {
 		})
 	}
 }
+
+// The danger thresholds must survive a wide dead band.
+//
+// The band is two characteristic jumps wide and the target is roughly one and
+// a quarter jumps plus a floor, so its lower edge goes negative for any jump
+// above 0.86 bps. The old restoration order dragged panic and pull down with
+// it until both clamped to zero, and Classify then answered Hold for every
+// positive distance — the order sat still while the market walked into it.
+// Through 6-7 August that was five hours out of nine.
+func TestDangerThresholdsSurviveAWideDeadBand(t *testing.T) {
+	appetite := Appetite{
+		JumpMultiple: 1.25, FloorMarginBps: 1.5,
+		DeadBandJumps: 2.0, MinDeadBandBps: 0.5,
+	}
+	bounds := Bounds{MinBps: 5.5, MaxBps: 9.5}
+
+	// The 02:00 hour of 7 August: a tight book and a jump of four and a half.
+	conditions := Conditions{HalfSpreadBps: 0.12, JumpBps: 4.52, Ready: true}
+	quote := Quote{Distance: 7.89, Feasible: true}
+
+	th := appetite.Thresholds(quote, conditions, bounds)
+
+	require.NoError(t, th.Validate(), "the ordering must hold")
+	require.Greater(t, th.PanicBps.Float64(), 0.0,
+		"a quote one tick from the market is in danger, whatever the dead band")
+	require.InDelta(t, conditions.HalfSpreadBps.Float64()+conditions.JumpBps.Float64(),
+		th.PanicBps.Float64(), 0.01, "panic stays where the physics puts it")
+
+	// A quote the market has walked up to must not read as safe.
+	require.Equal(t, Requote, th.Classify(4.0).Action)
+	require.Equal(t, UrgencySafety, th.Classify(4.0).Urgency)
+	require.Equal(t, Pull, th.Classify(0.05).Action)
+}
+
+// Whatever the market does, the thresholds stay ordered and the danger zone
+// stays inside the keep range. A violation here is a quote that either never
+// reacts or requotes forever.
+func TestThresholdsAreAlwaysOrdered(t *testing.T) {
+	rapid.Check(t, func(r *rapid.T) {
+		conditions := Conditions{
+			HalfSpreadBps: money.Bps(rapid.Float64Range(0, 5).Draw(r, "half")),
+			JumpBps:       money.Bps(rapid.Float64Range(0, 30).Draw(r, "jump")),
+			Ready:         true,
+		}
+		appetite := Appetite{
+			JumpMultiple:   rapid.Float64Range(0.5, 3).Draw(r, "multiple"),
+			FloorMarginBps: money.Bps(rapid.Float64Range(0, 3).Draw(r, "floor")),
+			DeadBandJumps:  rapid.Float64Range(0.5, 4).Draw(r, "deadJumps"),
+			MinDeadBandBps: money.Bps(rapid.Float64Range(0.1, 2).Draw(r, "minDead")),
+		}
+		bounds := Bounds{MinBps: 5.5, MaxBps: 9.5}
+
+		quote := appetite.Target(conditions, bounds)
+		if !quote.Feasible {
+			return
+		}
+		th := appetite.Thresholds(quote, conditions, bounds)
+		require.NoError(r, th.Validate())
+	})
+}

@@ -149,4 +149,6 @@ type Trade struct {
 	FeeAsset string
 	PnL      decimal.Decimal
 	Time     time.Time
+	// IsTaker выбирает ставку комиссии, когда биржа её не прислала.
+	IsTaker bool
 }

@@ -23,10 +23,10 @@ func limits() risk.Limits {
 func TestDailyLossTripsTheSwitch(t *testing.T) {
 	l := risk.New(limits())
 
-	l.OnTrade(at(10, 0), usd("-60"), usd("1"))
+	l.OnTrade(at(10, 0), risk.Execution{CashUSD: usd("-60"), FeeUSD: usd("1")})
 	require.False(t, l.Assess(at(10, 0)).Tripped)
 
-	l.OnTrade(at(10, 5), usd("-38"), usd("1"))
+	l.OnTrade(at(10, 5), risk.Execution{CashUSD: usd("-38"), FeeUSD: usd("1")})
 
 	v := l.Assess(at(10, 5))
 	require.True(t, v.Tripped)
@@ -39,10 +39,10 @@ func TestDailyLossTripsTheSwitch(t *testing.T) {
 // much of the daily limit is still available.
 func TestFeeIsAlwaysACostRegardlessOfSign(t *testing.T) {
 	positive := risk.New(limits())
-	positive.OnTrade(at(10, 0), usd("0"), usd("7"))
+	positive.OnTrade(at(10, 0), risk.Execution{CashUSD: usd("0"), FeeUSD: usd("7")})
 
 	negative := risk.New(limits())
-	negative.OnTrade(at(10, 0), usd("0"), usd("-7"))
+	negative.OnTrade(at(10, 0), risk.Execution{CashUSD: usd("0"), FeeUSD: usd("-7")})
 
 	require.Equal(t,
 		positive.Assess(at(10, 0)).ReportedNetUSD,
@@ -94,11 +94,11 @@ func TestWorseOfTheTwoEstimatesWins(t *testing.T) {
 	l := risk.New(limits())
 
 	l.OnFill(at(10, 0), risk.Fill{At: at(10, 0), CostUSD: usd("30"), StartsEpisode: true})
-	l.OnTrade(at(10, 0), usd("-5"), usd("0"))
+	l.OnTrade(at(10, 0), risk.Execution{CashUSD: usd("-5"), FeeUSD: usd("0")})
 
 	require.InDelta(t, 30, l.Assess(at(10, 0)).LossUSD, 0.001)
 
-	l.OnTrade(at(10, 1), usd("-80"), usd("0"))
+	l.OnTrade(at(10, 1), risk.Execution{CashUSD: usd("-80"), FeeUSD: usd("0")})
 	require.InDelta(t, 85, l.Assess(at(10, 1)).LossUSD, 0.001)
 }
 
@@ -106,7 +106,7 @@ func TestWorseOfTheTwoEstimatesWins(t *testing.T) {
 // restarting drains the deposit in instalments.
 func TestTrippedStateSurvivesRestartWithinTheDay(t *testing.T) {
 	l := risk.New(limits())
-	l.OnTrade(at(10, 0), usd("-200"), usd("0"))
+	l.OnTrade(at(10, 0), risk.Execution{CashUSD: usd("-200"), FeeUSD: usd("0")})
 	require.True(t, l.Assess(at(10, 0)).Tripped)
 
 	restored := risk.New(limits())
@@ -119,7 +119,7 @@ func TestTrippedStateSurvivesRestartWithinTheDay(t *testing.T) {
 
 func TestNewDayClearsTheLedger(t *testing.T) {
 	l := risk.New(limits())
-	l.OnTrade(at(23, 0), usd("-200"), usd("0"))
+	l.OnTrade(at(23, 0), risk.Execution{CashUSD: usd("-200"), FeeUSD: usd("0")})
 	require.True(t, l.Assess(at(23, 0)).Tripped)
 
 	next := risk.New(limits())
@@ -148,7 +148,7 @@ func TestDayRolloverKeepsTheRollingHour(t *testing.T) {
 
 func TestDrawdownTripCanBeDisabled(t *testing.T) {
 	l := risk.New(risk.Limits{MaxDailyLossUSD: 10, MaxFillsPerHour: 5, TripOnDrawdown: false})
-	l.OnTrade(at(10, 0), usd("-500"), usd("0"))
+	l.OnTrade(at(10, 0), risk.Execution{CashUSD: usd("-500"), FeeUSD: usd("0")})
 
 	v := l.Assess(at(10, 0))
 	require.False(t, v.Tripped)
@@ -193,7 +193,7 @@ func TestTradeChannelIsNotSuspectedImmediately(t *testing.T) {
 		"the trade message is milliseconds behind, not missing")
 
 	// It arrives, as it should, and the question is settled for the day.
-	l.OnTrade(now.Add(50*time.Millisecond), decimal.NewFromFloat(-0.1), decimal.NewFromFloat(0.05))
+	l.OnTrade(now.Add(50*time.Millisecond), risk.Execution{CashUSD: decimal.NewFromFloat(-0.1), FeeUSD: decimal.NewFromFloat(0.05)})
 	require.False(t, l.Assess(now.Add(time.Hour)).TradeChannelSuspect)
 }
 

@@ -142,34 +142,14 @@ type Trade struct {
 	PnL      string `json:"pnl"`
 	Time     string `json:"created_at"`
 
-	// Запасные имена тех же полей.
+	// IsTaker сообщает, какой стороной сделки мы были.
 	//
-	// Спецификация описывает REST `query_trades`, и там имена именно такие.
-	// Канал `trade` того же не обещал, а живой счёт показал одиннадцать сделок
-	// с нулевой комиссией — комиссия нулевой не бывает, тейкер стоит 4 bps.
-	// Разбор по нескольким именам дешевле одного неверного предположения,
-	// а какое из них сработало, видно по предупреждению в handleTrade.
-	FeeAlt    string `json:"fee"`
-	PnLAlt    string `json:"realized_pnl"`
-	PnLAltTwo string `json:"realized_profit"`
-}
-
-// FeeValue возвращает комиссию по первому непустому имени поля.
-func (t Trade) FeeValue() string {
-	if t.Fee != "" {
-		return t.Fee
-	}
-	return t.FeeAlt
-}
-
-// PnLValue возвращает результат сделки по первому непустому имени поля.
-func (t Trade) PnLValue() string {
-	for _, v := range []string{t.PnL, t.PnLAlt, t.PnLAltTwo} {
-		if v != "" {
-			return v
-		}
-	}
-	return ""
+	// Комиссии и результата канал `trade` не несёт вовсе — ни под каким
+	// именем, это уведомление об исполнении, а не расчётная запись.
+	// Спецификация описывает поля `fee_qty` и `pnl` у REST `query_trades`,
+	// и там они есть; отсюда приходит только этот флаг, но его достаточно:
+	// ставку выбираем по нему, а результат считаем по ценам сами.
+	IsTaker bool `json:"is_taker"`
 }
 
 // SymbolInfo — торговая спецификация инструмента.
