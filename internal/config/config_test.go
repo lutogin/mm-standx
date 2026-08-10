@@ -11,6 +11,7 @@ import (
 
 	"github.com/nd/mm-standx/internal/domain/economics"
 	"github.com/nd/mm-standx/internal/domain/market"
+	"github.com/nd/mm-standx/internal/domain/policy"
 	"github.com/nd/mm-standx/internal/secret"
 )
 
@@ -421,6 +422,17 @@ func TestShippedConfigLoads(t *testing.T) {
 	// за один такт 6 августа сняли всю лесенку за 51 мс.
 	require.GreaterOrEqual(t, float64(gold.Appetite.MinBps), 6.0,
 		"the near rung must stand outside the observed single-tick jump")
+
+	// Мёртвая зона строится вокруг центра лесенки, а проверяется у каждой
+	// ступени, поэтому крайним достаётся зона минус полуширина. Этот остаток
+	// обязан быть заметно больше шага цены — иначе округление при выставлении
+	// выбрасывает ступень из зоны, в которую её только что поставили.
+	half := policy.Ladder{
+		Layers:    gold.Quote.LadderLayers,
+		SpreadBps: gold.Quote.LadderSpreadBps,
+	}.HalfWidth()
+	require.GreaterOrEqual(t, (gold.Appetite.MinDeadBandBps - half).Float64(), 0.5,
+		"the outer rungs need real margin, not the boundary the start-up check accepts")
 }
 
 // Дистанция — первый параметр, который придётся править под давлением, а

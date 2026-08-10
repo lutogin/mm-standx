@@ -159,7 +159,28 @@ defaults:
     # Не меньше полуширины лесенки (ladderLayers-1) x ladderSpreadBps / 2,
     # иначе крайние ступени стоят вне мёртвой зоны и переставляются бесконечно.
     # Проверяется при запуске.
-    minDeadBandBps: 0.5
+    #
+    # Raised from 0.5, which was the bare minimum the startup check accepts and
+    # left the geometry below the resolution of the instrument.
+    #
+    # The dead band is measured from the centre of the ladder and applied to
+    # every rung, so what the outer rungs actually get is the band minus the
+    # half width: 0.5 - 0.4 = 0.1 bps. One price tick on gold is 0.1 USD, which
+    # at 4335 is 0.23 bps — the margin was smaller than the smallest price the
+    # exchange accepts, so snapping alone could push a rung out of the band it
+    # was just placed in. Measured consequence on 10 August: 1044 placements in
+    # six hours, three a minute, most of them not surviving the three seconds
+    # the programme requires before an order counts at all.
+    #
+    # At 1.2 the outer rungs get 0.8 bps, about three and a half ticks. The cost
+    # is that a rung may sit up to 1.2 bps off the ideal distance instead of
+    # 0.6 — roughly 19% of weight against 10% — and that weight is worth having
+    # only on orders that live long enough to be scored.
+    #
+    # Note this value also sets how far the required distance must move before
+    # the ladder centre follows it (Engine.stickyTarget). Widening is applied
+    # immediately regardless; the stickiness only delays moving back in.
+    minDeadBandBps: 1.2
     # Доля целевой дистанции, ближе которой сторона снимается целиком
     # аварийным путём. Больше значение — раньше отход.
     #
