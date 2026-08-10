@@ -46,6 +46,17 @@ type Metrics interface {
 	Jump(s market.Symbol, bps float64)
 	// MarkStaleness — возраст последней справочной цены в секундах.
 	MarkStaleness(s market.Symbol, seconds float64)
+	// ReferenceStaleness — возраст последней цены внешнего ориентира в секундах.
+	//
+	// Замолчавший ориентир не проявляется никак: котирование продолжается,
+	// дистанции те же, быстрый сигнал молча возвращается к середине стакана.
+	// Единственный симптом — переставшее приходить предупреждение, а его
+	// отсутствие ненаблюдаемо по определению.
+	//
+	// Пока ориентир не приходил ни разу, отсчёт идёт с момента, когда актор
+	// начал его ждать: величина обязана оставаться конечной, потому что
+	// почасовая свёртка кладёт квантили в JSON.
+	ReferenceStaleness(s market.Symbol, seconds float64)
 
 	// --- Цена стратегии ---
 
@@ -162,6 +173,7 @@ func (NopMetrics) HalfSpread(market.Symbol, float64)                 {}
 func (NopMetrics) BookDepth(market.Symbol, market.Side, float64)     {}
 func (NopMetrics) Jump(market.Symbol, float64)                       {}
 func (NopMetrics) MarkStaleness(market.Symbol, float64)              {}
+func (NopMetrics) ReferenceStaleness(market.Symbol, float64)         {}
 func (NopMetrics) Fill(market.Symbol, market.Side)                   {}
 func (NopMetrics) ShadowFill(market.Symbol, market.Side)             {}
 func (NopMetrics) FlattenCost(market.Symbol, float64)                {}

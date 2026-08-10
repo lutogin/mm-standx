@@ -324,7 +324,11 @@ func provideEngines(
 					BreakEvenUSDPerMakerHour:            symCfg.Economics.BreakEvenUSDPerMakerHour,
 					CalibrationMaxAllocationUSD:         symCfg.Economics.CalibrationMaxAllocationUSD,
 				},
-				MaxNetPosition: maxPosition,
+				// Ноль, когда ориентир для инструмента не поднят: путь быстрого
+				// сигнала тогда не задействуется вовсе, а это отличается
+				// от «настроен и молчит».
+				ReferenceStaleAfter: referenceStaleAfter(symCfg.Reference),
+				MaxNetPosition:      maxPosition,
 			},
 			engine.Deps{
 				Gateway: gateway,
@@ -337,6 +341,18 @@ func provideEngines(
 		))
 	}
 	return out, nil
+}
+
+// referenceStaleAfter отдаёт порог молчания только для поднятого ориентира.
+//
+// Выключенный фид обязан выглядеть в акторе как отсутствующий, а не как
+// молчащий: иначе выключение оставляло бы в сводке и метриках вечно устаревший
+// ориентир, а тревога о нём приходила бы каждый раз, когда его никто не ждёт.
+func referenceStaleAfter(ref config.Reference) time.Duration {
+	if !ref.Enabled {
+		return 0
+	}
+	return ref.StaleAfter
 }
 
 func buildProgram(rewardCfg config.Reward, p config.Program) (reward.Program, error) {

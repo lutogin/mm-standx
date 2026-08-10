@@ -440,6 +440,21 @@ func TestShippedConfigLoads(t *testing.T) {
 	require.True(t, gold.Reference.Enabled, "the traded instrument needs a leading reference")
 	require.Equal(t, ProviderBinanceFutures, gold.Reference.Provider)
 	require.Equal(t, "XAUUSDT", gold.Reference.Symbol)
+	require.LessOrEqual(t, gold.Reference.StaleAfter, markTick,
+		"a reference older than the official price it anticipates adds nothing")
+}
+
+// Порог молчания за пределом такта mark делает фид бессмысленным, ничего
+// об этом не сообщая: ориентиру доверяли бы ровно до момента, когда приходит
+// официальная цена и всё равно его вытесняет.
+func TestReferenceStalenessMustFitInsideTheMarkTick(t *testing.T) {
+	_, err := Load(writeConfig(t, `
+symbols:
+  BTC-USD:
+    enabled: false
+    reference: { enabled: true, provider: binance_futures, symbol: BTCUSDT, staleAfter: 10s }
+`))
+	require.ErrorContains(t, err, "reference.staleAfter")
 }
 
 // Включённый ориентир без символа никогда не подключится, и молчащий фид

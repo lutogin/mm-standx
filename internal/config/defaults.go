@@ -168,6 +168,16 @@ func defaults() *Config {
 				Enabled:  false,
 				Provider: ProviderBinanceFutures,
 				Symbol:   "",
+				// One mark tick, and for a reason worth stating: silence on a
+				// book-ticker stream means the top of book did not change,
+				// which is information rather than the absence of it. The
+				// threshold is not there to notice a quiet market — it is there
+				// to notice a socket that died without saying so, and past one
+				// tick the official price supersedes the estimate anyway.
+				//
+				// Measured at two seconds this flapped once every two minutes
+				// on gold, warning about a feed that was working perfectly.
+				StaleAfter: 3 * time.Second,
 			},
 		},
 		Symbols: map[string]Symbol{},

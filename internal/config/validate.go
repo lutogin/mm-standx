@@ -501,8 +501,19 @@ func (r Reference) validate(prefix string) []error {
 			"%s.symbol is required for an enabled feed: it names the instrument on the venue, for example BTCUSDT",
 			prefix))
 	}
+	// A threshold at or past the mark tick makes the feed pointless without
+	// saying so: the reference would be trusted right up to the moment the
+	// official price arrives and supersedes it anyway.
+	if r.StaleAfter <= 0 || r.StaleAfter > markTick {
+		errs = append(errs, fmt.Errorf(
+			"%s.staleAfter (%s) must be within (0, %s]: the feed exists to see inside the mark tick",
+			prefix, r.StaleAfter, markTick))
+	}
 	return errs
 }
+
+// markTick — измеренный шаг канала price, см. PLAN.md §1.4.
+const markTick = 3 * time.Second
 
 func (u Uptime) validate(prefix string) []error {
 	var errs []error

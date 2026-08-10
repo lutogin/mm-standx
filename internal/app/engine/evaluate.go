@@ -883,6 +883,9 @@ func (e *Engine) reportStatus(
 		"accrual_multiplier", fmt.Sprintf("%.2f", hour.Multiplier),
 		"bids_live", e.bids.LiveCount(),
 		"asks_live", e.asks.LiveCount(),
+		// Какой сигнал сейчас правит порогами опасности. Без этого разбор
+		// пропущенного залива начинается с догадки о том, работал ли ориентир.
+		"fast_signal", e.fastSignal(),
 		// Свободная маржа и связывающее размер ограничение: без них нельзя
 		// понять, сколько депозита допустимо выделить, а с ними это видно
 		// за сутки наблюдения.
@@ -1007,6 +1010,8 @@ func (e *Engine) reportMetrics(
 	m := e.deps.Metrics
 	hour := e.hour.Assess(now)
 
+	e.noteFastSignal(now)
+
 	m.QuoteUptime(e.symbol, hour.QualifiedPct/100)
 	m.EstimatedMakerHours(e.symbol, hour.MakerHours)
 	m.HalfSpread(e.symbol, float64(conditions.HalfSpreadBps))
@@ -1023,6 +1028,65 @@ func (e *Engine) reportMetrics(
 	if quoting {
 		m.TargetDistance(e.symbol, float64(quote.Distance))
 	}
+}
+
+// fastSignal называет источник, питающий пороги опасности прямо сейчас.
+func (e *Engine) fastSignal() string {
+	switch {
+	case e.refStaleAfter <= 0:
+		return "book"
+	case e.referenceLeading:
+		return "reference"
+	default:
+		return "book (reference stale)"
+	}
+}
+
+// noteFastSignal публикует возраст ориентира и печатает смену источника
+// быстрого сигнала.
+//
+// Переход именно печатается, а не выводится из метрики: замолчавший ориентир
+// не проявляется ничем — котирование продолжается, дистанции те же, исчезает
+// лишь предупреждение, а отсутствие предупреждения ненаблюдаемо по определению.
+// Строка на переходе, а не на каждом такте: смена источника — событие, и в логе
+// она должна выглядеть событием.
+func (e *Engine) noteFastSignal(now time.Time) {
+	if e.refStaleAfter <= 0 {
+		return // ориентир для инструмента не настроен
+	}
+
+	// Возраст обязан быть конечным и растущим.
+	//
+	// Бесконечность на «ещё не приходил» напрашивалась, но почасовая свёртка
+	// кладёт квантили в JSON, а json.Encode на ±Inf возвращает ошибку — то есть
+	// одна ненастроенная площадка стоила бы всей истории показателей за час.
+	// Отсчёт от момента, с которого актор ждёт, даёт конечное число и делает
+	// «не подключился ни разу» неотличимым от «умер»: для быстрого сигнала это
+	// и есть одно и то же.
+	if e.referenceWaitSince.IsZero() {
+		e.referenceWaitSince = now
+	}
+	since := e.referenceAt
+	if since.IsZero() {
+		since = e.referenceWaitSince
+	}
+	e.deps.Metrics.ReferenceStaleness(e.symbol, now.Sub(since).Seconds())
+
+	_, leading := e.referenceDrift()
+	if leading == e.referenceLeading {
+		return
+	}
+	e.referenceLeading = leading
+
+	if leading {
+		e.deps.Log.Info("fast signal now leads on the external reference",
+			"symbol", e.symbol, "reference", e.reference)
+		return
+	}
+	e.deps.Log.Warn("external reference is stale, falling back to the book mid",
+		"symbol", e.symbol,
+		"age", now.Sub(since).Truncate(time.Millisecond).String(),
+		"stale_after", e.refStaleAfter)
 }
 
 // bookDepth возвращает нотионал в пределах полосы награды по каждой стороне.

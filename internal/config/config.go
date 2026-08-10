@@ -212,6 +212,14 @@ type Reference struct {
 	// It must track the same underlying: a mismatch is worse than no feed,
 	// because a wrong signal is still acted upon.
 	Symbol string `koanf:"symbol"`
+	// StaleAfter is how much silence makes the reference unusable as a signal.
+	//
+	// The threshold is a property of the venue, not of the exchange: a liquid
+	// book ticks tens of times a second, so silence measured in seconds means
+	// the connection is broken in a way the socket has not noticed yet. Past
+	// it the actor falls back to the exchange's own book mid rather than
+	// steering by a price that stopped moving.
+	StaleAfter time.Duration `koanf:"staleAfter"`
 }
 
 // Supported reference providers.

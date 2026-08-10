@@ -272,13 +272,23 @@ defaults:
   # named per instrument: a symbol that tracks a different underlying is worse
   # than no feed, because a wrong signal is still acted upon.
   #
-  # The feed is advisory. Losing it returns the bot to the picture it had
-  # before — the drift of the exchange's own book mid — and never stops
-  # quoting on its own.
+  # Its drift since the last mark tick feeds the danger thresholds, replacing
+  # the drift of the exchange's own book mid (PLAN.md §4.7). The book mid moves
+  # with the very order that fills us, so its warning has zero length; the
+  # external venue shows the same move earlier.
+  #
+  # The feed is advisory. Losing it, or letting it go stale, returns the bot to
+  # the picture it had before and never stops quoting on its own.
   reference:
     enabled: false
     provider: binance_futures # binance_futures | binance_spot | bybit_linear | bybit_spot
     symbol: ""
+    # One mark tick. Silence on a book-ticker stream means the top of book did
+    # not change — information, not the absence of it — so the threshold exists
+    # to catch a socket that died quietly, not a calm market. Past one tick the
+    # official price supersedes the estimate anyway. At two seconds this warned
+    # about a perfectly healthy gold feed once every two minutes.
+    staleAfter: 3s
 
 # Параметры начисления публикуются StandX и меняются оперативной командой:
 # https://docs.standx.com/docs/standx-perps-solutions/community-maker-yield

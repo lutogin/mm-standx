@@ -76,6 +76,11 @@ type Params struct {
 	Volatility volatility.Config
 	Economics  economics.Gate
 
+	// ReferenceStaleAfter — сколько молчания внешнего ориентира возвращает
+	// быстрый сигнал к середине стакана. Ноль означает, что ориентир для
+	// инструмента не настроен, и путь не задействуется вовсе.
+	ReferenceStaleAfter time.Duration
+
 	// MaxNetPosition — экспозиция, выше которой актор перестаёт котировать
 	// и закрывает позицию. Ноль означает, что позиция не допускается вовсе:
 	// стратегия зарабатывает на присутствии в стакане, а не на направлении.
@@ -98,6 +103,9 @@ type Engine struct {
 	maxNetPosition money.Qty
 	ladder         policy.Ladder
 	rules          quotes.Rules
+	// refStaleAfter — сколько молчания делает ориентир непригодным.
+	// Ноль означает, что ориентир для инструмента не настроен вовсе.
+	refStaleAfter time.Duration
 
 	bids *quotes.Ladder
 	asks *quotes.Ladder
@@ -109,6 +117,25 @@ type Engine struct {
 	markAt        time.Time
 	book          market.Book
 	bookMidAtMark money.Price
+
+	// Внешний ориентир: цена площадки, движения которой опережают mark.
+	//
+	// referenceAtMark запоминается в момент такта ровно так же, как
+	// bookMidAtMark: смещение с этой точки и есть оценка смещения mark
+	// (PLAN.md §4.7). Нулевое значение означает, что ориентир не настроен
+	// или ещё не пришёл, и быстрый сигнал берётся из стакана.
+	reference       money.Price
+	referenceAt     time.Time
+	referenceAtMark money.Price
+	// referenceLeading помнит, чем питался быстрый сигнал в прошлый раз:
+	// смена источника печатается один раз, а не на каждом такте.
+	referenceLeading bool
+	// lastReferenceEval ограничивает частоту пересчётов по ориентиру,
+	// см. referenceReactionFloor.
+	lastReferenceEval time.Time
+	// referenceWaitSince — с какого момента актор ждёт первую цену ориентира.
+	// Нужен, чтобы возраст в метрике оставался конечным до её прихода.
+	referenceWaitSince time.Time
 
 	// Состояние счёта.
 	position  money.Qty
@@ -238,6 +265,7 @@ func New(p Params, deps Deps) *Engine {
 		appetite:       p.Appetite,
 		bounds:         p.Bounds,
 		maxNetPosition: p.MaxNetPosition,
+		refStaleAfter:  p.ReferenceStaleAfter,
 		ladder:         policy.Ladder{Layers: layers, SpreadBps: p.Config.Quote.LadderSpreadBps},
 		rules: quotes.Rules{
 			MinRest:    p.Config.Quote.MinRest,
@@ -429,6 +457,11 @@ func (e *Engine) subscribe() {
 				e.enqueue(ev)
 			}
 		}),
+		events.Subscribe(e.deps.Bus, e.Name(), func(_ context.Context, ev events.ReferencePriceUpdated) {
+			if ev.Reference.Symbol == e.symbol {
+				e.enqueue(ev)
+			}
+		}),
 		events.Subscribe(e.deps.Bus, e.Name(), func(_ context.Context, ev events.OrderUpdated) {
 			if ev.Order.Symbol == e.symbol {
 				e.enqueue(ev)
@@ -477,10 +510,13 @@ func (e *Engine) enqueue(ev events.Event) {
 	select {
 	case e.inbox <- ev:
 	default:
-		// Стакан приходит в несколько раз чаще mark price. При переполнении
+		// Стакан и внешний ориентир приходят в разы чаще mark price — ориентир
+		// на всплеске может давать сотни сообщений в секунду. При переполнении
 		// лучше потерять промежуточный снимок, чем остановить актор целиком
-		// или заблокировать более важные события.
-		if _, ok := ev.(events.BookUpdated); ok {
+		// или заблокировать более важные события: остановиться из-за того, что
+		// чужая площадка разговорилась, было бы прямо противоположно смыслу.
+		switch ev.(type) {
+		case events.BookUpdated, events.ReferencePriceUpdated:
 			return
 		}
 		e.deps.Log.Error("engine inbox overflow, halting", "symbol", e.symbol)
@@ -510,6 +546,8 @@ func (e *Engine) handle(ctx context.Context, ev events.Event) {
 		e.onMarkPrice(ctx, v)
 	case events.BookUpdated:
 		e.onBook(ctx, v)
+	case events.ReferencePriceUpdated:
+		e.onReference(ctx, v)
 	case events.OrderUpdated:
 		e.onOrder(ctx, v)
 	case events.OrderRejected:
@@ -584,12 +622,54 @@ func (e *Engine) onMarkPrice(ctx context.Context, ev events.MarkPriceUpdated) {
 	e.markAt = ev.Mark.Received
 	e.vol.Observe(e.mark, e.markAt)
 
-	// Середина стакана запоминается именно в момент такта: дальнейший её
-	// сдвиг и служит оценкой смещения mark между тактами.
+	// Обе опорные точки запоминаются именно в момент такта: дальнейшее их
+	// смещение и служит оценкой смещения mark между тактами.
 	if mid, ok := e.bookMid(); ok {
 		e.bookMidAtMark = mid
 	}
+	e.referenceAtMark = e.reference
 	e.evaluate(ctx, true)
+}
+
+// referenceReactionFloor — минимальный интервал между пересчётами по ориентиру.
+//
+// Не экономия ради экономии, а предел полезного. Реакция упирается в круг
+// отмены, около 400 мс (PLAN.md §2.4), и решение, принятое на двадцать
+// миллисекунд раньше, уходит на биржу в тот же момент — разброс сети один
+// заведомо больше. Зато порог делает нагрузку независимой от разговорчивости
+// площадки: спокойное золото даёт 70 обновлений в секунду, а BTC на всплеске —
+// сотни, и без ограничения частота пересчёта следовала бы за ними.
+const referenceReactionFloor = 25 * time.Millisecond
+
+// onReference принимает цену внешней площадки.
+//
+// Пересчёт здесь такой же, как по стакану, и с тем же ограничением: событие
+// не несёт официальной цены, поэтому выставлять по нему нельзя — только
+// снимать (PLAN.md §4.8). Право снимать и есть весь смысл фида: движение
+// на быстрой площадке случается раньше, чем арбитражёр успевает прийти
+// с ним к нашей котировке.
+func (e *Engine) onReference(ctx context.Context, ev events.ReferencePriceUpdated) {
+	if !ev.Reference.Price.IsPositive() {
+		return
+	}
+	e.reference = ev.Reference.Price
+	e.referenceAt = ev.Reference.Received
+	// Первая цена после старта или после разрыва становится опорной сама:
+	// без этого смещение считалось бы от нуля, а такт mark мог не наступить
+	// ещё три секунды.
+	if !e.referenceAtMark.IsPositive() {
+		e.referenceAtMark = e.reference
+	}
+
+	// Состояние обновляется всегда, пересчёт — не всегда: пропущенный такт
+	// не теряется, ближайший пересчёт из любого источника увидит уже свежую
+	// цену.
+	now := e.deps.Clock.Now()
+	if now.Sub(e.lastReferenceEval) < referenceReactionFloor {
+		return
+	}
+	e.lastReferenceEval = now
+	e.evaluate(ctx, false)
 }
 
 // onBook обновляет быстрый сигнал.
@@ -792,24 +872,65 @@ func (e *Engine) halfSpreadBps() (money.Bps, bool) {
 	return spread / 2, true
 }
 
-// markEstimate восстанавливает текущий mark по сдвигу середины стакана.
+// markEstimate восстанавливает текущий mark по смещению опережающего сигнала.
 //
 // Официальная цена приходит раз в три секунды, и всё это время мы формально
-// слепы. Середина стакана движется согласованно с mark, поэтому её смещение
-// с момента последнего такта служит оценкой смещения самого mark.
+// слепы. Оба доступных источника движутся согласованно с mark, поэтому их
+// смещение с момента последнего такта служит оценкой смещения самого mark.
+//
+// Предпочитается внешний ориентир. Разница между источниками не в точности,
+// а в причинности: нас исполняет арбитражёр, увидевший движение на быстрой
+// площадке, и стакан StandX сдвигает тот самый ордер, который нас и забирает.
+// Середина стакана поэтому предупреждает одновременно с заливом, то есть
+// не предупреждает; внешняя площадка показывает то же движение раньше.
 //
 // Значение допускается только к порогам опасности: цена ордера и попадание
 // в полосу считаются по официальному mark, где оценке места нет.
 func (e *Engine) markEstimate() money.Price {
-	mid, ok := e.bookMid()
-	if !ok || !e.bookMidAtMark.IsPositive() || !e.mark.IsPositive() {
+	if !e.mark.IsPositive() {
 		return e.mark
+	}
+	drift, ok := e.referenceDrift()
+	if !ok {
+		if drift, ok = e.bookDrift(); !ok {
+			return e.mark
+		}
+	}
+	return e.mark.MulRatio(decimal.NewFromInt(1).Add(drift.Ratio()))
+}
+
+// referenceDrift — смещение внешней площадки с момента последнего такта mark.
+//
+// Отказ возвращается, пока ориентир не настроен, не пришёл или замолчал.
+// Порог молчания короче такта mark намеренно: ориентир старше самой
+// официальной цены не добавляет к ней ничего, а править решением по цене,
+// которая перестала двигаться, — худший исход из возможных, потому что
+// выглядит он как работающая защита.
+func (e *Engine) referenceDrift() (money.Bps, bool) {
+	if e.refStaleAfter <= 0 || !e.reference.IsPositive() || !e.referenceAtMark.IsPositive() {
+		return 0, false
+	}
+	if e.deps.Clock.Now().Sub(e.referenceAt) > e.refStaleAfter {
+		return 0, false
+	}
+	drift, err := money.RelativeBps(e.referenceAtMark, e.reference)
+	if err != nil {
+		return 0, false
+	}
+	return drift, true
+}
+
+// bookDrift — смещение середины стакана с момента последнего такта mark.
+func (e *Engine) bookDrift() (money.Bps, bool) {
+	mid, ok := e.bookMid()
+	if !ok || !e.bookMidAtMark.IsPositive() {
+		return 0, false
 	}
 	drift, err := money.RelativeBps(e.bookMidAtMark, mid)
 	if err != nil {
-		return e.mark
+		return 0, false
 	}
-	return e.mark.MulRatio(decimal.NewFromInt(1).Add(drift.Ratio()))
+	return drift, true
 }
 
 // sampleUptime фиксирует наблюдение тем же способом, каким это делает биржа.
