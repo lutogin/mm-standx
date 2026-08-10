@@ -507,6 +507,31 @@ symbols:
 	require.False(t, cfg.Symbols["SOL-USD"].Reference.Enabled)
 }
 
+// Тот же файл обязан грузиться и в боевом режиме, с тем же отбором инструмента,
+// каким его запускает docker-compose.
+//
+// Проверка существует потому, что отказ валидации на сервере выглядит не как
+// отказ. Процесс падает на старте, деплой откатывается на предыдущий образ,
+// метрики отвечают, — и прод двое суток крутит старый код при внешне исправном
+// контуре (PLAN.md §13). Дешевле обнаружить это здесь.
+func TestShippedConfigLoadsInLiveMode(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join("..", "..", "config.yaml"))
+	require.NoError(t, err)
+	path := writeConfig(t, string(body))
+
+	t.Setenv("MMSTANDX_RUNTIME_MODE", string(ModeLive))
+	t.Setenv("MMSTANDX_RUNTIME_SYMBOLS", "XAU-USD")
+	t.Setenv(walletKeyEnv, "0x00")
+
+	cfg, err := Load(path)
+	require.NoError(t, err, "the image must be able to start in live mode")
+	require.True(t, cfg.IsLive())
+
+	enabled := cfg.EnabledSymbols()
+	require.Len(t, enabled, 1, "the selection has to leave exactly the traded instrument")
+	require.Contains(t, enabled, market.Symbol("XAU-USD"))
+}
+
 // Дистанция — первый параметр, который придётся править под давлением, а
 // конфигурация запечена в образ. Правка обязана быть доступна окружением,
 // иначе срочное отступление от рынка требует пересборки и публикации образа.
