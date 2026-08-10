@@ -171,6 +171,13 @@ defaults:
     ladderSpreadBps: 0.4
     minRest: 3200ms # ≥3с, иначе ордер не засчитывается в Maker Points
     requoteCooldown: 250ms
+    # Distance kept from the opposing top of book, in exchange ticks. The
+    # crossing check only answers "will the exchange reject this"; an order
+    # resting on the touch is accepted and then taken by the first move.
+    # On gold two ticks is 0.46 bps, so the clamp binds only when the book has
+    # run past a mark that has not caught up — and that quote is refused rather
+    # than sent, because its whole geometry rests on a stale price.
+    postOnlyBufferTicks: 2
   # Дистанции здесь нет: она вычисляется из спреда и измеренного скачка.
   # Задаётся только готовность рисковать. См. PLAN.md §4.5.
   appetite:

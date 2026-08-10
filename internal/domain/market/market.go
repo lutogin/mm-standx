@@ -177,6 +177,54 @@ func (b Book) BestAsk() (money.Price, bool) {
 	return b.Asks[0].Price, true
 }
 
+// Tick — шаг цены инструмента.
+func (s SymbolSpec) Tick() decimal.Decimal { return decimal.New(1, -s.PriceTickDecimals) }
+
+// ClampPostOnly отодвигает цену от противоположной вершины стакана на buffer тиков.
+//
+// Проверка на пересечение отвечает на вопрос «отвергнет ли биржа», и этого мало.
+// Ордер, поставленный ровно на вершину, биржа примет, а рынок заберёт первым же
+// движением: между «не тейкер» и «не будет исполнен через мгновение» лежит
+// расстояние, которое надо назвать явно.
+//
+// Смещение всегда направлено от mark price, никогда к нему: покупка уезжает
+// вниз, продажа вверх. Отсюда и односторонняя проверка у вызывающего — после
+// зажима дистанция способна только вырасти, то есть выйти за полосу награды,
+// но не подойти к рынку ближе разрешённого.
+//
+// Зажим срабатывает редко и ровно в тех случаях, ради которых заведён: когда
+// стакан ушёл дальше, чем успела обновиться справочная цена. В обычной
+// обстановке котировка стоит на несколько базисных пунктов глубже вершины,
+// и предел до неё не достаёт.
+func ClampPostOnly(price money.Price, side Side, book Book, spec SymbolSpec, buffer int) money.Price {
+	if buffer <= 0 {
+		return price
+	}
+	offset := spec.Tick().Mul(decimal.NewFromInt(int64(buffer)))
+
+	if side == Buy {
+		ask, ok := book.BestAsk()
+		if !ok {
+			return price
+		}
+		// Снэп в ту же сторону, что и смещение: округление вверх вернуло бы
+		// часть только что отданного запаса.
+		if limit := ask.Sub(money.NewPrice(offset)).SnapDown(spec.PriceTickDecimals); limit.Lt(price) {
+			return limit
+		}
+		return price
+	}
+
+	bid, ok := book.BestBid()
+	if !ok {
+		return price
+	}
+	if limit := bid.Add(money.NewPrice(offset)).SnapUp(spec.PriceTickDecimals); limit.Gt(price) {
+		return limit
+	}
+	return price
+}
+
 // WouldCross сообщает, пересечёт ли лимитный ордер противоположную сторону стакана.
 //
 // Биржа отклонит такой ордер при time_in_force=alo, но проверка на нашей стороне

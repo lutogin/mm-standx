@@ -430,8 +430,16 @@ func (e *Engine) place(
 		e.deps.Log.Warn("size rejected", "symbol", e.symbol, "error", err)
 		return
 	}
+	if clamped, ok := e.clampPostOnly(side, price); ok {
+		price = clamped
+	} else {
+		return
+	}
 	// Биржа отклонит пересекающий ALO-ордер сама, но проверка на нашей стороне
 	// экономит запрос и, что важнее, ловит ошибку в расчёте дистанции.
+	//
+	// После зажима она уже не должна срабатывать, и именно поэтому остаётся:
+	// сработавшая означает, что зажим выключен либо стакан односторонний.
 	if e.book.WouldCross(side, price) {
 		e.deps.Log.Warn("quote would cross the book, skipping",
 			"symbol", e.symbol, "side", side, "price", price)
@@ -471,6 +479,39 @@ func (e *Engine) place(
 		"price", price, "qty", qty, "distance", action.Distance, "reason", action.Reason)
 
 	e.ladderFor(side).OnPlaceSent(action.Slot, id, price, qty, now)
+}
+
+// clampPostOnly отодвигает цену от вершины стакана и решает, стоит ли отправлять
+// то, что получилось.
+//
+// Второй результат false означает отказ от размещения. Отказ здесь дешевле
+// отправки: зажим срабатывает лишь тогда, когда стакан ушёл дальше, чем успела
+// обновиться справочная цена, и вся геометрия котировки в этот момент построена
+// на устаревшем mark. Прежде такой ордер уходил на биржу и возвращался отказом
+// post-only — круг запроса и пустая ступень до следующего такта, — либо, что
+// хуже, вставал на вершину и забирался ближайшим движением.
+//
+// Проверка односторонняя, потому что односторонний и зажим: он уводит цену
+// только от mark. Ближе разрешённого котировка после него оказаться не может,
+// а вот за краем полосы — вполне, и там она не стоит ничего.
+func (e *Engine) clampPostOnly(side market.Side, price money.Price) (money.Price, bool) {
+	clamped := market.ClampPostOnly(price, side, e.book, e.spec, e.cfg.Quote.PostOnlyBufferTicks)
+	if clamped.Cmp(price) == 0 {
+		return price, true
+	}
+
+	distance, err := market.DistanceBps(e.mark, side, clamped)
+	if err != nil || !clamped.IsPositive() || distance > e.bounds.MaxBps {
+		e.deps.Log.Info("skipping a quote the post-only buffer pushed out of the band",
+			"symbol", e.symbol, "side", side,
+			"price", price, "clamped", clamped, "distance", distance, "band", e.bounds.MaxBps)
+		return price, false
+	}
+
+	e.deps.Log.Info("post-only buffer moved the quote off the touch",
+		"symbol", e.symbol, "side", side,
+		"price", price, "clamped", clamped, "distance", distance)
+	return clamped, true
 }
 
 // withdraw снимает обе стороны.

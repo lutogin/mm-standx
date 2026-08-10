@@ -132,6 +132,11 @@ func defaults() *Config {
 				LadderSpreadBps: 1.0,
 				MinRest:         3200 * time.Millisecond, // ≥3с для зачёта Maker Points
 				RequoteCooldown: 250 * time.Millisecond,
+				// Two ticks. On gold that is 0.46 bps, small next to the seven
+				// the quote normally stands at, so the clamp binds only when the
+				// book has run past a mark that has not caught up yet — which is
+				// exactly the moment an order placed on the touch gets taken.
+				PostOnlyBufferTicks: 2,
 			},
 			Appetite: Appetite{
 				// Мера риска — максимум скользящего окна, то есть уже оценка

@@ -334,6 +334,9 @@ func (q Quote) validate(prefix string) []error {
 	if q.MinRest < 0 || q.RequoteCooldown < 0 {
 		errs = append(errs, fmt.Errorf("%s: minRest and requoteCooldown must not be negative", prefix))
 	}
+	if q.PostOnlyBufferTicks < 0 {
+		errs = append(errs, fmt.Errorf("%s.postOnlyBufferTicks must not be negative", prefix))
+	}
 	return errs
 }
 

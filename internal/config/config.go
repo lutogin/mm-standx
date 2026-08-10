@@ -321,6 +321,14 @@ type Quote struct {
 	LadderSpreadBps money.Bps     `koanf:"ladderSpreadBps"`
 	MinRest         time.Duration `koanf:"minRest"`
 	RequoteCooldown time.Duration `koanf:"requoteCooldown"`
+
+	// PostOnlyBufferTicks — на сколько тиков цена отодвигается от противоположной
+	// вершины стакана перед отправкой.
+	//
+	// Проверка на пересечение отвечает только на вопрос «отвергнет ли биржа».
+	// Ордер на самой вершине она примет, а рынок заберёт первым же движением.
+	// Ноль возвращает прежнее поведение.
+	PostOnlyBufferTicks int `koanf:"postOnlyBufferTicks"`
 }
 
 // Appetite — готовность рисковать ради награды.
