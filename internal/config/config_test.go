@@ -407,9 +407,11 @@ func TestDistanceFloorIsOverridableFromTheEnvironment(t *testing.T) {
 	require.NotEqual(t, 6.0, float64(base.Symbols["XAU-USD"].Appetite.MinBps))
 
 	t.Setenv("MMSTANDX_DEFAULTS_APPETITE_MINBPS", "6.0")
+	t.Setenv("MMSTANDX_DEFAULTS_APPETITE_PANICFRACTION", "0.6")
 
 	cfg, err := Load(path)
 	require.NoError(t, err)
 	require.Equal(t, 6.0, float64(cfg.Symbols["XAU-USD"].Appetite.MinBps),
 		"gold inherits the defaults block, so the override has to reach it")
+	require.Equal(t, 0.6, cfg.Symbols["XAU-USD"].Appetite.PanicFraction)
 }

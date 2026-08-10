@@ -276,6 +276,7 @@ func provideEngines(
 					FloorMarginBps:     symCfg.Appetite.FloorMarginBps,
 					DeadBandJumps:      symCfg.Appetite.DeadBandJumps,
 					MinDeadBandBps:     symCfg.Appetite.MinDeadBandBps,
+					PanicFraction:      symCfg.Appetite.PanicFraction,
 					ReentryDeadBandBps: symCfg.Appetite.ReentryDeadBandBps,
 				},
 				Bounds: policy.Bounds{MinBps: symCfg.Appetite.MinBps, MaxBps: symCfg.Appetite.MaxBps},

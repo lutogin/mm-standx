@@ -322,3 +322,60 @@ func TestLeavingTheBandIsImmediate(t *testing.T) {
 	require.ElementsMatch(t, []trading.ClOrdID{"bid-1", "ask-1"}, gw.cancelled,
 		"no dead band on the way out")
 }
+
+// narrowBook makes the physical danger threshold small, which is what a calm
+// market actually looks like: half a basis point of spread and a jump estimate
+// close to zero.
+func narrowBook(e *Engine, at time.Time) {
+	e.book = market.NewBook("XAU-USD",
+		[]market.Level{{Price: money.MustParsePrice("4275.9"), Qty: money.MustParseQty("1")}},
+		[]market.Level{{Price: money.MustParsePrice("4276.1"), Qty: money.MustParseQty("1")}},
+		at)
+}
+
+// Аварийный съём — единственный путь, свободный от кулдауна перестановки,
+// минимального времени жизни и очереди round-robin: он снимает сторону одним
+// пакетом. Пока он включался только по физическому порогу, на спокойном рынке
+// зона его действия сжималась до половины базисного пункта при котировке на
+// 5.5, и рынок проходил остаток штатным путём — по ступени за круг.
+func TestPanicFractionPullsBothSidesBeforeTheMarketArrives(t *testing.T) {
+	ctx := context.Background()
+	e, gw, clk := dangerEngine(t)
+	narrowBook(e, clk.now)
+
+	// Боевая геометрия: три ступени на сторону. При одной ступени разница
+	// не видна — place-first без свободной ступени и так вырождается в отмену.
+	e.ladder = policy.Ladder{Layers: 3, SpreadBps: 0.4}
+	e.bids, e.asks = quotes.New(market.Buy, 3), quotes.New(market.Sell, 3)
+	// Без свободных средств расчёт размера падает штатно и снимает обе стороны
+	// по CauseSizing — то есть по причине, не имеющей отношения к делу.
+	e.available = decimal.NewFromInt(1000)
+
+	// Рынок прошёл больше трети пути до котировки: 2.1–2.6 bps при цели 5.9.
+	for slot, price := range []string{"4275.1", "4275.0", "4274.9"} {
+		liveRungAt(e, market.Buy, slot, trading.ClOrdID("bid-"+price), price, clk.now)
+	}
+	for slot, price := range []string{"4276.9", "4277.0", "4277.1"} {
+		liveRungAt(e, market.Sell, slot, trading.ClOrdID("ask-"+price), price, clk.now)
+	}
+
+	e.evaluate(ctx, true)
+	require.Len(t, gw.cancelled, 2,
+		"the physical threshold leaves this to the ordinary path: one rung per side")
+	require.Zero(t, gw.batchCalls, "the ordinary path cancels one rung per request")
+
+	gw.cancelled = nil
+	e.appetite.PanicFraction = 0.5
+	e.evaluate(ctx, true)
+
+	require.Len(t, gw.cancelled, 4,
+		"every remaining rung comes off at once instead of one per round trip")
+	require.Equal(t, 1, gw.batchCalls, "and in a single exchange batch")
+}
+
+// liveRungAt puts a confirmed order on a specific rung of the side.
+func liveRungAt(e *Engine, side market.Side, slot int, id trading.ClOrdID, price string, at time.Time) {
+	l := e.ladderFor(side)
+	l.OnPlaceSent(slot, id, money.MustParsePrice(price), money.MustParseQty("0.008"), at)
+	l.OnOrderUpdate(trading.Order{ClOrdID: id, Status: trading.StatusOpen}, at)
+}

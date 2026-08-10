@@ -250,3 +250,70 @@ func TestThresholdsAreAlwaysOrdered(t *testing.T) {
 		require.NoError(r, th.Validate())
 	})
 }
+
+// Физический порог опасности на спокойном рынке вырождается: половина спреда
+// плюс скачок дают около базисного пункта, тогда как котировка стоит на семи.
+// Полосу между ними актор проходил штатным путём — по одной ступени, place-first,
+// одна команда в полёте, — и рынок успевал дойти до ордера раньше реакции.
+func TestPanicFractionWidensTheDangerZoneOnACalmMarket(t *testing.T) {
+	a, b := appetite(), Bounds{MinBps: 7.0, MaxBps: 9.5}
+	q := a.Target(xauConditions, b)
+	require.InDelta(t, 7.0, q.Distance.Float64(), 1e-9)
+
+	physical := a.Thresholds(q, xauConditions, b)
+	require.InDelta(t, 1.53, physical.PanicBps.Float64(), 1e-9, "half spread plus one jump")
+
+	a.PanicFraction = 0.5
+	widened := a.Thresholds(q, xauConditions, b)
+	require.InDelta(t, 3.5, widened.PanicBps.Float64(), 1e-9, "half of the target distance")
+
+	// Именно это и означает «агрессивнее»: дистанция, на которой раньше был
+	// штатный place-first, теперь снимает сторону одним пакетом.
+	require.Equal(t, PlaceFirst, physical.Classify(3.0).Sequence)
+	require.Equal(t, CancelFirst, widened.Classify(3.0).Sequence)
+	require.Equal(t, UrgencySafety, widened.Classify(3.0).Urgency)
+}
+
+// Физический порог остаётся нижней границей: доля не вправе объявить безопасным
+// то, до чего рынок дойдёт за один такт.
+func TestPanicFractionNeverLowersThePhysicalThreshold(t *testing.T) {
+	a, b := appetite(), bounds()
+	a.PanicFraction = 0.1
+
+	q := a.Target(xagConditions, b)
+	require.False(t, q.Feasible, "silver does not fit the band at this appetite")
+
+	// Рынок с крупным скачком: доля от цели заведомо меньше физического порога.
+	volatile := Conditions{HalfSpreadBps: 1.0, JumpBps: 2.0, Ready: true}
+	q = a.Target(volatile, b)
+	require.True(t, q.Feasible)
+
+	th := a.Thresholds(q, volatile, b)
+	require.GreaterOrEqual(t, th.PanicBps.Float64(), 3.0-1e-9,
+		"half spread plus one jump remains the floor")
+}
+
+// Пороги обязаны оставаться упорядоченными при любой доле: восстановление
+// порядка внутри Thresholds не должно оставлять невалидную геометрию.
+func TestThresholdsStayOrderedForAnyPanicFraction(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		a := appetite()
+		a.PanicFraction = rapid.Float64Range(0, 0.89).Draw(t, "panicFraction")
+
+		c := Conditions{
+			HalfSpreadBps: money.Bps(rapid.Float64Range(0, 4).Draw(t, "halfSpread")),
+			JumpBps:       money.Bps(rapid.Float64Range(0, 4).Draw(t, "jump")),
+			Ready:         true,
+		}
+		b := Bounds{
+			MinBps: money.Bps(rapid.Float64Range(1, 8).Draw(t, "min")),
+			MaxBps: 9.5,
+		}
+
+		q := a.Target(c, b)
+		if !q.Feasible {
+			return
+		}
+		require.NoError(t, a.Thresholds(q, c, b).Validate())
+	})
+}

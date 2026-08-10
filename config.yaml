@@ -153,6 +153,25 @@ defaults:
     # иначе крайние ступени стоят вне мёртвой зоны и переставляются бесконечно.
     # Проверяется при запуске.
     minDeadBandBps: 0.5
+    # Доля целевой дистанции, ближе которой сторона снимается целиком
+    # аварийным путём. Больше значение — раньше отход.
+    #
+    # The physical threshold alone (half spread plus one jump) sits at 0.4-2.7
+    # bps on gold while the quote stands at 7.4, and everything between them was
+    # handled by the ordinary path: one command in flight per side, one rung at
+    # a time, place-first leaving the approached order in the book for the round
+    # trip. A trending market crosses those four basis points over several
+    # ticks, and every one of them went to slow reaction — that is how the fills
+    # actually arrive, rather than through a single instantaneous jump.
+    #
+    # Ladder.Danger is free of all of it: it bypasses the requote cooldown, the
+    # minimum rest and the round-robin queue, and cancels the side in one batch.
+    # Widening where it applies is the most direct lever on the fill rate.
+    #
+    # 0.5 pulls when the market has eaten half the way to the quote: at a target
+    # of 7.4 bps that is 3.7 instead of ~1. Cost is presence — a withdrawn side
+    # scores nothing until it returns, and re-entry is bounded by minRest.
+    panicFraction: 0.5
     # Мёртвая зона для решения «котировать или нет», а не для дистанции.
     #
     # Порог осуществимости был единственным решением в контуре без гистерезиса,

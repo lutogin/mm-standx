@@ -385,6 +385,15 @@ func (a Appetite) validate(prefix string, band money.Bps) []error {
 	if a.ReentryDeadBandBps < 0 {
 		errs = append(errs, fmt.Errorf("%s.reentryDeadBandBps must not be negative", prefix))
 	}
+	// Порог опасности обязан оставаться ниже мёртвой зоны, иначе аварийный съём
+	// накрывает её целиком: сторона снимается на обычном шуме, и присутствие
+	// обнуляется вместо того, чтобы защищаться. Восстановление порядка в
+	// policy.Thresholds спасёт от бессмыслицы, но молча — а параметр, который
+	// молча не действует, хуже отсутствующего.
+	if a.PanicFraction < 0 || a.PanicFraction >= 0.9 {
+		errs = append(errs, fmt.Errorf(
+			"%s.panicFraction must be in [0, 0.9), got %.2f", prefix, a.PanicFraction))
+	}
 	// Сужение не вправе съесть полосу целиком: иначе после первого же отказа
 	// вернуться будет некуда, и гистерезис превратится в остановку навсегда.
 	if a.MaxBps-a.ReentryDeadBandBps <= a.MinBps {
