@@ -151,6 +151,96 @@ func TestEnvOverrideResolvesCamelCaseKeys(t *testing.T) {
 	require.Equal(t, 12*time.Second, cfg.Health.MarkStale)
 }
 
+// symbolWithReference — инструмент, объявивший все ключи, которые тесты ниже
+// переопределяют.
+//
+// Объявление обязательно: переопределить можно только ключ, уже существующий
+// в дереве конфигурации. Наследование блока defaults происходит в коде, после
+// разбора, и ключа в дереве не создаёт. Ограничение не новое и одинаково
+// действует для обеих записей имени, но промолчать о нём здесь значило бы
+// написать тест, проходящий по случайной причине.
+const symbolWithReference = `
+symbols:
+  XAU-USD:
+    enabled: true
+    allocationUsd: 60
+    program: { unitSize: "30", perSideCap: "60", maxMakerHoursPerHour: 2 }
+    reference: { enabled: false, provider: binance_futures, symbol: XAUUSDT }
+`
+
+// Имя инструмента несёт дефис, а имена переменных окружения — нет: разбор .env
+// отвергает такую строку целиком, и переопределение посимвольной настройки
+// нельзя было положить туда, где живут все остальные переопределения.
+func TestSymbolOverrideAcceptsUnderscoreSpelling(t *testing.T) {
+	path := writeConfig(t, symbolWithReference)
+
+	t.Setenv("MMSTANDX_SYMBOLS_XAU_USD_ALLOCATIONUSD", "500")
+	t.Setenv("MMSTANDX_SYMBOLS_XAU_USD_REFERENCE_ENABLED", "true")
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.Equal(t, 500.0, cfg.Symbols["XAU-USD"].AllocationUSD)
+	require.True(t, cfg.Symbols["XAU-USD"].Reference.Enabled)
+}
+
+// Прежнее написание продолжает работать: оно уже стоит в боевых окружениях,
+// и выкатка, требующая согласованной правки на сервере, — это выкатка, которая
+// однажды приедет без неё.
+func TestSymbolOverrideStillAcceptsTheDashedSpelling(t *testing.T) {
+	path := writeConfig(t, symbolWithReference)
+
+	t.Setenv("MMSTANDX_SYMBOLS_XAU-USD_ALLOCATIONUSD", "400")
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.Equal(t, 400.0, cfg.Symbols["XAU-USD"].AllocationUSD)
+}
+
+// Псевдоним не имеет права затенить настоящий ключ: точная запись сильнее.
+func TestUnderscoreAliasNeverShadowsARealKey(t *testing.T) {
+	path := writeConfig(t, `
+symbols:
+  XAU-USD:
+    enabled: false
+    allocationUsd: 1
+    program: { unitSize: "30", perSideCap: "60", maxMakerHoursPerHour: 2 }
+  XAU_USD:
+    enabled: false
+    allocationUsd: 2
+    program: { unitSize: "30", perSideCap: "60", maxMakerHoursPerHour: 2 }
+`)
+
+	t.Setenv("MMSTANDX_SYMBOLS_XAU_USD_ALLOCATIONUSD", "700")
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.Equal(t, 700.0, cfg.Symbols["XAU_USD"].AllocationUSD,
+		"the instrument actually named that way owns the variable")
+	require.NotEqual(t, 700.0, cfg.Symbols["XAU-USD"].AllocationUSD)
+}
+
+// Переопределение обязано пережить разбор .env, а не только окружение процесса:
+// именно файл едет на сервер, и именно его читает загрузчик рядом с конфигом.
+func TestSymbolOverrideSurvivesDotEnv(t *testing.T) {
+	// Разбор .env кладёт переменные в окружение процесса и за собой не убирает.
+	// Для приложения это и есть смысл файла, а для теста — утечка в следующие:
+	// без уборки один этот случай переопределял бы конфигурацию всего пакета.
+	const key = "MMSTANDX_SYMBOLS_XAU_USD_REFERENCE_ENABLED"
+	t.Cleanup(func() { os.Unsetenv(key) })
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(strings.Replace(
+		symbolWithReference, "enabled: false, provider", "enabled: true, provider", 1)), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".env"),
+		[]byte(key+"=false\n"), 0o600))
+
+	cfg, err := Load(path)
+	require.NoError(t, err, "a dotenv file must be able to hold this override")
+	require.False(t, cfg.Symbols["XAU-USD"].Reference.Enabled,
+		"the file has to be able to turn the feed off, which is the whole point")
+}
+
 func TestEnvOverrideReachesSymbolFields(t *testing.T) {
 	t.Setenv("MMSTANDX_SYMBOLS_BTC-USD_ALLOCATIONUSD", "12345")
 

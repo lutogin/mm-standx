@@ -550,7 +550,23 @@ func Load(path string) (*Config, error) {
 func envKeyResolver(k *koanf.Koanf) func(string) string {
 	index := make(map[string]string)
 	for _, key := range k.Keys() {
-		index[strings.ToLower(strings.ReplaceAll(key, ".", "_"))] = key
+		flat := strings.ToLower(strings.ReplaceAll(key, ".", "_"))
+		index[flat] = key
+
+		// Имя инструмента несёт дефис — XAU-USD — и попадает в ключ как есть,
+		// а оттуда в имя переменной окружения. Имена переменных дефис не несут:
+		// разбор .env отвергает такую строку целиком, и переопределение
+		// посимвольной настройки оказывалось невозможно положить именно туда,
+		// где живут все остальные переопределения. Написание через подчёркивание
+		// разрешается в тот же ключ.
+		//
+		// Точная форма всегда сильнее: псевдоним ставится только на свободное
+		// место, а собственная запись ключа перекрывает чужой псевдоним.
+		if alias := strings.ReplaceAll(flat, "-", "_"); alias != flat {
+			if _, taken := index[alias]; !taken {
+				index[alias] = key
+			}
+		}
 	}
 
 	return func(name string) string {
