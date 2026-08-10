@@ -239,7 +239,23 @@ func (l *Ladder) planOne(
 		i := (l.cursor + offset) % n
 		slot := l.Slots[i]
 
-		target := desired[min(i, len(desired)-1)]
+		// Ступени сверх текущей геометрии не существует: лесенка сужена, чтобы
+		// поместиться в полосу награды. Пустая остаётся пустой, живая снимается —
+		// иначе она стоит по дистанции, которую расчёт уже не считает своей.
+		if i >= len(desired) {
+			if slot.Phase != Live {
+				continue
+			}
+			l.cursor = (i + 1) % n
+			return []Action{{
+				Kind:    Cancel,
+				Slot:    i,
+				ClOrdID: slot.ClOrdID,
+				Urgency: policy.UrgencyReward,
+				Reason:  "ladder narrowed to fit the reward band",
+			}}
+		}
+		target := desired[i]
 
 		switch slot.Phase {
 		case Empty:

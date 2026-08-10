@@ -234,3 +234,40 @@ func TestOrdersListsUnfinishedIdentifiers(t *testing.T) {
 	l.OnOrderUpdate(trading.Order{ClOrdID: "b", Status: trading.StatusCanceled}, epoch)
 	require.ElementsMatch(t, []trading.ClOrdID{"a", "c"}, l.Orders())
 }
+
+// Сужение лесенки обязано снимать ступени, которых в новой геометрии нет:
+// иначе ордер остаётся стоять по дистанции, которую расчёт уже не считает своей.
+func TestNarrowedLadderCancelsTheRungsItNoLongerHas(t *testing.T) {
+	l := New(market.Buy, 3)
+	now := time.Now().UTC()
+	rules := Rules{MinRest: 0, AckTimeout: 2 * time.Second}
+
+	for i, id := range []trading.ClOrdID{"a", "b", "c"} {
+		l.OnPlaceSent(i, id, money.MustParsePrice("4300"), money.MustParseQty("0.01"), now)
+		l.OnOrderUpdate(trading.Order{ClOrdID: id, Status: trading.StatusOpen}, now)
+	}
+
+	hold := func(Slot) policy.Decision {
+		return policy.Decision{Action: policy.Hold, Reason: "within dead band"}
+	}
+
+	// Лесенка сузилась до одной ступени: две оставшиеся обязаны уйти.
+	var cancelled []trading.ClOrdID
+	for range 4 {
+		actions := l.Plan(now, []money.Bps{7.0}, hold, rules)
+		if len(actions) == 0 {
+			break
+		}
+		for _, a := range actions {
+			require.Equal(t, Cancel, a.Kind)
+			require.Contains(t, a.Reason, "narrowed")
+			cancelled = append(cancelled, a.ClOrdID)
+			// Одна команда в полёте на сторону: пока биржа не подтвердила
+			// снятие, следующая ступень не планируется.
+			l.OnCancelSent(a.Slot, now)
+			l.OnOrderUpdate(trading.Order{ClOrdID: a.ClOrdID, Status: trading.StatusCanceled}, now)
+		}
+	}
+	require.ElementsMatch(t, []trading.ClOrdID{"b", "c"}, cancelled,
+		"slot 0 stays: it is the only one the narrowed geometry still has")
+}

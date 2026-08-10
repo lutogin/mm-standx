@@ -10,6 +10,7 @@ import (
 	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/require"
 
+	"github.com/nd/mm-standx/internal/domain/economics"
 	"github.com/nd/mm-standx/internal/domain/market"
 	"github.com/nd/mm-standx/internal/domain/trading"
 	"github.com/nd/mm-standx/internal/events"
@@ -189,4 +190,32 @@ func TestResumedQuotingClearsTheStallCounter(t *testing.T) {
 	clk.advance(time.Second)
 	e.evaluate(ctx, true)
 	require.True(t, e.blockedSince.IsZero(), "a quoting actor is not stalled")
+}
+
+// Экономический запрет обязан останавливать котирование, а не процесс.
+//
+// Пока он жил в валидации конфигурации, выкатка падала на старте, деплой молча
+// откатывался на предыдущий образ, и прод двое суток крутил старый код при
+// внешне исправном контуре. Отказ, выглядящий как работающая система, — худший
+// из возможных, и место такому запрету там, где его видно: в сводке и метриках.
+func TestEconomicGateStopsQuotingInsteadOfTheProcess(t *testing.T) {
+	ctx := context.Background()
+	e, gw, clk := dangerEngine(t)
+	e.available = decimal.NewFromInt(1000)
+	e.economics = economics.Gate{
+		BreakEvenUSDPerMakerHour:    22,
+		CalibrationMaxAllocationUSD: 60,
+	}
+	e.cfg.AllocationUSD = 1000
+
+	var buf bytes.Buffer
+	e.deps.Log = slog.New(slog.NewTextHandler(&buf, nil))
+
+	liveRung(e, market.Buy, "bid-1", "4273", clk.now)
+	e.evaluate(ctx, true)
+
+	require.Empty(t, gw.placed, "an allocation past the calibration cap must not be quoted")
+	require.Contains(t, gw.cancelled, trading.ClOrdID("bid-1"))
+	require.Contains(t, buf.String(), "engine status")
+	require.Contains(t, buf.String(), "calibration cap")
 }

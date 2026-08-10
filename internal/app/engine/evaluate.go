@@ -134,7 +134,12 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 	}
 
 	bounds := e.quotingBounds()
-	quote := e.stickyTarget(e.ladder.Anchor(appetite.Target(conditions, bounds), bounds))
+	// Лесенка сужается до той, что помещается, вместо отказа котировать:
+	// её ширина берётся из того же бюджета дистанции, что и сама котировка,
+	// и перестаёт помещаться раньше неё. См. policy.Ladder.Fit.
+	ladder, anchored := e.ladder.Fit(appetite.Target(conditions, bounds), bounds)
+	quote := e.stickyTarget(anchored)
+	e.rungs = ladder.Layers
 	e.reportStatus(now, conditions, estimate, quote)
 	e.reportMetrics(now, conditions, estimate, quote)
 
@@ -144,7 +149,7 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 	}
 
 	thresholds := appetite.Thresholds(quote, conditions, e.bounds)
-	distances := e.ladder.Distances(quote.Distance)
+	distances := ladder.Distances(quote.Distance)
 
 	// Опасность проверяется до ограничения темпа. Кулдаун существует, чтобы
 	// не жечь бюджет запросов на перестановках, но, стоя выше этой проверки,
@@ -876,6 +881,7 @@ func (e *Engine) reportStatus(
 		"available_usd", fmt.Sprintf("%.0f", available),
 		"per_side", e.perSide,
 		"size_limit", e.sizeLimit,
+		"rungs", e.rungs,
 	}
 	if !e.live {
 		attrs = append(attrs, "shadow_fills", e.shadowFills)

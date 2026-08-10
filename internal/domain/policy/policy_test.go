@@ -229,3 +229,46 @@ func TestAnchorKeepsTheOriginalRefusal(t *testing.T) {
 	got := Ladder{Layers: 3, SpreadBps: 1.0}.Anchor(refused, Bounds{MinBps: 5.5, MaxBps: 9.5})
 	require.Equal(t, refused, got)
 }
+
+// Ширина лесенки берётся из того же бюджета дистанции, что и сама котировка,
+// и перестаёт помещаться раньше неё. Отказ котировать в этот момент —
+// всё-или-ничего там, где есть очевидное промежуточное решение.
+func TestLadderNarrowsInsteadOfRefusing(t *testing.T) {
+	l := Ladder{Layers: 3, SpreadBps: 0.4}
+	b := Bounds{MinBps: 7.0, MaxBps: 9.5}
+
+	// Риск требует 9.2: три ступени тянутся до 10.0 и не помещаются, одна —
+	// помещается с запасом.
+	q := Quote{Distance: 9.2, Feasible: true, Reason: "risk-adjusted distance"}
+
+	require.False(t, l.Anchor(q, b).Feasible, "the full ladder does not fit")
+
+	fitted, anchored := l.Fit(q, b)
+	require.True(t, anchored.Feasible, "one rung still has a legal place in the band")
+	require.Equal(t, 1, fitted.Layers)
+	require.InDelta(t, 9.2, anchored.Distance.Float64(), 1e-9)
+}
+
+// Промежуточная ширина выбирается наибольшей из помещающихся, а не первой
+// попавшейся: ступени существуют ради присутствия во время перестановки.
+func TestLadderKeepsTheWidestFittingShape(t *testing.T) {
+	l := Ladder{Layers: 3, SpreadBps: 0.4}
+	b := Bounds{MinBps: 7.0, MaxBps: 9.5}
+
+	// 8.9 + 2 x 0.2 = 9.3 помещается при двух ступенях, при трёх нужно 9.7.
+	q := Quote{Distance: 8.9, Feasible: true}
+	fitted, anchored := l.Fit(q, b)
+
+	require.True(t, anchored.Feasible)
+	require.Equal(t, 2, fitted.Layers)
+	require.InDelta(t, 9.1, anchored.Distance.Float64(), 1e-9, "centre moves out by the half width")
+}
+
+// Когда места нет и одной ступени, отказ остаётся отказом.
+func TestNoRoomAtAllStillRefuses(t *testing.T) {
+	l := Ladder{Layers: 3, SpreadBps: 0.4}
+	b := Bounds{MinBps: 7.0, MaxBps: 9.5}
+
+	_, anchored := l.Fit(Quote{Feasible: false, Reason: "risk demands more than the band"}, b)
+	require.False(t, anchored.Feasible)
+}

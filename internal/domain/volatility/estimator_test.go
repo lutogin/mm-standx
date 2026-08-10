@@ -384,3 +384,52 @@ func TestZeroMultipleLeavesTheRecordUnbounded(t *testing.T) {
 
 	require.Greater(t, off.Estimate(at).JumpBps.Float64(), 13.0)
 }
+
+// Разрыв соединения сам по себе не доказывает, что рынок стал другим.
+//
+// 10 августа биржа отдала 36 разрывов за восемь часов, почти все короче секунды
+// (502 на редиале). Пока окно обнулялось на каждом, актор терял минуту прогрева
+// per разрыв — минуту присутствия, то есть предмета заработка, — и, что хуже,
+// оставался с неограниченной памятью: Estimate.bounded требует Ready.
+func TestShortGapKeepsTheWindowAndTheRightToQuote(t *testing.T) {
+	e := New(config())
+	moves := make([]float64, 60)
+	for i := range moves {
+		moves[i] = 0.2
+	}
+	at := feed(e, money.MustParsePrice("4300"), moves)
+
+	before := e.Estimate(at)
+	require.True(t, before.Ready)
+
+	// Пять тактов тишины: больше терпимости к пропуску, меньше перерыва.
+	at = at.Add(15 * time.Second)
+	e.Observe(money.MustParsePrice("4305"), at)
+
+	after := e.Estimate(at)
+	require.True(t, after.Ready, "a blink must not cost the right to quote")
+	require.Equal(t, before.Samples, after.Samples,
+		"the splice is skipped as a sample, but the window survives")
+}
+
+// Настоящий перерыв — другое дело: накопленные замеры описывают рынок,
+// которого больше нет, и право котировать зарабатывается заново.
+func TestLongOutageForgetsTheWindow(t *testing.T) {
+	cfg := config()
+	cfg.MemoryHalfLife = 6 * time.Hour
+	e := New(cfg)
+	moves := make([]float64, 60)
+	for i := range moves {
+		moves[i] = 0.2
+	}
+	at := feed(e, money.MustParsePrice("4300"), moves)
+	require.True(t, e.Estimate(at).Ready)
+
+	at = at.Add(2 * time.Minute)
+	e.Observe(money.MustParsePrice("4330"), at)
+
+	out := e.Estimate(at)
+	require.False(t, out.Ready, "the window no longer describes this market")
+	require.Zero(t, out.Samples)
+	require.Positive(t, out.MemoryBps, "the record of large jumps outlives the window")
+}

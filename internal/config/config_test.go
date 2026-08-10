@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/nd/mm-standx/internal/domain/economics"
 	"github.com/nd/mm-standx/internal/domain/market"
 	"github.com/nd/mm-standx/internal/secret"
 )
@@ -81,15 +82,43 @@ func liveEconomicConfig(allocation, rewardLowerBound float64) *Config {
 	return cfg
 }
 
-func TestLiveScalingRequiresARewardLowerBoundAboveBreakEven(t *testing.T) {
-	unknown := liveEconomicConfig(1_000, 0)
-	require.ErrorContains(t, unknown.Validate(), "exceeds the 60.00 USD calibration cap")
+// Экономические ворота — политика, а не корректность конфигурации, и падать
+// на них процесс не имеет права.
+//
+// Разница видна по последствию. Валидация роняет старт, а деплой на упавший
+// старт откатывается на предыдущий образ и продолжает работать: 10 августа три
+// подряд выкатки упали на «allocation 400.00 USD exceeds the 60.00 USD
+// calibration cap», каждая молча вернула образ двухдневной давности, и прод
+// двое суток крутил старый код при внешне исправном контуре.
+//
+// Запрет никуда не делся — он живёт в Engine.evaluate, где виден в сводке
+// и в метриках. Проверяется в TestEconomicGateStopsQuotingInsteadOfTheProcess.
+func TestEconomicsDoesNotBlockStartup(t *testing.T) {
+	for _, rewardLowerBound := range []float64{0, 20, 30} {
+		cfg := liveEconomicConfig(1_000, rewardLowerBound)
+		require.NoError(t, cfg.Validate(),
+			"reward lower bound %.0f must not keep the process from starting", rewardLowerBound)
+	}
+}
 
-	unprofitable := liveEconomicConfig(1_000, 20)
-	require.ErrorContains(t, unprofitable.Validate(), "below the 22.00 USD/MH break-even")
+// Сами ворота при этом обязаны выносить прежний вердикт.
+func TestEconomicGateStillRejectsUnprovenScaling(t *testing.T) {
+	gate := func(allocation, rewardLowerBound float64) economics.Decision {
+		cfg := liveEconomicConfig(allocation, rewardLowerBound).Symbols["XAU-USD"]
+		return economics.Gate{
+			RewardRateLowerBoundUSDPerMakerHour: cfg.Economics.RewardRateLowerBoundUSDPerMakerHour,
+			BreakEvenUSDPerMakerHour:            cfg.Economics.BreakEvenUSDPerMakerHour,
+			CalibrationMaxAllocationUSD:         cfg.Economics.CalibrationMaxAllocationUSD,
+		}.Evaluate(cfg.AllocationUSD, 1, 1)
+	}
 
-	profitable := liveEconomicConfig(1_000, 30)
-	require.NoError(t, profitable.Validate())
+	require.Contains(t, gate(1_000, 0).Reason, "exceeds the 60.00 USD calibration cap")
+	require.False(t, gate(1_000, 0).Allowed)
+
+	require.Contains(t, gate(1_000, 20).Reason, "below the 22.00 USD/MH break-even")
+	require.False(t, gate(1_000, 20).Allowed)
+
+	require.True(t, gate(1_000, 30).Allowed)
 }
 
 func TestEnabledSymbols(t *testing.T) {

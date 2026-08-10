@@ -9,7 +9,6 @@ import (
 
 	"github.com/shopspring/decimal"
 
-	"github.com/nd/mm-standx/internal/domain/economics"
 	"github.com/nd/mm-standx/internal/domain/money"
 	"github.com/nd/mm-standx/internal/domain/policy"
 	"github.com/nd/mm-standx/internal/domain/trading"
@@ -285,16 +284,21 @@ func (s Symbol) validate(name string, band money.Bps, tiers []UptimeTier, live b
 	if s.SymbolRisk.Leverage < 1 {
 		errs = append(errs, fmt.Errorf("%s.risk.leverage must be at least 1", prefix))
 	}
-	if live && s.Enabled {
-		gate := economics.Gate{
-			RewardRateLowerBoundUSDPerMakerHour: s.Economics.RewardRateLowerBoundUSDPerMakerHour,
-			BreakEvenUSDPerMakerHour:            s.Economics.BreakEvenUSDPerMakerHour,
-			CalibrationMaxAllocationUSD:         s.Economics.CalibrationMaxAllocationUSD,
-		}
-		if decision := gate.Evaluate(s.AllocationUSD, 1, 1); !decision.Allowed {
-			errs = append(errs, fmt.Errorf("%s: live quoting is economically blocked: %s", prefix, decision.Reason))
-		}
-	}
+	// Экономические ворота намеренно не проверяются здесь.
+	//
+	// Это политика, а не корректность конфигурации, и разница видна по тому,
+	// чем оборачивается ошибка. Валидация роняет процесс на старте — а деплой
+	// на такое падение откатывается на предыдущий образ и продолжает работать.
+	// 10 августа так и вышло: три подряд выкатки упали на «allocation 400.00
+	// USD exceeds the 60.00 USD calibration cap», каждая молча вернула образ
+	// двухдневной давности, и прод двое суток крутил старый код при зелёном,
+	// как казалось, контуре. Отказ, который выглядит как работающая система, —
+	// худший из возможных.
+	//
+	// Ворота остаются там, где им место: в Engine.evaluate, где они запрещают
+	// котировать с причиной в сводке и в mm_withdrawals_total{cause="economics"},
+	// а после пяти минут молчания поднимаются в ERROR. Процесс при этом жив,
+	// метрики отвечают, и видно, что именно он отказывается делать.
 	return errs
 }
 
