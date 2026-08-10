@@ -268,6 +268,17 @@ defaults:
   risk:
     leverage: 4
     maxNetPositionBase: "0" # 0 — закрывать любую позицию немедленно
+  # External venue whose price leads the exchange mark. Off by default and
+  # named per instrument: a symbol that tracks a different underlying is worse
+  # than no feed, because a wrong signal is still acted upon.
+  #
+  # The feed is advisory. Losing it returns the bot to the picture it had
+  # before — the drift of the exchange's own book mid — and never stops
+  # quoting on its own.
+  reference:
+    enabled: false
+    provider: binance_futures # binance_futures | binance_spot | bybit_linear | bybit_spot
+    symbol: ""
 
 # Параметры начисления публикуются StandX и меняются оперативной командой:
 # https://docs.standx.com/docs/standx-perps-solutions/community-maker-yield
@@ -297,6 +308,14 @@ symbols:
         # The exchange publishes no machine-readable holiday calendar, so this
         # list is maintained by hand. Empty is not a claim that there are none.
         holidays: []
+    # Binance USD-M XAUUSDT, a TradFi-tracking perpetual: 1.26 bn USD of quote
+    # volume and 875k trades a day at a 0.02 bps spread, measured 10 August.
+    # An order of magnitude past Bybit's book on the same underlying, and the
+    # only venue where gold moves before the exchange mark shows it.
+    reference:
+      enabled: true
+      provider: binance_futures
+      symbol: XAUUSDT
 
   # Единственная реальная альтернатива: стакан глубже золотого, но полоса
   # награды съедена волатильностью — проигрывает при любом $/MH.
@@ -304,19 +323,24 @@ symbols:
     enabled: false
     allocationUsd: 60
     program: { unitSize: "2", perSideCap: "20", maxMakerHoursPerHour: 10 }
+    reference: { enabled: true, provider: binance_futures, symbol: BTCUSDT }
 
   ETH-USD:
     enabled: false
     program: { unitSize: "60", perSideCap: "600", maxMakerHoursPerHour: 10 }
+    reference: { enabled: true, provider: binance_futures, symbol: ETHUSDT }
   SOL-USD:
     enabled: false
     program: { unitSize: "1500", perSideCap: "15000", maxMakerHoursPerHour: 10 }
+    reference: { enabled: true, provider: binance_futures, symbol: SOLUSDT }
   BNB-USD:
     enabled: false
     program: { unitSize: "300", perSideCap: "3000", maxMakerHoursPerHour: 10 }
+    reference: { enabled: true, provider: binance_futures, symbol: BNBUSDT }
   HYPE-USD:
     enabled: false
     program: { unitSize: "4000", perSideCap: "40000", maxMakerHoursPerHour: 10 }
+    reference: { enabled: true, provider: binance_futures, symbol: HYPEUSDT }
 
   # Металлы: спред шире, движение рваное — см. PLAN.md §1.4.
   XAG-USD:
@@ -339,6 +363,7 @@ symbols:
         # The exchange publishes no machine-readable holiday calendar, so this
         # list is maintained by hand. Empty is not a claim that there are none.
         holidays: []
+    reference: { enabled: true, provider: binance_futures, symbol: XAGUSDT }
   CL-USD:
     enabled: false
     program:
@@ -359,6 +384,12 @@ symbols:
         # The exchange publishes no machine-readable holiday calendar, so this
         # list is maintained by hand. Empty is not a claim that there are none.
         holidays: []
+
+  # Oil and the equities are left without a reference on purpose. A venue that
+  # lists the ticker is not the same thing as a venue where it leads, and an
+  # unverified mapping is worse than none: a wrong signal is still acted upon.
+  # Fill one in only after checking the venue's own turnover on that symbol,
+  # the way XAUUSDT was checked above.
 
   # Акции: гэпы на открытии и закрытии базового рынка.
   TSLA-USD:

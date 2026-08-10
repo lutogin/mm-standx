@@ -160,6 +160,15 @@ func defaults() *Config {
 				Leverage:           4,
 				MaxNetPositionBase: "0",
 			},
+			Reference: Reference{
+				// Off by default: an external symbol that does not track the same
+				// underlying is worse than no feed at all, because a wrong signal
+				// is still acted upon. It has to be named per instrument and
+				// switched on deliberately.
+				Enabled:  false,
+				Provider: ProviderBinanceFutures,
+				Symbol:   "",
+			},
 		},
 		Symbols: map[string]Symbol{},
 	}

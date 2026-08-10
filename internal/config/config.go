@@ -191,6 +191,49 @@ type Symbol struct {
 	Program       Program    `koanf:"program"`
 	Uptime        Uptime     `koanf:"uptime"`
 	SymbolRisk    SymbolRisk `koanf:"risk"`
+	Reference     Reference  `koanf:"reference"`
+}
+
+// Reference identifies the external venue whose price leads this instrument.
+//
+// The exchange publishes its mark about once every three seconds. What reaches
+// a resting quote inside that window is arbitrage against a move that already
+// happened on a faster venue, so watching that venue is watching the cause
+// rather than the effect.
+//
+// The feed is advisory by construction. Losing it degrades the fast signal and
+// must never stop quoting: the bot falls back to what it can see on the
+// exchange itself. That is the whole reason there is no "required" flag here.
+type Reference struct {
+	Enabled bool `koanf:"enabled"`
+	// Provider names the venue and market type, see the Provider* constants.
+	Provider string `koanf:"provider"`
+	// Symbol is the instrument as that venue names it, for example BTCUSDT.
+	// It must track the same underlying: a mismatch is worse than no feed,
+	// because a wrong signal is still acted upon.
+	Symbol string `koanf:"symbol"`
+}
+
+// Supported reference providers.
+//
+// The vocabulary lives here rather than in the adapter because the adapter
+// depends on this package for connection settings, and the reverse dependency
+// would close a cycle.
+const (
+	ProviderBinanceFutures = "binance_futures"
+	ProviderBinanceSpot    = "binance_spot"
+	ProviderBybitLinear    = "bybit_linear"
+	ProviderBybitSpot      = "bybit_spot"
+)
+
+// ReferenceProviders lists every supported venue in a stable order.
+func ReferenceProviders() []string {
+	return []string{
+		ProviderBinanceFutures,
+		ProviderBinanceSpot,
+		ProviderBybitLinear,
+		ProviderBybitSpot,
+	}
 }
 
 // Economics contains the measured unit economics for one market.

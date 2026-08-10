@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -277,6 +278,9 @@ func (s Symbol) validate(name string, band money.Bps, tiers []UptimeTier, live b
 			prefix, s.Uptime.HardFloorPct, tiers[0].ThresholdPct))
 	}
 	errs = append(errs, s.Volatility.validate(prefix+".volatility")...)
+	// Checked for disabled instruments too, for the same reason as the shutdown
+	// window: a typo would otherwise surface when the instrument is switched on.
+	errs = append(errs, s.Reference.validate(prefix+".reference")...)
 	if s.Enabled {
 		errs = append(errs, s.Program.validate(prefix+".program")...)
 	}
@@ -472,6 +476,30 @@ func validateOffHours(prefix string, p Program) []error {
 		errs = append(errs, fmt.Errorf(
 			"%s: an offHours window is set but offHoursMultiplier is %.2f, so the window has no effect",
 			prefix, p.OffHoursMultiplier))
+	}
+	return errs
+}
+
+// validate checks the external reference feed.
+//
+// A disabled feed is left alone: naming a venue for an instrument that is not
+// watched costs nothing. An enabled one must be complete, because the failure
+// it would otherwise produce is silent — a feed that never connects looks
+// exactly like a feed on a quiet market.
+func (r Reference) validate(prefix string) []error {
+	if !r.Enabled {
+		return nil
+	}
+
+	var errs []error
+	if !slices.Contains(ReferenceProviders(), r.Provider) {
+		errs = append(errs, fmt.Errorf("%s.provider: unsupported value %q, known: %s",
+			prefix, r.Provider, strings.Join(ReferenceProviders(), ", ")))
+	}
+	if strings.TrimSpace(r.Symbol) == "" {
+		errs = append(errs, fmt.Errorf(
+			"%s.symbol is required for an enabled feed: it names the instrument on the venue, for example BTCUSDT",
+			prefix))
 	}
 	return errs
 }

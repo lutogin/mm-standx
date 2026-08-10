@@ -15,8 +15,11 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"text/tabwriter"
 	"time"
+
+	"github.com/nd/mm-standx/internal/adapters/reference"
 )
 
 type entry struct {
@@ -36,6 +39,18 @@ type message struct {
 	} `json:"data"`
 }
 
+// sample is one observation of a price at a point in time.
+type sample struct {
+	at    time.Time
+	price float64
+}
+
+// top is one observation of both sides of the exchange book.
+type top struct {
+	at       time.Time
+	bid, ask float64
+}
+
 // series accumulates statistics for one instrument.
 type series struct {
 	markCount  int
@@ -48,10 +63,32 @@ type series struct {
 	gapsMs  []float64 // intervals between consecutive mark updates
 	movesBp []float64 // absolute move between consecutive mark updates
 	spreads []float64
+
+	// Raw series, kept in arrival order. The aggregates above answer "how does
+	// this market behave"; these answer "would the external venue have warned
+	// us", and that question needs the timeline itself, not its quantiles.
+	marks []sample
+	tops  []top
+	refs  []sample
+
+	// decoder recognises the reference venue from its own frames, so a recording
+	// stays readable without today's configuration.
+	decoder *reference.Decoder
+	venue   string
 }
 
 func main() {
 	dir := flag.String("dir", "recordings", "directory holding the recordings")
+	opts := leadOptions{}
+	flag.DurationVar(&opts.grid, "grid", 250*time.Millisecond, "resampling step for the lead-lag correlation")
+	flag.DurationVar(&opts.maxLag, "max-lag", 6*time.Second, "widest lead-lag shift to examine")
+	flag.Float64Var(&opts.quoteBps, "quote-bps", 7, "hypothetical quote distance from the mark, bps")
+	flag.DurationVar(&opts.excursion, "excursion", time.Second,
+		"trailing window over which the reference excursion is measured")
+	flag.DurationVar(&opts.lookback, "lookback", 5*time.Second,
+		"how far back from a touch a warning still counts")
+	flag.DurationVar(&opts.reaction, "reaction", 400*time.Millisecond,
+		"time the bot needs to pull a quote; a warning later than this is useless")
 	flag.Parse()
 
 	files, err := filepath.Glob(filepath.Join(*dir, "*.ndjson"))
@@ -73,6 +110,7 @@ func main() {
 	}
 
 	report(files, lines, stats)
+	reportReference(stats, opts)
 }
 
 func scan(name string, stats map[string]*series) (int, error) {
@@ -92,6 +130,17 @@ func scan(name string, stats map[string]*series) (int, error) {
 		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
 			continue
 		}
+		at := time.UnixMicro(e.Received)
+
+		// The reference feed writes raw venue frames, which share no envelope
+		// with the exchange's own channels. The exchange instrument is carried
+		// by the stream name so that the mapping does not have to be recovered
+		// from another venue's naming conventions.
+		if symbol, ok := referenceSymbol(e.Stream); ok {
+			observeReference(seriesFor(stats, symbol, at), e.Payload, at)
+			continue
+		}
+
 		var m message
 		if err := json.Unmarshal(e.Payload, &m); err != nil {
 			continue
@@ -105,25 +154,55 @@ func scan(name string, stats map[string]*series) (int, error) {
 			continue
 		}
 
-		s := stats[symbol]
-		if s == nil {
-			s = &series{}
-			stats[symbol] = s
-		}
-		at := time.UnixMicro(e.Received)
-		if s.firstAt.IsZero() {
-			s.firstAt = at
-		}
-		s.lastAt = at
-
+		s := seriesFor(stats, symbol, at)
 		switch m.Channel {
 		case "price":
 			observeMark(s, m.Data.MarkPrice, at)
 		case "depth_book":
-			observeBook(s, m.Data.Bids, m.Data.Asks)
+			observeBook(s, m.Data.Bids, m.Data.Asks, at)
 		}
 	}
 	return count, scanner.Err()
+}
+
+// seriesFor returns the accumulator for an instrument, extending its span.
+func seriesFor(stats map[string]*series, symbol string, at time.Time) *series {
+	s := stats[symbol]
+	if s == nil {
+		s = &series{decoder: reference.NewDecoder()}
+		stats[symbol] = s
+	}
+	if s.firstAt.IsZero() {
+		s.firstAt = at
+	}
+	s.lastAt = at
+	return s
+}
+
+// referenceSymbol extracts the exchange instrument from a recorded stream name.
+func referenceSymbol(stream string) (string, bool) {
+	const prefix = "reference["
+	if !strings.HasPrefix(stream, prefix) || !strings.HasSuffix(stream, "]") {
+		return "", false
+	}
+	symbol := stream[len(prefix) : len(stream)-1]
+	return symbol, symbol != ""
+}
+
+func observeReference(s *series, payload []byte, at time.Time) {
+	mid, ok := s.decoder.Mid(payload)
+	if !ok {
+		return
+	}
+	price, _ := mid.Decimal().Float64()
+	if price <= 0 {
+		return
+	}
+	if s.venue == "" {
+		provider, venueSymbol := s.decoder.Venue()
+		s.venue = provider + "/" + venueSymbol
+	}
+	s.refs = append(s.refs, sample{at: at, price: price})
 }
 
 func observeMark(s *series, raw string, at time.Time) {
@@ -138,9 +217,10 @@ func observeMark(s *series, raw string, at time.Time) {
 		s.movesBp = append(s.movesBp, math.Abs(mark-s.lastMark)/s.lastMark*10_000)
 	}
 	s.lastMark, s.lastMarkAt = mark, at
+	s.marks = append(s.marks, sample{at: at, price: mark})
 }
 
-func observeBook(s *series, bids, asks [][2]string) {
+func observeBook(s *series, bids, asks [][2]string, at time.Time) {
 	s.bookCount++
 	if len(bids) == 0 || len(asks) == 0 {
 		return
@@ -159,6 +239,7 @@ func observeBook(s *series, bids, asks [][2]string) {
 	}
 	if bestBid > 0 && bestAsk < math.MaxFloat64 && bestAsk > bestBid {
 		s.spreads = append(s.spreads, (bestAsk-bestBid)/bestBid*10_000)
+		s.tops = append(s.tops, top{at: at, bid: bestBid, ask: bestAsk})
 	}
 }
 

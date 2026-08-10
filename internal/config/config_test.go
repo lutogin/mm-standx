@@ -433,6 +433,63 @@ func TestShippedConfigLoads(t *testing.T) {
 	}.HalfWidth()
 	require.GreaterOrEqual(t, (gold.Appetite.MinDeadBandBps - half).Float64(), 0.5,
 		"the outer rungs need real margin, not the boundary the start-up check accepts")
+
+	// Внешний ориентир — единственный сигнал, приходящий раньше движения mark.
+	// Без него быстрый путь опирается на середину стакана, которая двигается
+	// тем же ордером, что нас и исполняет, то есть предупреждает нулём.
+	require.True(t, gold.Reference.Enabled, "the traded instrument needs a leading reference")
+	require.Equal(t, ProviderBinanceFutures, gold.Reference.Provider)
+	require.Equal(t, "XAUUSDT", gold.Reference.Symbol)
+}
+
+// Включённый ориентир без символа никогда не подключится, и молчащий фид
+// выглядит в точности как фид на спокойном рынке.
+func TestEnabledReferenceRequiresSymbol(t *testing.T) {
+	_, err := Load(writeConfig(t, `
+symbols:
+  BTC-USD:
+    enabled: false
+    reference:
+      enabled: true
+      provider: binance_futures
+      symbol: ""
+`))
+	require.ErrorContains(t, err, "reference.symbol is required")
+}
+
+func TestReferenceProviderMustBeKnown(t *testing.T) {
+	_, err := Load(writeConfig(t, `
+symbols:
+  BTC-USD:
+    enabled: false
+    reference: { enabled: true, provider: kraken, symbol: BTCUSD }
+`))
+	require.ErrorContains(t, err, "reference.provider: unsupported value \"kraken\"")
+}
+
+// Ориентир проверяется и у выключенного инструмента: опечатка иначе всплывёт
+// в тот момент, когда инструмент включают, то есть в проде.
+func TestReferenceIsValidatedForDisabledSymbols(t *testing.T) {
+	_, err := Load(writeConfig(t, `
+symbols:
+  SOL-USD:
+    enabled: false
+    reference: { enabled: true, provider: binance_futures, symbol: "" }
+`))
+	require.ErrorContains(t, err, "symbols.SOL-USD.reference.symbol is required")
+}
+
+// Выключенный ориентир не обязан быть заполненным: назвать площадку для
+// инструмента, за которым не следят, незачем.
+func TestDisabledReferenceNeedsNothing(t *testing.T) {
+	cfg, err := Load(writeConfig(t, `
+symbols:
+  SOL-USD:
+    enabled: false
+    reference: { enabled: false, provider: "", symbol: "" }
+`))
+	require.NoError(t, err)
+	require.False(t, cfg.Symbols["SOL-USD"].Reference.Enabled)
 }
 
 // Дистанция — первый параметр, который придётся править под давлением, а

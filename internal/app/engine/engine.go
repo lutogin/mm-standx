@@ -527,6 +527,19 @@ func (e *Engine) handle(ctx context.Context, ev events.Event) {
 	case events.MarkPriceStale:
 		e.withdraw(ctx, ports.CauseStaleMark, "no mark price updates")
 	case events.StreamDisconnected:
+		// Разрыв необязательного потока не отменяет права котировать.
+		//
+		// Внешний ориентир улучшает быстрый сигнал, но не является его
+		// единственным источником: без него актор возвращается к смещению
+		// середины стакана, то есть ровно к той картине, по которой работал
+		// до появления фида. Снимать котировки в этом случае значило бы платить
+		// присутствием — единственным, за что здесь платят, — за сбой на чужой
+		// площадке.
+		if v.Optional {
+			e.deps.Log.Warn("optional stream disconnected, continuing on exchange data",
+				"symbol", e.symbol, "stream", v.Stream, "error", v.Reason)
+			return
+		}
 		// Окно наблюдений здесь намеренно не сбрасывается.
 		//
 		// Склейку через паузу закрывает сам оценщик: разность за пропуск длиннее

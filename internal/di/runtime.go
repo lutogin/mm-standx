@@ -13,6 +13,7 @@ import (
 	"go.uber.org/fx"
 
 	"github.com/nd/mm-standx/internal/adapters/metrics"
+	"github.com/nd/mm-standx/internal/adapters/reference"
 	"github.com/nd/mm-standx/internal/adapters/standx/auth"
 	"github.com/nd/mm-standx/internal/adapters/standx/wsapi"
 	"github.com/nd/mm-standx/internal/adapters/standx/wsstream"
@@ -42,6 +43,7 @@ import (
 var Runtime = fx.Module("runtime",
 	fx.Provide(
 		fx.Annotate(provideStreams, fx.ResultTags(`group:"runnables,flatten"`)),
+		fx.Annotate(provideReferenceFeeds, fx.ResultTags(`group:"runnables,flatten"`)),
 		fx.Annotate(provideMetricsServer, fx.As(new(ports.Runnable)), fx.ResultTags(`group:"runnables"`)),
 		fx.Annotate(provideRiskGuard, fx.As(new(ports.Runnable)), fx.ResultTags(`group:"runnables"`)),
 		fx.Annotate(provideWatchdog, fx.As(new(ports.Runnable)), fx.ResultTags(`group:"runnables"`)),
@@ -116,6 +118,36 @@ func provideStreams(
 		streams = append(streams, orderAPI.Runnable())
 	}
 	return streams
+}
+
+// provideReferenceFeeds поднимает по одному соединению с внешней площадкой
+// на каждый инструмент, для которого она названа.
+//
+// Соединение на инструмент, а не одно общее: площадки различаются, символы
+// тоже, и разрыв ориентира по одному инструменту не должен трогать другой.
+// Инструментов у нас единицы, поэтому экономить сокеты незачем.
+func provideReferenceFeeds(
+	cfg *config.Config,
+	bus *events.Bus,
+	clk ports.Clock,
+	rec ports.Recorder,
+	log *slog.Logger,
+) ([]ports.Runnable, error) {
+	var feeds []ports.Runnable
+	for _, symbol := range sortedSymbols(cfg) {
+		ref := cfg.Symbols[symbol.String()].Reference
+		if !ref.Enabled {
+			continue
+		}
+		feed, err := reference.New(symbol, ref, cfg.Exchange, bus, clk, rec, log)
+		if err != nil {
+			return nil, fmt.Errorf("reference feed for %s: %w", symbol, err)
+		}
+		log.Info("external reference feed enabled",
+			"symbol", symbol, "provider", ref.Provider, "venue_symbol", ref.Symbol)
+		feeds = append(feeds, feed)
+	}
+	return feeds, nil
 }
 
 func provideWatchdog(cfg *config.Config, bus *events.Bus, clk ports.Clock, log *slog.Logger) *watchdog.Watchdog {
