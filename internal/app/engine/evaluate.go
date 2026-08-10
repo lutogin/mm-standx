@@ -861,6 +861,14 @@ func (e *Engine) reportStatus(
 		"depth_ask_usd", fmt.Sprintf("%.0f", askDepth),
 		"jump", estimate.JumpBps,
 		"jump_effective", conditions.JumpBps,
+		// Мера риска — большее из живого окна и затухающего рекорда, и по одному
+		// итогу нельзя сказать, какое из двух держит бота вне рынка. Разница
+		// решает, что чинить: длину окна или ограничение памяти. Поля для этого
+		// в Estimate заведены с самого начала, а в сводку не попадали — 10 августа
+		// сорокаминутный простой пришлось раскладывать по скорости распада
+		// значения между строками лога.
+		"jump_window", estimate.WindowMaxBps,
+		"jump_memory", estimate.MemoryBps,
 		"samples", estimate.Samples,
 		"tick", estimate.Tick,
 		"confidence", fmt.Sprintf("%.0f%%", estimate.Confidence*100),
