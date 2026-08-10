@@ -20,6 +20,7 @@ import (
 	"github.com/nd/mm-standx/internal/app/account"
 	"github.com/nd/mm-standx/internal/app/engine"
 	"github.com/nd/mm-standx/internal/app/heartbeat"
+	"github.com/nd/mm-standx/internal/app/news"
 	"github.com/nd/mm-standx/internal/app/observer"
 	"github.com/nd/mm-standx/internal/app/risk"
 	"github.com/nd/mm-standx/internal/app/stats"
@@ -44,6 +45,7 @@ var Runtime = fx.Module("runtime",
 	fx.Provide(
 		fx.Annotate(provideStreams, fx.ResultTags(`group:"runnables,flatten"`)),
 		fx.Annotate(provideReferenceFeeds, fx.ResultTags(`group:"runnables,flatten"`)),
+		fx.Annotate(provideNewsPoller, fx.ResultTags(`group:"runnables,flatten"`)),
 		fx.Annotate(provideMetricsServer, fx.As(new(ports.Runnable)), fx.ResultTags(`group:"runnables"`)),
 		fx.Annotate(provideRiskGuard, fx.As(new(ports.Runnable)), fx.ResultTags(`group:"runnables"`)),
 		fx.Annotate(provideWatchdog, fx.As(new(ports.Runnable)), fx.ResultTags(`group:"runnables"`)),
@@ -148,6 +150,33 @@ func provideReferenceFeeds(
 		feeds = append(feeds, feed)
 	}
 	return feeds, nil
+}
+
+// provideNewsPoller поднимает чтение календаря экономических публикаций.
+//
+// Один поллер на процесс, а не на инструмент: расписание общее, а публикация
+// CPI — один и тот же факт для каждого долларового рынка на доске.
+//
+// Возвращается срез, чтобы выключенный календарь просто не давал компонента:
+// пустой поллер, исправно опрашивающий никого, выглядел бы в логе работающим.
+func provideNewsPoller(
+	cfg *config.Config,
+	source ports.NewsSource,
+	bus *events.Bus,
+	clk ports.Clock,
+	log *slog.Logger,
+) []ports.Runnable {
+	if !cfg.News.Enabled {
+		log.Info("news blackout disabled: scheduled releases will not stop quoting")
+		return nil
+	}
+	return []ports.Runnable{news.New(news.Config{
+		Refresh: cfg.News.Refresh,
+		MaxAge:  cfg.News.MaxAge,
+		Filter:  cfg.News.Filter(),
+		Policy:  cfg.News.Policy(),
+		Timeout: cfg.News.Timeout,
+	}, source, bus, clk, log)}
 }
 
 func provideWatchdog(cfg *config.Config, bus *events.Bus, clk ports.Clock, log *slog.Logger) *watchdog.Watchdog {
@@ -328,7 +357,14 @@ func provideEngines(
 				// сигнала тогда не задействуется вовсе, а это отличается
 				// от «настроен и молчит».
 				ReferenceStaleAfter: referenceStaleAfter(symCfg.Reference),
-				MaxNetPosition:      maxPosition,
+				News: engine.NewsGuard{
+					Enabled:               cfg.News.Enabled,
+					MaxAge:                cfg.News.MaxAge,
+					FailOpen:              cfg.News.FailOpen,
+					DefensiveInsetBps:     cfg.News.DefensiveInsetBps,
+					DefensiveSizeMultiple: cfg.News.DefensiveSizeMultiple,
+				},
+				MaxNetPosition: maxPosition,
 			},
 			engine.Deps{
 				Gateway: gateway,

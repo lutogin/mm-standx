@@ -182,6 +182,7 @@ docker compose pull && docker compose up -d
 | --- | --- | --- |
 | Состояние сейчас | `curl localhost:9090/metrics` | — |
 | Чем питаются пороги опасности | `fast_signal` в строке `engine status`, `mm_reference_staleness_seconds` | — |
+| Поза по календарю публикаций | `news` в строке `engine status`, `mm_withdrawals_total{cause="news_*"}` | — |
 | Прямо сейчас | `data/stats/current.json` — незавершённый час, обновляется раз в 10 мин | — |
 | История по часам | `data/stats/hourly-*.ndjson`, забирается `scp` | 110 КБ/сутки |
 | Разбор инцидента | логи процесса, причины съёма с измеренными величинами | ~20 МБ/сутки |

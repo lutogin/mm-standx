@@ -118,7 +118,6 @@ func (t Thresholds) Validate() error {
 		{"panic", t.PanicBps},
 		{"minKeep", t.MinKeepBps},
 		{"target", t.TargetBps},
-		{"maxKeep", t.MaxKeepBps},
 	}
 	if t.PullBps < 0 {
 		return fmt.Errorf("policy: pull threshold must not be negative, got %s", t.PullBps)
@@ -131,6 +130,22 @@ func (t Thresholds) Validate() error {
 	}
 	if t.MaxKeepBps > t.BandBps {
 		return fmt.Errorf("policy: maxKeep (%s) must not exceed the reward band (%s)", t.MaxKeepBps, t.BandBps)
+	}
+	// Мёртвая зона над целью вправе схлопнуться, но только об край полосы.
+	//
+	// Требуемая дистанция может лечь ровно на край: полспреда плюс скачки плюс
+	// пол складываются в 9.5 при полосе 9.5, и тогда MaxKeep, обрезанный
+	// полосой, совпадает с целью. Геометрия при этом остаётся осмысленной —
+	// над краем нет ничего, во что можно было бы сдвинуться, а ордер за краем
+	// не стоит ничего и обязан переставляться немедленно. Требовать строгого
+	// неравенства здесь значило бы объявить невалидной единственную котировку,
+	// которую рынок в этот момент допускает.
+	//
+	// Найдено property-тестом 10 августа при halfSpread 0.5, jump 4.0 и поле 1.0
+	// со множителем 2.0.
+	if t.MaxKeepBps < t.TargetBps || (t.MaxKeepBps == t.TargetBps && t.MaxKeepBps != t.BandBps) {
+		return fmt.Errorf("policy: require target < maxKeep away from the band edge, got %s >= %s",
+			t.TargetBps, t.MaxKeepBps)
 	}
 	return nil
 }

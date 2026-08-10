@@ -50,6 +50,7 @@ type Config struct {
 	Reward    Reward            `koanf:"reward"`
 	Risk      Risk              `koanf:"risk"`
 	Health    Health            `koanf:"health"`
+	News      News              `koanf:"news"`
 	Defaults  Symbol            `koanf:"defaults"`
 	Symbols   map[string]Symbol `koanf:"symbols"`
 }
@@ -178,6 +179,62 @@ type Health struct {
 	ReconcileInterval time.Duration `koanf:"reconcileInterval"`
 	AckTimeout        time.Duration `koanf:"ackTimeout"`
 	HeartbeatInterval time.Duration `koanf:"heartbeatInterval"`
+}
+
+// News — блэкаут вокруг запланированных экономических публикаций.
+//
+// Единственная защита в контуре, работающая на упреждение, а не на реакцию.
+// Всё остальное отвечает на движение, которое уже началось; против публикации,
+// время которой известно заранее, это не работает вовсе — круг отмены занимает
+// около 400 мс (PLAN.md §2.4), а золото на CPI проходит десятки базисных
+// пунктов за первую секунду.
+type News struct {
+	Enabled bool `koanf:"enabled"`
+	// URL недельного календаря. Пусто — адрес по умолчанию.
+	URL string `koanf:"url"`
+	// Currencies и Impacts отбирают публикации, которые нас касаются.
+	// Пустой список не пропускает ничего: соглашение «пусто значит всё»
+	// обнуляло бы стакан на каждой мелкой цифре недели.
+	Currencies []string `koanf:"currencies"`
+	Impacts    []string `koanf:"impacts"`
+
+	// DefensiveBefore и DefensiveAfter — окно, в котором бот отходит к внешнему
+	// краю полосы и уменьшает размер, но остаётся в стакане.
+	DefensiveBefore time.Duration `koanf:"defensiveBefore"`
+	DefensiveAfter  time.Duration `koanf:"defensiveAfter"`
+	// HardBefore и HardAfter — окно, в котором бот уходит из стакана совсем.
+	HardBefore time.Duration `koanf:"hardBefore"`
+	HardAfter  time.Duration `koanf:"hardAfter"`
+
+	// DefensiveInsetBps — насколько внутрь от края полосы разрешено стоять
+	// в защитной позе. Ноль прижимает котировку вплотную к краю, где вес
+	// минимален, но зачёт ещё идёт.
+	DefensiveInsetBps money.Bps `koanf:"defensiveInsetBps"`
+	// DefensiveSizeMultiple — во сколько раз уменьшается размер в защитной позе.
+	//
+	// Урезание бесплатно по зачёту и прямо пропорционально снижает потери
+	// от исполнения: тир 0.5x берётся с медианы замеров, а её держат обычные
+	// полчаса часа, тогда как урезанные замеры попадают лишь в верхний
+	// перцентиль, который защитная поза и так отдала, уйдя к краю полосы.
+	DefensiveSizeMultiple float64 `koanf:"defensiveSizeMultiple"`
+
+	// Refresh — период повторного чтения календаря.
+	Refresh time.Duration `koanf:"refresh"`
+	// MaxAge — возраст, после которого расписанию перестают доверять.
+	MaxAge time.Duration `koanf:"maxAge"`
+	// Timeout ограничивает одно обращение к издателю.
+	Timeout time.Duration `koanf:"timeout"`
+
+	// FailOpen решает, что означает недоступный или устаревший календарь.
+	//
+	// True — котировать дальше по уже известному расписанию; недельный файл
+	// покрывает неделю вперёд, и суточная недоступность издателя сама по себе
+	// ничего не меняет. False — не котировать, пока расписание не подтверждено.
+	//
+	// По умолчанию true: остановка на сбое третьей стороны стоит присутствия
+	// каждый раз, а слепота — только в те редкие часы, когда публикацию
+	// перенесли ровно в окно недоступности.
+	FailOpen bool `koanf:"failOpen"`
 }
 
 // Symbol — настройки котирования одного инструмента.

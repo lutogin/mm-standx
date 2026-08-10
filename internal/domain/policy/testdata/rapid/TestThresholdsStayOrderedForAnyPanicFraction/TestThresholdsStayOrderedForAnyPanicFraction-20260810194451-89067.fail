@@ -1,0 +1,44 @@
+# 2026/08/10 19:44:51.843749 [TestThresholdsStayOrderedForAnyPanicFraction] [rapid] draw panicFraction: 0.89
+# 2026/08/10 19:44:51.843752 [TestThresholdsStayOrderedForAnyPanicFraction] [rapid] draw halfSpread: 0.5
+# 2026/08/10 19:44:51.843752 [TestThresholdsStayOrderedForAnyPanicFraction] [rapid] draw jump: 3.9999999999999996
+# 2026/08/10 19:44:51.843753 [TestThresholdsStayOrderedForAnyPanicFraction] [rapid] draw min: 1
+# 2026/08/10 19:44:51.843764 [TestThresholdsStayOrderedForAnyPanicFraction] 
+# 	Error Trace:	/Users/nd/projects/my/crypto/mm-standx/internal/domain/policy/adaptive_test.go:317
+# 	            				/Users/nd/go/pkg/mod/pgregory.net/rapid@v1.3.0/engine.go:458
+# 	            				/Users/nd/go/pkg/mod/pgregory.net/rapid@v1.3.0/engine.go:467
+# 	            				/Users/nd/go/pkg/mod/pgregory.net/rapid@v1.3.0/engine.go:292
+# 	            				/Users/nd/go/pkg/mod/pgregory.net/rapid@v1.3.0/engine.go:207
+# 	            				/Users/nd/projects/my/crypto/mm-standx/internal/domain/policy/adaptive_test.go:299
+# 	Error:      	Received unexpected error:
+# 	            	policy: require target < maxKeep, got 9.50bps >= 9.50bps
+# 	Test:       	TestThresholdsStayOrderedForAnyPanicFraction
+# 
+v0.4.8#13635591278769154583
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x10000000000000
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x1
+0x1
+0x33
+0x7ffffffffffff
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0

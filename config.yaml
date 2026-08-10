@@ -117,6 +117,40 @@ health:
   heartbeatInterval: 1s
 
 # Наследуется каждым инструментом; ниже переопределяются только отличия.
+# Blackout around scheduled economic releases — the only guard in the loop that
+# acts ahead of the move rather than in response to it. Everything else answers
+# a move already under way; against a release whose time is published in advance
+# that does not work at all, because a cancel takes about 400 ms round trip and
+# gold covers tens of basis points in the first second of a CPI print.
+news:
+  enabled: true
+  url: "" # empty uses the published weekly feed
+  currencies: [USD] # what the traded instruments actually react to
+  impacts: [high] # an empty list matches nothing, deliberately
+  # Fifteen minutes is not symmetry for its own sake. Ahead of the print the
+  # book thins out and quotes get picked off by anyone repositioning; after it
+  # the first minute is the move and the next quarter hour is the argument
+  # about it, when the spread is widest and the mark least trustworthy.
+  defensiveBefore: 15m
+  defensiveAfter: 15m
+  # A minute either side of the number itself: the only stretch where no
+  # distance inside the reward band is safe, so the only answer is absence.
+  hardBefore: 1m
+  hardAfter: 1m
+  # Standing back is not the same as leaving. The programme scores a percentile
+  # of the samples, so half an hour of zeros drags the whole hour down a tier
+  # or past it, while the same half hour spent at the outer edge of the band
+  # keeps the hour payable and still cuts the loss if the move arrives early.
+  defensiveInsetBps: 1.5 # room inside the band edge; the 0.8 bps ladder still fits
+  defensiveSizeMultiple: 0.5 # free in accrual terms, proportional in loss terms
+  refresh: 2h
+  maxAge: 6h
+  timeout: 15s
+  # An unavailable publisher is not a reason to stop for a day: the weekly file
+  # covers the week ahead, and the known releases stay true. Set false to refuse
+  # to quote until the calendar is confirmed.
+  failOpen: true
+
 defaults:
   enabled: false
   allocationUsd: 0

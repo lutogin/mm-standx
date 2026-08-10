@@ -15,6 +15,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"github.com/nd/mm-standx/internal/config"
+	"github.com/nd/mm-standx/internal/domain/calendar"
 	"github.com/nd/mm-standx/internal/domain/economics"
 	"github.com/nd/mm-standx/internal/domain/market"
 	"github.com/nd/mm-standx/internal/domain/money"
@@ -80,6 +81,8 @@ type Params struct {
 	// быстрый сигнал к середине стакана. Ноль означает, что ориентир для
 	// инструмента не настроен, и путь не задействуется вовсе.
 	ReferenceStaleAfter time.Duration
+	// News — блэкаут вокруг запланированных публикаций.
+	News NewsGuard
 
 	// MaxNetPosition — экспозиция, выше которой актор перестаёт котировать
 	// и закрывает позицию. Ноль означает, что позиция не допускается вовсе:
@@ -106,6 +109,7 @@ type Engine struct {
 	// refStaleAfter — сколько молчания делает ориентир непригодным.
 	// Ноль означает, что ориентир для инструмента не настроен вовсе.
 	refStaleAfter time.Duration
+	newsGuard     NewsGuard
 
 	bids *quotes.Ladder
 	asks *quotes.Ladder
@@ -136,6 +140,18 @@ type Engine struct {
 	// referenceWaitSince — с какого момента актор ждёт первую цену ориентира.
 	// Нужен, чтобы возраст в метрике оставался конечным до её прихода.
 	referenceWaitSince time.Time
+
+	// Календарь публикаций и момент, когда его последний раз удалось прочитать.
+	//
+	// Хранится расписание целиком, а не текущая поза: поза вычисляется по
+	// собственным часам на каждом пересчёте. Сообщение о переходе могло бы
+	// не прийти, и тогда актор стоял бы в стакане на публикации либо
+	// не возвращался после неё; расписание же остаётся верным независимо
+	// от того, пришло ли следующее сообщение.
+	news        calendar.Calendar
+	newsFetched time.Time
+	// newsPosture помнит предыдущую позу: переход печатается один раз.
+	newsPosture calendar.Posture
 
 	// Состояние счёта.
 	position  money.Qty
@@ -266,6 +282,7 @@ func New(p Params, deps Deps) *Engine {
 		bounds:         p.Bounds,
 		maxNetPosition: p.MaxNetPosition,
 		refStaleAfter:  p.ReferenceStaleAfter,
+		newsGuard:      p.News,
 		ladder:         policy.Ladder{Layers: layers, SpreadBps: p.Config.Quote.LadderSpreadBps},
 		rules: quotes.Rules{
 			MinRest:    p.Config.Quote.MinRest,
@@ -462,6 +479,9 @@ func (e *Engine) subscribe() {
 				e.enqueue(ev)
 			}
 		}),
+		events.Subscribe(e.deps.Bus, e.Name(), func(_ context.Context, ev events.NewsCalendarUpdated) {
+			e.enqueue(ev)
+		}),
 		events.Subscribe(e.deps.Bus, e.Name(), func(_ context.Context, ev events.OrderUpdated) {
 			if ev.Order.Symbol == e.symbol {
 				e.enqueue(ev)
@@ -548,6 +568,9 @@ func (e *Engine) handle(ctx context.Context, ev events.Event) {
 		e.onBook(ctx, v)
 	case events.ReferencePriceUpdated:
 		e.onReference(ctx, v)
+	case events.NewsCalendarUpdated:
+		e.news, e.newsFetched = v.Calendar, v.Fetched
+		e.evaluate(ctx, true)
 	case events.OrderUpdated:
 		e.onOrder(ctx, v)
 	case events.OrderRejected:

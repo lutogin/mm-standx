@@ -132,6 +132,18 @@ const (
 	// CauseOffHours — the reference market is shut and the hour accrues at a
 	// reduced multiplier while the fill risk stays the same.
 	CauseOffHours WithdrawCause = "off_hours"
+	// CauseNewsBlackout — идёт запланированная публикация. Единственный отрезок,
+	// на котором никакая дистанция внутри полосы не защищает.
+	CauseNewsBlackout WithdrawCause = "news_blackout"
+	// CauseNewsHourSpent — запланированное затемнение уже отняло у часа
+	// возможность окупиться, и оставаться в стакане до него незачем.
+	//
+	// Отличается от CauseHourLost тем, что решение принято заранее и по
+	// известному расписанию, а не обнаружено по факту накопленного простоя.
+	CauseNewsHourSpent WithdrawCause = "news_hour_spent"
+	// CauseNewsUnavailable — расписание публикаций не читается, и режим
+	// fail-closed запрещает котировать вслепую.
+	CauseNewsUnavailable WithdrawCause = "news_unavailable"
 	// CauseEconomics — the conservative reward lower bound does not cover the
 	// measured cost of fill risk, or the calibration allocation is exceeded.
 	CauseEconomics WithdrawCause = "economics"

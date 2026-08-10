@@ -10,6 +10,7 @@ import (
 
 	"github.com/shopspring/decimal"
 
+	"github.com/nd/mm-standx/internal/domain/calendar"
 	"github.com/nd/mm-standx/internal/domain/money"
 	"github.com/nd/mm-standx/internal/domain/policy"
 	"github.com/nd/mm-standx/internal/domain/trading"
@@ -28,6 +29,7 @@ func (c *Config) Validate() error {
 	errs = append(errs, c.Reward.validate()...)
 	errs = append(errs, c.Risk.validate()...)
 	errs = append(errs, c.Health.validate()...)
+	errs = append(errs, c.News.validate()...)
 
 	enabled := 0
 	for name, sym := range c.Symbols {
@@ -476,6 +478,86 @@ func validateOffHours(prefix string, p Program) []error {
 		errs = append(errs, fmt.Errorf(
 			"%s: an offHours window is set but offHoursMultiplier is %.2f, so the window has no effect",
 			prefix, p.OffHoursMultiplier))
+	}
+	return errs
+}
+
+// Policy converts the configured windows into the domain form.
+func (n News) Policy() calendar.Policy {
+	return calendar.Policy{
+		DefensiveBefore: n.DefensiveBefore,
+		DefensiveAfter:  n.DefensiveAfter,
+		HardBefore:      n.HardBefore,
+		HardAfter:       n.HardAfter,
+	}
+}
+
+// Filter converts the configured selection into the domain form.
+func (n News) Filter() calendar.Filter {
+	impacts := make([]calendar.Impact, 0, len(n.Impacts))
+	for _, raw := range n.Impacts {
+		impacts = append(impacts, calendar.ParseImpact(raw))
+	}
+	return calendar.Filter{Currencies: n.Currencies, Impacts: impacts}
+}
+
+// validate checks the news blackout.
+//
+// An enabled guard with an empty selection is the failure worth catching here:
+// it starts, fetches, logs a healthy calendar and protects nothing, and the
+// only way to notice is to still be standing in the book when the number
+// prints.
+func (n News) validate() []error {
+	if !n.Enabled {
+		return nil
+	}
+
+	var errs []error
+	if err := n.Policy().Validate(); err != nil {
+		errs = append(errs, fmt.Errorf("news: %w", err))
+	}
+	if len(n.Currencies) == 0 {
+		errs = append(errs, errors.New(
+			"news.currencies is empty, so the guard would match no release at all"))
+	}
+	if len(n.Impacts) == 0 {
+		errs = append(errs, errors.New(
+			"news.impacts is empty, so the guard would match no release at all"))
+	}
+	for _, raw := range n.Impacts {
+		switch calendar.ParseImpact(raw) {
+		case calendar.ImpactHigh, calendar.ImpactMedium, calendar.ImpactLow, calendar.ImpactHoliday:
+		default:
+			errs = append(errs, fmt.Errorf(
+				"news.impacts: unknown value %q, known: high, medium, low, holiday", raw))
+		}
+	}
+	if n.Refresh <= 0 {
+		errs = append(errs, errors.New("news.refresh must be positive"))
+	}
+	// Расписание, устаревающее раньше, чем его успевают перечитать, в режиме
+	// fail-closed останавливало бы котирование между двумя удачными чтениями.
+	if n.MaxAge <= n.Refresh {
+		errs = append(errs, fmt.Errorf(
+			"news.maxAge (%s) must exceed news.refresh (%s), or the calendar is stale between reads",
+			n.MaxAge, n.Refresh))
+	}
+	if n.Timeout <= 0 {
+		errs = append(errs, errors.New("news.timeout must be positive"))
+	}
+	if n.DefensiveInsetBps < 0 {
+		errs = append(errs, errors.New("news.defensiveInsetBps must not be negative"))
+	}
+	// Множитель больше единицы означал бы наращивание размера перед публикацией,
+	// то есть прямо противоположное назначению позы.
+	if n.DefensiveSizeMultiple <= 0 || n.DefensiveSizeMultiple > 1 {
+		errs = append(errs, fmt.Errorf(
+			"news.defensiveSizeMultiple (%.2f) must be within (0, 1]", n.DefensiveSizeMultiple))
+	}
+	if n.URL != "" {
+		if u, err := url.Parse(n.URL); err != nil || u.Host == "" {
+			errs = append(errs, fmt.Errorf("news.url: malformed URL %q", n.URL))
+		}
 	}
 	return errs
 }

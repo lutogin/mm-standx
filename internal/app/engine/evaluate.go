@@ -106,6 +106,16 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 		return
 	}
 
+	// Единственная защита контура, работающая на упреждение. Всё остальное
+	// отвечает на движение, которое уже началось; против публикации, время
+	// которой известно заранее, это не работает вовсе.
+	news := e.assessNews(now, hour)
+	if news.blocked != "" {
+		e.reportBlocked(now, conditions, estimate, news.blocked, e.geometry(e.appetite, conditions))
+		e.withdraw(ctx, news.cause, news.blocked)
+		return
+	}
+
 	appetite := e.appetite
 	switch hour.Mode {
 	case uptime.Lost:
@@ -134,6 +144,13 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 	}
 
 	bounds := e.quotingBounds()
+	if news.defensive {
+		// Защитная поза выражена границей, а не отдельной геометрией: правило
+		// дистанции остаётся тем же, ему лишь запрещено подходить ближе края
+		// полосы. Вердикт риска при этом не отменяется — если рынок требует
+		// большего, чем полоса вмещает, котировки не будет и здесь.
+		bounds = bounds.Outer(e.newsGuard.DefensiveInsetBps)
+	}
 	// Лесенка сужается до той, что помещается, вместо отказа котировать:
 	// её ширина берётся из того же бюджета дистанции, что и сама котировка,
 	// и перестаёт помещаться раньше неё. См. policy.Ladder.Fit.
@@ -167,9 +184,18 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 	}
 
 	e.blocked = ""
+	// Размер режется вместе с отходом, и это бесплатно по зачёту. Тир 0.5x
+	// берётся с медианы замеров, а её держат обычные полчаса часа; урезанные
+	// замеры попадают только в верхний перцентиль, который защитная поза
+	// и так отдала, уйдя к краю полосы. Потери же от исполнения размеру прямо
+	// пропорциональны.
+	allocation := e.cfg.AllocationUSD
+	if news.defensive {
+		allocation *= e.newsGuard.DefensiveSizeMultiple
+	}
 	plan, err := sizing.Compute(sizing.Inputs{
 		Budget: sizing.Budget{
-			AllocationUSD:  decimal.NewFromFloat(e.cfg.AllocationUSD),
+			AllocationUSD:  decimal.NewFromFloat(allocation),
 			AvailableUSD:   e.available,
 			Leverage:       e.cfg.SymbolRisk.Leverage,
 			UtilizationPct: utilizationPct,
@@ -886,6 +912,10 @@ func (e *Engine) reportStatus(
 		// Какой сигнал сейчас правит порогами опасности. Без этого разбор
 		// пропущенного залива начинается с догадки о том, работал ли ориентир.
 		"fast_signal", e.fastSignal(),
+		// Поза по календарю: обычная, отход или отсутствие. Печатается всегда,
+		// а не только при отходе — «обычная» здесь такое же утверждение,
+		// как остальные, и именно его хочется видеть после публикации.
+		"news", e.newsSummary(now),
 		// Свободная маржа и связывающее размер ограничение: без них нельзя
 		// понять, сколько депозита допустимо выделить, а с ними это видно
 		// за сутки наблюдения.
