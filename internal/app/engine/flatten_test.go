@@ -12,7 +12,9 @@ import (
 	"github.com/nd/mm-standx/internal/config"
 	"github.com/nd/mm-standx/internal/domain/market"
 	"github.com/nd/mm-standx/internal/domain/money"
+	"github.com/nd/mm-standx/internal/domain/reward"
 	"github.com/nd/mm-standx/internal/domain/trading"
+	"github.com/nd/mm-standx/internal/domain/uptime"
 	"github.com/nd/mm-standx/internal/events"
 	"github.com/nd/mm-standx/internal/ports"
 )
@@ -228,12 +230,36 @@ func TestFillBurstCooldownResetsWithoutOperatorIntervention(t *testing.T) {
 	clk.advance(5 * time.Minute)
 	e.onFill(ctx, fill("quote-2", market.Sell, "0.008", "4276.1"))
 
-	require.Equal(t, clk.now.Add(20*time.Minute), e.fillBurstUntil)
+	// This engine has no reward programme, so the hour offers no downtime
+	// budget and the pause collapses to the floor. It still has to end.
+	require.Equal(t, clk.now.Add(minBurstCooldown), e.fillBurstUntil)
 	require.True(t, clk.now.Before(e.fillBurstUntil))
 
-	clk.advance(20*time.Minute + time.Second)
+	clk.advance(minBurstCooldown + time.Second)
 	require.False(t, clk.now.Before(e.fillBurstUntil),
-		"the transient breaker must release itself after the configured cooldown")
+		"the transient breaker must release itself after the cooldown")
+}
+
+// Стоять в стороне дольше, чем час способен впитать, — значит разменять мелкий
+// инцидент на весь час: зачёт ступенчатый, и шаг за порог тира обнуляет уже
+// накопленное присутствие. Двадцатиминутная пауза при бюджете в 28% часа
+// именно так и работала.
+func TestBurstCooldownIsBoundedByTheHoursDowntimeBudget(t *testing.T) {
+	e, _, clk, _ := fillEngine(t)
+	e.hour = uptime.New(
+		reward.Program{Tiers: []reward.Tier{{ThresholdPct: 70, Multiplier: 1}}},
+		uptime.Policy{TargetPct: 80, HardFloorPct: 72, SampleInterval: 250 * time.Millisecond},
+	)
+	// Начало часа: присутствие ещё не потрачено, бюджет простоя — 20% часа.
+	clk.now = time.Date(2026, 8, 6, 14, 0, 0, 0, time.UTC)
+
+	e.risk.FillBurstCooldown = 20 * time.Minute
+	require.Equal(t, 12*time.Minute, e.burstCooldown(clk.now),
+		"the pause may not outrun the budget that keeps the tier")
+
+	e.risk.FillBurstCooldown = 5 * time.Minute
+	require.Equal(t, 5*time.Minute, e.burstCooldown(clk.now),
+		"a pause the hour can absorb is left alone")
 }
 
 // User or replayed orders share the account stream with bot quotes. Exposure

@@ -75,6 +75,11 @@ risk:
   maxNotionalUsd: 120000
   # Не денежный лимит, а детектор рассогласования модели с рынком: стратегия
   # построена на том, что исполнения редки.
+  #
+  # Reaching it pauses quoting until the episodes leave the sliding hour; it
+  # does not arm the kill switch. It used to, and that was the wedge: the
+  # measured condition expired an hour later, the flag lasted until midnight
+  # UTC, and it survived the restart meant to clear it.
   maxFillsPerHour: 6
   # Ставки StandX, одинаковые для всех рынков. Нужны для независимой оценки
   # стоимости залива, см. PLAN.md §1.3.
@@ -86,11 +91,21 @@ risk:
   flattenDebounce: 0ms
   postFillCooldown: 3s
   # Two independent fill episodes in ten minutes indicate a temporary regime
-  # mismatch. Step away for twenty minutes, then re-evaluate current data; this
-  # is deliberately self-resetting and does not wedge the bot for the day.
+  # mismatch. Step away, then re-evaluate current data; this is deliberately
+  # self-resetting and does not wedge the bot for the day.
+  #
+  # Three minutes, not twenty. Accrual is tiered, so idling costs nothing while
+  # presence stays above the tier threshold and costs the whole hour one step
+  # past it. During calibration only the 1.0x tier is eligible, which leaves
+  # about 28% of the hour — under 17 minutes — to spend in total. A twenty
+  # minute pause therefore did not merely cost more than intended: it lost the
+  # hour outright, after which uptime.Lost withdrew the quotes for whatever
+  # remained. The engine now also clamps this to whatever the hour can still
+  # absorb (Engine.burstCooldown); the configured value should not be relying
+  # on that clamp.
   fillBurstLimit: 2
   fillBurstWindow: 10m
-  fillBurstCooldown: 20m
+  fillBurstCooldown: 3m
   killSwitchOnDrawdown: true
 
 health:
@@ -127,7 +142,11 @@ defaults:
   appetite:
     # Мера риска — максимум окна, то есть уже оценка хвоста. Множитель покрывает
     # только смену режима: при 2.0 бот отказывался котировать BTC днём в будни.
-    jumpMultiple: 1.25
+    #
+    # Raised from 1.25. A fill is a realized loss and the reward for standing
+    # closer is only probable, so the multiple is set on the side that costs
+    # foregone reward rather than money.
+    jumpMultiple: 1.5
     floorMarginBps: 1.5 # запас когда скачок обманчиво мал (выходные, короткое окно)
     deadBandJumps: 2.0 # шире мёртвая зона → реже перестановки, дольше в стакане
     # Не меньше полуширины лесенки (ladderLayers-1) x ladderSpreadBps / 2,
@@ -149,7 +168,20 @@ defaults:
     # Абсолютный пол. С появлением memoryHalfLife он перестал быть основной
     # защитой от заниженной оценки риска и связывает дистанцию редко; снижать
     # его следует по результатам суточного прогона в будни, а не умозрительно.
-    minBps: 5.5
+    #
+    # In practice it is not rare at all — it binds almost always. On gold the
+    # requirement computes to roughly 2 bps (half spread ~0.1-2.4, effective
+    # jump a few tenths, floor margin 1.5), so the floor is what actually
+    # decides where the near rung stands.
+    #
+    # Raised from 5.5 to 7.0 because 5.5 sat inside the observed tail: the
+    # single-tick jump of 6 August was 5.38 bps and swept all three rungs in
+    # 51 ms. No pull can defend against that — the danger path needs a tick to
+    # see the move, and the move is the tick. Standing outside the tail is the
+    # only defence, and it is bought with reward weight: 88% at 7.0 against
+    # 112% at 5.5, a fifth of the rate, against removing the dominant fill mode.
+    # That is the intended trade — a fill is money, the weight is a rate.
+    minBps: 7.0
     maxBps: 9.5 # дальше награда обнуляется
   volatility:
     window: 20m

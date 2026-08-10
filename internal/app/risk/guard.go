@@ -53,6 +53,9 @@ type Guard struct {
 	done        chan struct{}
 
 	announced bool
+	// pausedUntil — объявленный акторам срок паузы. Хранится, чтобы объявлять
+	// только изменения: вердикт выносится на каждом событии.
+	pausedUntil time.Time
 	// nextSuspectLog прореживает предупреждение о канале сделок.
 	nextSuspectLog time.Time
 }
@@ -272,20 +275,65 @@ func (g *Guard) evaluate(ctx context.Context) {
 			"the exchange trade channel may be broken, falling back to the cost model",
 			"episodes_today", v.EpisodesToday)
 	}
-	if !v.Tripped || g.announced {
+
+	// Пауза объявляется независимо от остановки: у неё есть конец, известный
+	// в момент объявления, и актору нужно знать оба края.
+	g.announcePause(ctx, now, v)
+
+	if v.Tripped {
+		if g.announced {
+			return
+		}
+		g.announced = true
+		g.log.Error("kill switch tripped, trading halted",
+			"reason", v.Reason,
+			"loss_usd", fmt.Sprintf("%.2f", v.LossUSD),
+			"fills_last_hour", v.FillsLastHour)
+
+		// Снимок пишется до публикации: если процесс погибнет в момент остановки,
+		// перезапуск обязан застать защиту уже взведённой.
+		g.persist()
+		events.Publish(g.bus, ctx, events.KillSwitchTripped{Reason: v.Reason, At: now})
 		return
 	}
 
-	g.announced = true
-	g.log.Error("kill switch tripped, trading halted",
-		"reason", v.Reason,
-		"loss_usd", fmt.Sprintf("%.2f", v.LossUSD),
-		"fills_last_hour", v.FillsLastHour)
+	// Остановка перестала действовать — чаще всего на смене суток UTC. Актору
+	// об этом нужно сказать: у него запрет хранится флагом, и снять его самому
+	// ему нечем.
+	if g.announced {
+		g.announced = false
+		g.log.Warn("kill switch cleared, quoting is allowed again")
+		events.Publish(g.bus, ctx, events.KillSwitchCleared{At: now})
+	}
+}
 
-	// Снимок пишется до публикации: если процесс погибнет в момент остановки,
-	// перезапуск обязан застать защиту уже взведённой.
-	g.persist()
-	events.Publish(g.bus, ctx, events.KillSwitchTripped{Reason: v.Reason, At: now})
+// announcePause сообщает акторам о начале и конце паузы по частоте заливов.
+func (g *Guard) announcePause(ctx context.Context, now time.Time, v domain.Verdict) {
+	if v.Paused(now) {
+		// Каждый новый залив отодвигает срок; актор обязан узнать и об этом.
+		if v.PausedUntil.Equal(g.pausedUntil) {
+			return
+		}
+		g.pausedUntil = v.PausedUntil
+		g.log.Warn("quoting paused by the fill rate",
+			"until", v.PausedUntil.UTC(),
+			"fills_last_hour", v.FillsLastHour,
+			"reason", v.PauseReason)
+		g.metrics.RiskLimit("quoting_pause_seconds", v.PausedUntil.Sub(now).Seconds())
+		events.Publish(g.bus, ctx, events.QuotingPaused{
+			Until: v.PausedUntil, Reason: v.PauseReason, At: now,
+		})
+		return
+	}
+
+	if g.pausedUntil.IsZero() {
+		return
+	}
+	g.pausedUntil = time.Time{}
+	g.log.Info("fill rate pause expired, quoting is allowed again",
+		"fills_last_hour", v.FillsLastHour)
+	g.metrics.RiskLimit("quoting_pause_seconds", 0)
+	events.Publish(g.bus, ctx, events.QuotingResumed{At: now})
 }
 
 func (g *Guard) persist() {

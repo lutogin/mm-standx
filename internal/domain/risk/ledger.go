@@ -29,6 +29,11 @@ type Limits struct {
 	// Стратегия построена на том, что исполнения редки; частые заливы
 	// означают, что дистанция подобрана неверно, и продолжать — значит
 	// платить за проверку гипотезы, которая уже опровергнута.
+	//
+	// Достижение предела приостанавливает котирование до тех пор, пока эпизоды
+	// не выйдут из скользящего часа, и не взводит остановку: измеряемая
+	// величина спадает сама, а реакция, которая сама не спадает, превращает
+	// минутный всплеск в потерянные сутки. См. Ledger.pause.
 	MaxFillsPerHour int
 
 	// TripOnDrawdown включает остановку по дневному убытку. Выключенный
@@ -223,6 +228,20 @@ type Verdict struct {
 	// OpenLegUSD — незакрытая нога в деньгах. Ненулевая дольше секунды означает
 	// потерянное сообщение об исполнении и заниженный результат.
 	OpenLegUSD float64
+
+	// PausedUntil — момент, до которого котирование приостановлено частотой
+	// заливов. Нулевое значение означает, что паузы нет.
+	//
+	// Пауза — не остановка. Она снимается сама, когда эпизоды выходят
+	// из скользящего часа, и не требует человека.
+	PausedUntil time.Time
+	// PauseReason описывает паузу человекочитаемо.
+	PauseReason string
+}
+
+// Paused сообщает, действует ли пауза на момент now.
+func (v Verdict) Paused(now time.Time) bool {
+	return !v.PausedUntil.IsZero() && now.Before(v.PausedUntil)
 }
 
 // Assess выносит вердикт и, при достижении лимита, взводит остановку.
@@ -244,10 +263,25 @@ func (l *Ledger) Assess(now time.Time) Verdict {
 		OpenLegUSD:          f(l.state.OpenCashUSD),
 	}
 
-	// Из двух оценок берётся худшая. Биржевая точнее, когда работает,
-	// но её молчание не должно читаться как отсутствие убытка.
+	// The exchange result is the measure of the day's loss. The cost model
+	// substitutes for it only while the trade channel is silent.
+	//
+	// The two are not the same quantity. ReportedNetUSD is a result and can be
+	// positive; EstimatedCostUSD is gross turnover cost, it only ever grows, and
+	// nothing in it subtracts the reward the strategy is paid. Taking the worse
+	// of the two unconditionally therefore halts on volume rather than on loss:
+	// at ~6 bps per fill and a 10 USD limit that is a dozen fills, reached in a
+	// normal day by a strategy that is making money. The dual accounting was
+	// written for a broken trade channel (see EstimatedCostUSD), and that is the
+	// only case where it may speak for the exchange.
 	reportedLoss := -f(l.state.ReportedNetUSD)
-	v.LossUSD = max(reportedLoss, v.EstimatedCostUSD)
+	v.LossUSD = reportedLoss
+	if v.TradeChannelSuspect {
+		v.LossUSD = max(reportedLoss, v.EstimatedCostUSD)
+	}
+
+	// Частота заливов приостанавливает котирование, но не останавливает его.
+	v.PausedUntil, v.PauseReason = l.pause(now)
 
 	switch {
 	case l.state.Tripped:
@@ -259,14 +293,39 @@ func (l *Ledger) Assess(now time.Time) Verdict {
 			"daily loss %.2f USD reached the %.2f limit (exchange reported %.2f, cost model %.2f)",
 			v.LossUSD, l.limits.MaxDailyLossUSD, v.ReportedNetUSD, v.EstimatedCostUSD))
 		v.Tripped, v.Reason = true, l.state.TrippedReason
-
-	case l.limits.MaxFillsPerHour > 0 && v.FillsLastHour >= l.limits.MaxFillsPerHour:
-		l.trip(now, fmt.Sprintf(
-			"%d fills in the last hour reached the %d limit: the distance model disagrees with the market",
-			v.FillsLastHour, l.limits.MaxFillsPerHour))
-		v.Tripped, v.Reason = true, l.state.TrippedReason
 	}
 	return v
+}
+
+// pause сообщает, до какого момента частота заливов запрещает котировать.
+//
+// MaxFillsPerHour измеряет скользящий час — величину, которая спадает сама.
+// Раньше её достижение взводило ту же остановку, что и дневной убыток, и это
+// был главный источник зависаний: условие исчезало через час вместе с
+// эпизодами, а флаг оставался до полуночи UTC и переживал перезапуск. Всплеск
+// на минуту выключал бота на сутки.
+//
+// Ответ на транзиентное рассогласование обязан быть транзиентным. Пауза длится
+// ровно до момента, когда из окна выпадет столько эпизодов, что счётчик
+// опустится ниже предела, — то есть ни на секунду дольше, чем держится сама
+// причина. Дневной убыток при этом по-прежнему останавливает торговлю
+// насовсем: там условие не спадает, и снимать его должен человек.
+func (l *Ledger) pause(now time.Time) (time.Time, string) {
+	limit := l.limits.MaxFillsPerHour
+	if limit <= 0 || len(l.state.Episodes) < limit {
+		return time.Time{}, ""
+	}
+
+	// Выпадение эпизода с этим индексом опускает счётчик до limit-1.
+	oldest := l.state.Episodes[len(l.state.Episodes)-limit]
+	until := oldest.At.Add(time.Hour)
+	if !until.After(now) {
+		return time.Time{}, ""
+	}
+	return until, fmt.Sprintf(
+		"%d fills in the last hour reached the %d limit: the distance model disagrees "+
+			"with the market, standing down until %s",
+		len(l.state.Episodes), limit, until.UTC().Format(time.RFC3339))
 }
 
 // TradeChannelGrace — сколько ждать сообщения о сделке после первого залива.

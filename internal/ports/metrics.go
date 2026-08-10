@@ -135,6 +135,13 @@ const (
 	CausePositionLimit WithdrawCause = "position_limit"
 	// CauseKillSwitch — сработала аварийная остановка.
 	CauseKillSwitch WithdrawCause = "kill_switch"
+	// CauseRiskPause — частота заливов за скользящий час достигла предела.
+	// Отличается от CauseKillSwitch тем, что снимается сама по истечении срока.
+	CauseRiskPause WithdrawCause = "risk_pause"
+	// CausePostFill — идёт пауза после залива.
+	CausePostFill WithdrawCause = "post_fill"
+	// CauseWarmup — mark price ещё не получен.
+	CauseWarmup WithdrawCause = "warmup"
 	// CauseShutdown — штатное завершение процесса.
 	CauseShutdown WithdrawCause = "shutdown"
 )

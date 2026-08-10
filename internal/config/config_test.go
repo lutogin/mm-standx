@@ -368,3 +368,48 @@ func TestSelectionStillRequiresValidSymbolConfig(t *testing.T) {
 	_, err := Load(writeConfig(t, body))
 	require.ErrorContains(t, err, "allocationUsd")
 }
+
+// Конфигурация запекается в образ и на сервере не правится, поэтому опечатка
+// в ней обнаруживается только в проде и только падением на старте. Файл
+// копируется во временный каталог: рядом с ним не должно оказаться .env
+// разработчика, иначе результат зависел бы от машины.
+func TestShippedConfigLoads(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join("..", "..", "config.yaml"))
+	require.NoError(t, err)
+
+	cfg, err := Load(writeConfig(t, string(body)))
+	require.NoError(t, err, "the config baked into the image must load")
+
+	gold := cfg.Symbols["XAU-USD"]
+	require.True(t, gold.Enabled)
+
+	// Пауза после серии заливов обязана умещаться в бюджет простоя часа.
+	// Двадцать минут его превышали, и два залива стоили всей смены.
+	require.LessOrEqual(t, cfg.Risk.FillBurstCooldown, 5*time.Minute,
+		"a burst pause longer than the hour can absorb loses the hour outright")
+
+	// Ближняя ступень обязана стоять за наблюдённым хвостом скачка: 5.38 bps
+	// за один такт 6 августа сняли всю лесенку за 51 мс.
+	require.GreaterOrEqual(t, float64(gold.Appetite.MinBps), 6.0,
+		"the near rung must stand outside the observed single-tick jump")
+}
+
+// Дистанция — первый параметр, который придётся править под давлением, а
+// конфигурация запечена в образ. Правка обязана быть доступна окружением,
+// иначе срочное отступление от рынка требует пересборки и публикации образа.
+func TestDistanceFloorIsOverridableFromTheEnvironment(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join("..", "..", "config.yaml"))
+	require.NoError(t, err)
+	path := writeConfig(t, string(body))
+
+	base, err := Load(path)
+	require.NoError(t, err)
+	require.NotEqual(t, 6.0, float64(base.Symbols["XAU-USD"].Appetite.MinBps))
+
+	t.Setenv("MMSTANDX_DEFAULTS_APPETITE_MINBPS", "6.0")
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.Equal(t, 6.0, float64(cfg.Symbols["XAU-USD"].Appetite.MinBps),
+		"gold inherits the defaults block, so the override has to reach it")
+}

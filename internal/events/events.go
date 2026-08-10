@@ -158,3 +158,37 @@ type KillSwitchTripped struct {
 }
 
 func (KillSwitchTripped) EventName() string { return "system.kill_switch_tripped" }
+
+// KillSwitchCleared — аварийная остановка снята, котирование разрешено снова.
+//
+// Существует потому, что остановка у актора была защёлкой в одну сторону:
+// поднять её было нечем, и переживший смену суток UTC процесс продолжал молчать
+// с уже пустым запретом. Событие публикуется, когда вердикт защитного контура
+// перестаёт быть остановкой, — на смене суток или после того, как человек
+// вычистил снимок состояния.
+type KillSwitchCleared struct {
+	At time.Time
+}
+
+func (KillSwitchCleared) EventName() string { return "system.kill_switch_cleared" }
+
+// QuotingPaused — котирование приостановлено на срок.
+//
+// Отличается от KillSwitchTripped ровно тем, ради чего и заведено: пауза имеет
+// конец, известный в момент её объявления, и снимается без участия человека.
+// Причина — транзиентная (частота заливов в скользящем часе), поэтому и реакция
+// обязана быть транзиентной.
+type QuotingPaused struct {
+	Until  time.Time
+	Reason string
+	At     time.Time
+}
+
+func (QuotingPaused) EventName() string { return "system.quoting_paused" }
+
+// QuotingResumed — срок паузы истёк.
+type QuotingResumed struct {
+	At time.Time
+}
+
+func (QuotingResumed) EventName() string { return "system.quoting_resumed" }

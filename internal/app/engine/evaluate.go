@@ -25,39 +25,70 @@ import (
 // allowPlace различает два источника вызова: такт mark price несёт официальную
 // цену и разрешает выставление, обновление стакана — только снятие.
 func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
-	if e.halted || !e.mark.IsPositive() {
-		// Молчание метрики неоднозначно: остановленный актор выглядел бы так же,
-		// как не запущенный. Ноль — утверждение, отсутствие ряда — нет.
-		e.deps.Metrics.Quoting(e.symbol, false)
-		return
-	}
 	now := e.deps.Clock.Now()
 
-	// Незакрытая позиция важнее награды: котировать, имея экспозицию, значит
-	// удвоить её при следующем заливе.
-	if now.Before(e.flattenRetryAt) || e.pendingFill.IsPositive() || e.overPositionLimit() {
-		e.withdraw(ctx, e.positionCause(), "no quoting while exposure is open")
-		return
-	}
-	if now.Before(e.cooldownUntil) {
-		return
-	}
-
-	halfSpread, ok := e.halfSpreadBps()
-	if !ok {
-		e.withdraw(ctx, ports.CauseBookUnreadable, "no two-sided book")
+	// Ни один выход отсюда не имеет права быть молчаливым.
+	//
+	// Прежде их было четыре: остановка, пауза после залива, и оба съёма при
+	// пустом стакане, где withdraw выходит на len(ids) == 0, не написав ничего.
+	// Актор при этом продолжал тикать, метрика показывала ноль — а ноль
+	// одинаково означает и «воздерживаюсь по делу», и «сломан». Разбор каждого
+	// зависания начинался с восстановления этой разницы по косвенным уликам.
+	if !e.mark.IsPositive() {
+		e.deps.Metrics.Quoting(e.symbol, false)
+		e.reportBlocked(now, policy.Conditions{}, volatility.Estimate{},
+			"waiting for the first mark price", policy.Quote{})
 		return
 	}
 
 	estimate := e.vol.Estimate(now)
+	halfSpread, bookOK := e.halfSpreadBps()
 	conditions := policy.Conditions{
 		HalfSpreadBps: halfSpread,
 		JumpBps:       estimate.EffectiveJump(),
 		Ready:         estimate.Ready,
 	}
+	// blocked печатает сводку с причиной и выкладывает её в метрики.
+	blocked := func(reason string) {
+		e.reportBlocked(now, conditions, estimate, reason, e.geometry(e.appetite, conditions))
+	}
+
+	if e.halted {
+		blocked("halted: " + e.haltReason)
+		e.withdraw(ctx, ports.CauseKillSwitch, e.haltReason)
+		return
+	}
+
+	// Пауза защитного контура держится сроком, а не флагом: сообщение о снятии
+	// может не прийти, и тогда актор молчал бы до конца запуска.
+	if now.Before(e.riskPauseUntil) {
+		blocked(e.riskPauseReason)
+		e.withdraw(ctx, ports.CauseRiskPause, e.riskPauseReason)
+		return
+	}
+
+	// Незакрытая позиция важнее награды: котировать, имея экспозицию, значит
+	// удвоить её при следующем заливе.
+	if now.Before(e.flattenRetryAt) || e.pendingFill.IsPositive() || e.overPositionLimit() {
+		blocked("no quoting while exposure is open")
+		e.withdraw(ctx, e.positionCause(), "no quoting while exposure is open")
+		return
+	}
+	if now.Before(e.cooldownUntil) {
+		blocked(fmt.Sprintf("post-fill cooldown is active until %s",
+			e.cooldownUntil.UTC().Format(time.RFC3339)))
+		return
+	}
+
+	if !bookOK {
+		blocked("no two-sided book")
+		e.withdraw(ctx, ports.CauseBookUnreadable, "no two-sided book")
+		return
+	}
+
 	if now.Before(e.fillBurstUntil) {
 		reason := fmt.Sprintf("fill burst cooldown is active until %s", e.fillBurstUntil.UTC().Format(time.RFC3339))
-		e.reportBlocked(now, conditions, estimate, reason, e.geometry(e.appetite, conditions))
+		blocked(reason)
 		e.withdraw(ctx, ports.CauseFillBurst, reason)
 		return
 	}
@@ -583,10 +614,34 @@ func (e *Engine) recordFillEpisode(now time.Time) {
 		return
 	}
 
-	e.fillBurstUntil = now.Add(e.risk.FillBurstCooldown)
+	e.fillBurstUntil = now.Add(e.burstCooldown(now))
 	e.deps.Log.Warn("fill burst detected, entering a transient cooldown",
 		"symbol", e.symbol, "episodes", len(e.fillEpisodes),
 		"window", e.risk.FillBurstWindow, "until", e.fillBurstUntil.UTC())
+}
+
+// minBurstCooldown — сколько длится пауза, даже когда часу уже нечего терять.
+const minBurstCooldown = 30 * time.Second
+
+// burstCooldown ограничивает паузу тем, что час способен впитать.
+//
+// Зачёт ступенчатый: пока присутствие держится выше порога тира, простой стоит
+// ноль, а шаг за порог обнуляет и уже накопленное. Пауза длиннее оставшегося
+// бюджета простоя поэтому не «немного дороже» — она превращает мелкий инцидент
+// в потерянный час целиком, после чего uptime.Lost снимает котировки до конца
+// часа и без неё. Двадцатиминутная пауза при бюджете в 28% часа именно так
+// и работала: два залива стоили всей смены.
+//
+// Ограничение никогда не опускает паузу ниже minBurstCooldown: когда бюджет
+// уже исчерпан, отойти всё равно нужно — просто ненадолго, потому что платить
+// присутствием больше нечем.
+func (e *Engine) burstCooldown(now time.Time) time.Duration {
+	cooldown := e.risk.FillBurstCooldown
+	budget := e.hour.Assess(now).DowntimeBudget
+	if cooldown <= budget {
+		return cooldown
+	}
+	return max(budget, min(cooldown, minBurstCooldown))
 }
 
 // publishFill сообщает защитному контуру о заливе вместе с оценкой стоимости.
@@ -836,6 +891,94 @@ func (e *Engine) reportStatus(
 	e.deps.Log.Info("engine status", attrs...)
 }
 
+const (
+	// stallThreshold — сколько актор вправе не котировать, прежде чем это
+	// перестаёт быть штатным воздержанием.
+	//
+	// Пять минут выбраны по программе, а не по вкусу: на простой в час есть 28%
+	// при годном только тире 1.0x, то есть меньше семнадцати минут. Отсутствие
+	// котировок пять минут подряд расходует треть этого запаса — событие
+	// достаточно редкое, чтобы им не засорять лог, и достаточно дорогое, чтобы
+	// узнать о нём до конца часа, а не после.
+	stallThreshold = 5 * time.Minute
+	// stallLogInterval прореживает повтор тревоги.
+	stallLogInterval = 15 * time.Minute
+)
+
+// noteStall поднимает затянувшееся молчание из сводки в тревогу.
+//
+// Сводка отвечает на вопрос «почему сейчас нет котировок», и этого мало:
+// причина, названная один раз в пятнадцать секунд ровным тоном INFO, теряется
+// в потоке. Нужен отдельный уровень для случая, когда воздержание перестало
+// быть эпизодом, и полный снимок управляющего состояния вместе с ним — иначе
+// следующий разбор снова начнётся с восстановления невидимых полей по
+// косвенным уликам.
+//
+// Печатается всё, что способно удержать актор вне рынка, включая заведомо
+// пустые поля: отсутствие значения здесь такое же свидетельство, как значение.
+func (e *Engine) noteStall(now time.Time, quoting bool, reason string) {
+	if quoting {
+		e.blockedSince, e.nextStallLog = time.Time{}, time.Time{}
+		return
+	}
+	if e.blockedSince.IsZero() {
+		e.blockedSince = now
+		return
+	}
+	if now.Sub(e.blockedSince) < stallThreshold || now.Before(e.nextStallLog) {
+		return
+	}
+	e.nextStallLog = now.Add(stallLogInterval)
+
+	estimate := e.vol.Estimate(now)
+	e.deps.Log.Error("no quoting for a long stretch",
+		"symbol", e.symbol,
+		"for", now.Sub(e.blockedSince).Truncate(time.Second).String(),
+		"reason", reason,
+		"halted", e.halted,
+		"halt_reason", e.haltReason,
+		"risk_pause_until", stamp(e.riskPauseUntil),
+		"cooldown_until", stamp(e.cooldownUntil),
+		"fill_burst_until", stamp(e.fillBurstUntil),
+		"flatten_retry_at", stamp(e.flattenRetryAt),
+		"pending_fill", e.pendingFill,
+		"fill_deadline", stamp(e.fillDeadline),
+		"position", e.position,
+		"max_net_position", e.maxNetPosition,
+		"flatten_orders", len(e.flattenOrders),
+		"pending_withdraw", len(e.pendingWithdraw),
+		"mark", e.mark,
+		"mark_age", now.Sub(e.markAt).Truncate(time.Millisecond).String(),
+		"book_readable", e.bookReadable(),
+		"estimate_ready", estimate.Ready,
+		"estimate_samples", estimate.Samples,
+		"available_usd", e.available,
+		"bids_live", e.bids.LiveCount(),
+		"asks_live", e.asks.LiveCount())
+}
+
+// blockedReason возвращает причину, по которой котировок нет.
+func (e *Engine) blockedReason(quote policy.Quote) string {
+	if e.blocked != "" {
+		return e.blocked
+	}
+	return quote.Reason
+}
+
+// bookReadable сообщает, читается ли стакан обеими сторонами.
+func (e *Engine) bookReadable() bool {
+	_, ok := e.halfSpreadBps()
+	return ok
+}
+
+// stamp печатает момент так, чтобы «не задано» отличалось от «задано давно».
+func stamp(t time.Time) string {
+	if t.IsZero() {
+		return "-"
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
 // reportMetrics выкладывает состояние актора в метрики.
 //
 // Вызывается на каждом пересчёте, а не по расписанию сводки в логе: метрики
@@ -862,6 +1005,7 @@ func (e *Engine) reportMetrics(
 
 	quoting := quote.Feasible && e.blocked == ""
 	m.Quoting(e.symbol, quoting)
+	e.noteStall(now, quoting, e.blockedReason(quote))
 	if quoting {
 		m.TargetDistance(e.symbol, float64(quote.Distance))
 	}

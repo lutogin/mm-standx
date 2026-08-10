@@ -115,13 +115,33 @@ type Engine struct {
 	available decimal.Decimal
 
 	// Управляющее состояние.
-	halted         bool
-	cooldownUntil  time.Time
-	pendingFill    money.Qty
-	fillDeadline   time.Time
-	lastStatus     time.Time
-	lastAction     time.Time
-	blocked        string
+	halted bool
+	// haltReason — почему актор остановлен.
+	//
+	// Хранится потому, что остановленный актор обязан объяснять себя. Прежде
+	// он возвращался из evaluate первой же строкой, не написав ничего: в логе
+	// это выглядело неотличимо от смерти процесса, а метрика показывала ноль,
+	// который одинаково означает и «не котирую», и «сломан».
+	haltReason string
+
+	// riskPauseUntil — срок паузы, объявленной защитным контуром.
+	//
+	// Именно срок, а не флаг: снятие сообщением может не прийти, и тогда актор
+	// молчит до конца запуска. Событие QuotingResumed снимает паузу досрочно,
+	// но и без него она истекает сама.
+	riskPauseUntil  time.Time
+	riskPauseReason string
+
+	cooldownUntil time.Time
+	pendingFill   money.Qty
+	fillDeadline  time.Time
+	lastStatus    time.Time
+	lastAction    time.Time
+	blocked       string
+	// blockedSince и nextStallLog поднимают затянувшееся молчание из сводки
+	// в тревогу. Ноль в blockedSince означает, что актор котирует.
+	blockedSince   time.Time
+	nextStallLog   time.Time
 	target         policy.Quote
 	fillEpisodes   []time.Time
 	fillBurstUntil time.Time
@@ -437,6 +457,15 @@ func (e *Engine) subscribe() {
 		events.Subscribe(e.deps.Bus, e.Name(), func(_ context.Context, ev events.KillSwitchTripped) {
 			e.enqueue(ev)
 		}),
+		events.Subscribe(e.deps.Bus, e.Name(), func(_ context.Context, ev events.KillSwitchCleared) {
+			e.enqueue(ev)
+		}),
+		events.Subscribe(e.deps.Bus, e.Name(), func(_ context.Context, ev events.QuotingPaused) {
+			e.enqueue(ev)
+		}),
+		events.Subscribe(e.deps.Bus, e.Name(), func(_ context.Context, ev events.QuotingResumed) {
+			e.enqueue(ev)
+		}),
 	}
 }
 
@@ -500,7 +529,28 @@ func (e *Engine) handle(ctx context.Context, ev events.Event) {
 		e.withdraw(ctx, ports.CauseDisconnected, v.Stream)
 	case events.KillSwitchTripped:
 		e.halted = true
+		e.haltReason = v.Reason
 		e.withdraw(ctx, ports.CauseKillSwitch, v.Reason)
+
+	case events.KillSwitchCleared:
+		// Остановка снята — чаще всего сменой суток UTC. Без этой ветки запрет
+		// оставался в акторе навсегда: поднять его было нечем, и переживший
+		// полночь процесс продолжал молчать с уже пустым основанием.
+		if e.halted {
+			e.deps.Log.Warn("kill switch cleared, resuming", "symbol", e.symbol,
+				"previous_reason", e.haltReason)
+		}
+		e.halted = false
+		e.haltReason = ""
+		e.evaluate(ctx, true)
+
+	case events.QuotingPaused:
+		e.riskPauseUntil, e.riskPauseReason = v.Until, v.Reason
+		e.withdraw(ctx, ports.CauseRiskPause, v.Reason)
+
+	case events.QuotingResumed:
+		e.riskPauseUntil, e.riskPauseReason = time.Time{}, ""
+		e.evaluate(ctx, true)
 	}
 }
 

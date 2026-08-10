@@ -50,7 +50,12 @@ func TestFeeIsAlwaysACostRegardlessOfSign(t *testing.T) {
 	require.InDelta(t, -7, positive.Assess(at(10, 0)).ReportedNetUSD, 0.001)
 }
 
-func TestFillFrequencyTripsIndependentlyOfMoney(t *testing.T) {
+// The fill rate is a sliding-hour measure, so its answer has to expire on the
+// same schedule. Tripping the persistent switch on it was the single largest
+// cause of the live wedge: the episodes left the window an hour later, the flag
+// stayed until midnight UTC, and it survived the restart that was supposed to
+// clear it.
+func TestFillFrequencyPausesButDoesNotTrip(t *testing.T) {
 	l := risk.New(limits())
 
 	for i := range 5 {
@@ -58,9 +63,35 @@ func TestFillFrequencyTripsIndependentlyOfMoney(t *testing.T) {
 	}
 
 	v := l.Assess(at(10, 5))
-	require.True(t, v.Tripped)
+	require.False(t, v.Tripped, "a transient rate must not arm the persistent switch")
+	require.True(t, v.Paused(at(10, 5)))
 	require.Equal(t, 5, v.FillsLastHour)
-	require.Contains(t, v.Reason, "fills in the last hour")
+	require.Contains(t, v.PauseReason, "fills in the last hour")
+
+	// The pause ends when the oldest episode leaves the window and not a second
+	// later: it lasts exactly as long as the condition that caused it.
+	require.Equal(t, at(11, 0), v.PausedUntil)
+	require.True(t, l.Assess(at(10, 59)).Paused(at(10, 59)))
+
+	released := l.Assess(at(11, 1))
+	require.False(t, released.Paused(at(11, 1)), "the pause must release itself")
+	require.False(t, released.Tripped)
+	require.Equal(t, 3, released.FillsLastHour)
+}
+
+// Every fresh episode pushes the deadline out, so a market that keeps hitting
+// the quotes keeps the actor away without anyone arming anything.
+func TestEachNewEpisodeExtendsThePause(t *testing.T) {
+	l := risk.New(limits())
+
+	for i := range 5 {
+		l.OnFill(at(10, i), risk.Fill{At: at(10, i), StartsEpisode: true})
+	}
+	require.Equal(t, at(11, 0), l.Assess(at(10, 5)).PausedUntil)
+
+	l.OnFill(at(10, 20), risk.Fill{At: at(10, 20), StartsEpisode: true})
+	require.Equal(t, at(11, 1), l.Assess(at(10, 20)).PausedUntil,
+		"with six episodes the window must shed two before quoting resumes")
 }
 
 func TestEpisodesLeaveTheRollingHour(t *testing.T) {
@@ -88,18 +119,40 @@ func TestCostModelSubstitutesForASilentTradeChannel(t *testing.T) {
 	require.InDelta(t, 60, v.LossUSD, 0.001)
 }
 
-// The worse of the two estimates wins: the exchange figure is more accurate
-// when it arrives, but its silence must not read as an absence of loss.
-func TestWorseOfTheTwoEstimatesWins(t *testing.T) {
+// While the exchange is talking, it is the measure of the day's loss.
+//
+// The cost model is gross turnover, not loss: it only grows, and nothing in it
+// subtracts the reward the strategy is paid for the same presence. Letting it
+// speak over a healthy channel halts on volume — at ~6 bps a fill and a 10 USD
+// limit, about a dozen fills, which a profitable day reaches easily.
+func TestCostModelDoesNotSpeakOverAHealthyTradeChannel(t *testing.T) {
 	l := risk.New(limits())
 
 	l.OnFill(at(10, 0), risk.Fill{At: at(10, 0), CostUSD: usd("30"), StartsEpisode: true})
 	l.OnTrade(at(10, 0), risk.Execution{CashUSD: usd("-5"), FeeUSD: usd("0")})
 
-	require.InDelta(t, 30, l.Assess(at(10, 0)).LossUSD, 0.001)
+	v := l.Assess(at(10, 0))
+	require.False(t, v.TradeChannelSuspect)
+	require.InDelta(t, 5, v.LossUSD, 0.001, "the exchange figure stands on its own")
+	require.InDelta(t, 30, v.EstimatedCostUSD, 0.001, "the model is still reported")
 
 	l.OnTrade(at(10, 1), risk.Execution{CashUSD: usd("-80"), FeeUSD: usd("0")})
 	require.InDelta(t, 85, l.Assess(at(10, 1)).LossUSD, 0.001)
+}
+
+// A profitable day must not be halted by its own turnover.
+func TestTurnoverAloneDoesNotTripAProfitableDay(t *testing.T) {
+	l := risk.New(risk.Limits{MaxDailyLossUSD: 10, TripOnDrawdown: true})
+
+	for i := range 20 {
+		l.OnFill(at(10, i), risk.Fill{At: at(10, i), CostUSD: usd("6"), StartsEpisode: true})
+		l.OnTrade(at(10, i), risk.Execution{CashUSD: usd("1"), FeeUSD: usd("0")})
+	}
+
+	v := l.Assess(at(10, 20))
+	require.False(t, v.Tripped)
+	require.InDelta(t, 120, v.EstimatedCostUSD, 0.001)
+	require.InDelta(t, 20, v.ReportedNetUSD, 0.001)
 }
 
 // A restart must not clear the guard: otherwise the cycle of tripping and
