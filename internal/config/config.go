@@ -19,7 +19,6 @@ import (
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/joho/godotenv"
 	"github.com/knadh/koanf/parsers/yaml"
-	"github.com/knadh/koanf/providers/env"
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/providers/structs"
 	"github.com/knadh/koanf/v2"
@@ -52,6 +51,15 @@ type Config struct {
 	Health    Health            `koanf:"health"`
 	Defaults  Symbol            `koanf:"defaults"`
 	Symbols   map[string]Symbol `koanf:"symbols"`
+
+	// IgnoredEnv — переменные MMSTANDX_*, которых конфигурация не понимает.
+	//
+	// Пустой список — норма. Непустой означает, что окружение на сервере
+	// разошлось с выкаченным бинарником: либо опечатка, либо ключ от другой
+	// версии. Процесс при этом работает на значениях из config.yaml, но знать
+	// об этом обязан тот, кто эти переменные ставил, — поэтому список
+	// печатается при старте и выкладывается в метрику.
+	IgnoredEnv []string `koanf:"-"`
 }
 
 // Runtime — параметры процесса.
@@ -373,13 +381,68 @@ func LoadDotEnv(nearPath string) error {
 	return nil
 }
 
+// envOverride — одно переопределение из окружения вместе с исходным именем.
+//
+// Имя хранится потому, что оператор действует именно им: ключ конфигурации
+// `symbols.xau-usd.reference.enabled` не подскажет, какую строку править в .env.
+type envOverride struct {
+	Name  string
+	Value string
+}
+
 // Load читает конфигурацию из значений по умолчанию, файла и окружения,
 // применяет блок defaults к каждому символу и валидирует результат.
+//
+// Опечатка в файле остаётся отказом, а непонятый ключ окружения — нет, и это
+// не послабление, а разная цена ошибки. Файл лежит в репозитории, правится
+// осознанно и просматривается глазами; откат к умолчанию из кода там означает
+// порог, который никто не выбирал. Окружение живёт на сервере, переживает
+// смены версий и откаты образа, а откат к значению из config.yaml означает
+// порог версионированный и проверенный.
+//
+// Цена обратного решения измерена: 11 августа ключ `reference`, оставшийся
+// в .env от ветки с внешним фидом, уронил процесс в цикл падения. Сам по себе
+// он ничего не включал — стоял `false`. А деплой на упавший старт откатывается
+// на предыдущий образ, то есть один устаревший ключ способен тихо заморозить
+// прод на старой сборке.
 func Load(path string) (*Config, error) {
 	if err := LoadDotEnv(path); err != nil {
 		return nil, err
 	}
 
+	// Файл проверяется сам по себе и строго: то, что не понято без окружения,
+	// не понято в самом config.yaml.
+	if _, err := assemble(path, nil); err != nil {
+		return nil, err
+	}
+
+	overrides, err := environmentOverrides(path)
+	if err != nil {
+		return nil, err
+	}
+
+	cfg, ignored, err := applyEnvironment(path, overrides)
+	if err != nil {
+		return nil, err
+	}
+	cfg.IgnoredEnv = ignored
+
+	// Отбор инструментов идёт после отбора переопределений: неизвестное имя
+	// символа — ошибка по существу, а не непонятый ключ, и молчать о ней нельзя.
+	if err := cfg.applySymbolSelection(); err != nil {
+		return nil, err
+	}
+
+	cfg.Exchange.WalletPrivateKey = secret.New(os.Getenv(walletKeyEnv))
+
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid config: %w", err)
+	}
+	return cfg, nil
+}
+
+// baseKoanf собирает умолчания и файл — всё, что известно до окружения.
+func baseKoanf(path string) (*koanf.Koanf, error) {
 	k := koanf.New(".")
 
 	// Значения по умолчанию задают канонический набор ключей с правильным
@@ -390,8 +453,23 @@ func Load(path string) (*Config, error) {
 	if err := k.Load(file.Provider(path), yaml.Parser()); err != nil {
 		return nil, fmt.Errorf("load config %s: %w", path, err)
 	}
-	if err := k.Load(env.Provider(envPrefix, ".", envKeyResolver(k)), nil); err != nil {
-		return nil, fmt.Errorf("load env overrides: %w", err)
+	return k, nil
+}
+
+// assemble декодирует конфигурацию из файла и заданного набора переопределений.
+//
+// Отбор инструментов сюда не входит: функция вызывается многократно при отборе
+// понятых переопределений, а отказ по неизвестному символу — не тот исход,
+// который следует принимать за «ключ не понят».
+func assemble(path string, overrides map[string]envOverride) (*Config, error) {
+	k, err := baseKoanf(path)
+	if err != nil {
+		return nil, err
+	}
+	for key, override := range overrides {
+		if err := k.Set(key, override.Value); err != nil {
+			return nil, fmt.Errorf("apply %s: %w", override.Name, err)
+		}
 	}
 
 	cfg := defaults()
@@ -410,16 +488,65 @@ func Load(path string) (*Config, error) {
 		resolved[name] = sym
 	}
 	cfg.Symbols = resolved
-	if err := cfg.applySymbolSelection(); err != nil {
+	return cfg, nil
+}
+
+// environmentOverrides приводит переменные MMSTANDX_* к ключам конфигурации.
+func environmentOverrides(path string) (map[string]envOverride, error) {
+	k, err := baseKoanf(path)
+	if err != nil {
 		return nil, err
 	}
+	resolve := envKeyResolver(k)
 
-	cfg.Exchange.WalletPrivateKey = secret.New(os.Getenv(walletKeyEnv))
-
-	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid config: %w", err)
+	out := make(map[string]envOverride)
+	for _, entry := range os.Environ() {
+		name, value, ok := strings.Cut(entry, "=")
+		if !ok || !strings.HasPrefix(name, envPrefix) {
+			continue
+		}
+		out[resolve(name)] = envOverride{Name: name, Value: value}
 	}
-	return cfg, nil
+	return out, nil
+}
+
+// applyEnvironment применяет понятые переопределения и называет непонятые.
+//
+// Общий случай — одна сборка: обычно понятно всё. Разбор по одному включается
+// только когда полный набор не собрался, и стоит по сборке на переменную,
+// то есть доли секунды на старте один раз за жизнь процесса.
+func applyEnvironment(
+	path string,
+	overrides map[string]envOverride,
+) (*Config, []string, error) {
+	cfg, err := assemble(path, overrides)
+	if err == nil {
+		return cfg, nil, nil
+	}
+
+	// Ключи применяются в устойчивом порядке: иначе на одном и том же наборе
+	// отвергались бы разные ключи от запуска к запуску.
+	keys := make([]string, 0, len(overrides))
+	for key := range overrides {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	accepted := make(map[string]envOverride, len(overrides))
+	var ignored []string
+	for _, key := range keys {
+		accepted[key] = overrides[key]
+		if _, err := assemble(path, accepted); err != nil {
+			delete(accepted, key)
+			ignored = append(ignored, overrides[key].Name)
+		}
+	}
+
+	cfg, err = assemble(path, accepted)
+	if err != nil {
+		return nil, nil, err
+	}
+	return cfg, ignored, nil
 }
 
 // envKeyResolver сопоставляет переменную окружения с ключом конфигурации.
@@ -432,15 +559,37 @@ func Load(path string) (*Config, error) {
 // Не найденное имя возвращается как есть: тогда неизвестный ключ дойдёт до
 // декодера и будет отвергнут, а не проигнорирован молча.
 func envKeyResolver(k *koanf.Koanf) func(string) string {
+	// В индекс попадают и промежуточные узлы, а не только листья: переопределять
+	// приходится в том числе поля, которых в файле нет — символ наследует блок
+	// defaults целиком, и в его поддереве описано лишь отличающееся.
 	index := make(map[string]string)
 	for _, key := range k.Keys() {
-		index[strings.ToLower(strings.ReplaceAll(key, ".", "_"))] = key
+		parts := strings.Split(key, ".")
+		for i := 1; i <= len(parts); i++ {
+			path := strings.Join(parts[:i], ".")
+			index[strings.ToLower(strings.ReplaceAll(path, ".", "_"))] = path
+		}
 	}
 
 	return func(name string) string {
 		trimmed := strings.ToLower(strings.TrimPrefix(name, envPrefix))
 		if key, ok := index[trimmed]; ok {
 			return key
+		}
+
+		// Целиком ключ неизвестен — берётся самый длинный известный префикс.
+		//
+		// Регистр здесь не косметика: имена инструментов — ключи карты, и
+		// приведение их к нижнему регистру создавало не переопределение, а
+		// второй, фантомный символ. `MMSTANDX_SYMBOLS_XAU-USD_ECONOMICS_...`
+		// заводил `symbols.xau-usd` рядом с `symbols.XAU-USD`, и настройка
+		// молча не доезжала до инструмента, которому предназначалась.
+		// Остаток пути разрешит декодер, он к регистру нечувствителен.
+		parts := strings.Split(trimmed, "_")
+		for i := len(parts) - 1; i > 0; i-- {
+			if key, ok := index[strings.Join(parts[:i], "_")]; ok {
+				return key + "." + strings.Join(parts[i:], ".")
+			}
 		}
 		return strings.ReplaceAll(trimmed, "_", ".")
 	}
