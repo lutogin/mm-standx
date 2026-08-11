@@ -108,6 +108,30 @@ jobs:
       group: production-deploy
       cancel-in-progress: false
     steps:
+      # Recreating the container resets the scoring hour: every grid slot before
+      # the process started is counted as zero, deliberately, so that a restart
+      # cannot manufacture uptime the exchange never saw. Past roughly minute 15
+      # the hour can no longer reach the qualifying tier, so the actor withdraws
+      # until the next one — a deploy at minute 30 costs the whole remainder.
+      # Measured 10 August: four restarts, three of them mid-hour, three hours
+      # written off. The push lands at an arbitrary minute; the deploy should
+      # not.
+      #
+      # Put an escape hatch in the commit message when the fix cannot wait.
+      - name: Wait for the UTC hour boundary
+        if: ${{ !contains(github.event.head_commit.message, '[deploy-now]') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          minute=$(date -u +%-M)
+          if (( minute < 15 )); then
+            echo "minute $minute: the hour is still reachable, deploying now"
+            exit 0
+          fi
+          seconds=$(( (60 - minute) * 60 - $(date -u +%-S) ))
+          echo "minute $minute: waiting ${seconds}s so the deploy lands on the hour"
+          sleep "$seconds"
+
       - name: Configure SSH
         shell: bash
         env:
