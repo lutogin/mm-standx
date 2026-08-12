@@ -149,7 +149,7 @@ news:
   # A minute either side of the number itself: the only stretch where no
   # distance inside the reward band is safe, so the only answer is absence.
   hardBefore: 1m
-  hardAfter: 1m
+  hardAfter: 3m
   # Standing back is not the same as leaving. The programme scores a percentile
   # of the samples, so half an hour of zeros drags the whole hour down a tier
   # or past it, while the same half hour spent at the outer edge of the band
@@ -171,6 +171,7 @@ defaults:
     # Until the daily pool is observed, only the small calibration allocation
     # may go live. After enough days, set the conservative lower bound here;
     # scaling is blocked unless it covers the measured 22 USD/MH fill cost.
+    # DEPRICATED
     rewardRateLowerBoundUsdPerMakerHour: 0
     breakEvenUsdPerMakerHour: 22
     calibrationMaxAllocationUsd: 1000
@@ -345,7 +346,7 @@ defaults:
     hardFloorPct: 72
     reservePct: 8
   risk:
-    leverage: 9
+    leverage: 7
     maxNetPositionBase: "0" # 0 — закрывать любую позицию немедленно
   # External venue whose price leads the exchange mark. Off by default and
   # named per instrument: a symbol that tracks a different underlying is worse
@@ -367,7 +368,7 @@ defaults:
     # to catch a socket that died quietly, not a calm market. Past one tick the
     # official price supersedes the estimate anyway. At two seconds this warned
     # about a perfectly healthy gold feed once every two minutes.
-    staleAfter: 3s
+    staleAfter: 2s
 
 # Параметры начисления публикуются StandX и меняются оперативной командой:
 # https://docs.standx.com/docs/standx-perps-solutions/community-maker-yield

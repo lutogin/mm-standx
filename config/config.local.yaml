@@ -56,7 +56,7 @@ rateLimit:
 # на той же странице — см. PLAN.md §12.1.
 reward:
   bandBps: 10
-  maxWeightPct: 200
+  maxWeightPct: 120
   minWeightPct: 40
   uptimeTiers:
     - { thresholdPct: 70, multiplier: 1.0 }
@@ -75,7 +75,7 @@ risk:
   # Держится вплотную к действующему размеру, а не с запасом на вырост: потолок
   # в 120000 при аллокации 1000 не отвергал вообще ничего и проверял только то,
   # что число положительное.
-  maxNotionalUsd: 4000
+  maxNotionalUsd: 10000
   # Не денежный лимит, а детектор рассогласования модели с рынком: стратегия
   # построена на том, что исполнения редки.
   #
@@ -335,7 +335,7 @@ defaults:
     hardFloorPct: 72
     reservePct: 8
   risk:
-    leverage: 4
+    leverage: 7
     maxNetPositionBase: "0" # 0 — закрывать любую позицию немедленно
   # External venue whose price leads the exchange mark. Off by default and
   # named per instrument: a symbol that tracks a different underlying is worse
