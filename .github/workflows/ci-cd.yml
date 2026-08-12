@@ -132,6 +132,11 @@ jobs:
       #     echo "minute $minute: waiting ${seconds}s so the deploy lands on the hour"
       #     sleep "$seconds"
 
+      # Деплою нужны исходники: конфигурация больше не едет внутри образа,
+      # и её берут из рабочего каталога, а не из выкачанного тега.
+      - name: Check out source
+        uses: actions/checkout@v4
+
       - name: Configure SSH
         shell: bash
         env:

@@ -350,7 +350,7 @@ defaults:
     hardFloorPct: 72
     reservePct: 8
   risk:
-    leverage: 7
+    leverage: 8
     maxNetPositionBase: "0" # 0 — закрывать любую позицию немедленно
   # External venue whose price leads the exchange mark. Off by default and
   # named per instrument: a symbol that tracks a different underlying is worse
