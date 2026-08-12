@@ -643,3 +643,71 @@ func TestDistanceFloorIsOverridableFromTheEnvironment(t *testing.T) {
 		"gold inherits the defaults block, so the override has to reach it")
 	require.Equal(t, 0.6, cfg.Symbols["XAU-USD"].Appetite.PanicFraction)
 }
+
+// Ключ окружения, которого конфигурация не понимает, не имеет права ронять
+// процесс.
+//
+// 11 августа `MMSTANDX_SYMBOLS_XAU-USD_REFERENCE_ENABLED=false`, оставшийся
+// в .env от ветки с внешним фидом, положил бота в цикл падения. Сам он ничего
+// не включал — стоял `false`. Окружение живёт на сервере и переживает откаты
+// образа, поэтому расхождение с бинарником — штатное событие, а не авария.
+func TestUnknownEnvKeyIsIgnoredAndNamed(t *testing.T) {
+	t.Setenv("MMSTANDX_SYMBOLS_BTC-USD_LEGACYFEED_ENABLED", "false")
+
+	cfg, err := Load(writeConfig(t, minimalConfig))
+	require.NoError(t, err, "a key from another version must not keep the process down")
+	require.Equal(t, []string{"MMSTANDX_SYMBOLS_BTC-USD_LEGACYFEED_ENABLED"}, cfg.IgnoredEnv,
+		"and it must be named: silence here is the failure mode being fixed")
+}
+
+// Отбрасывается ровно непонятый ключ, а не весь набор: иначе одна устаревшая
+// строка в .env отменяла бы аллокацию и лимиты риска.
+func TestUnknownEnvKeyDoesNotDisarmTheRest(t *testing.T) {
+	t.Setenv("MMSTANDX_SYMBOLS_BTC-USD_LEGACYFEED_ENABLED", "false")
+	t.Setenv("MMSTANDX_SYMBOLS_BTC-USD_ALLOCATIONUSD", "777")
+	t.Setenv("MMSTANDX_RISK_MAXDAILYLOSSUSD", "42")
+
+	cfg, err := Load(writeConfig(t, minimalConfig))
+	require.NoError(t, err)
+
+	require.Equal(t, 777.0, cfg.Symbols["BTC-USD"].AllocationUSD)
+	require.Equal(t, 42.0, cfg.Risk.MaxDailyLossUSD)
+	require.Len(t, cfg.IgnoredEnv, 1)
+}
+
+// Переопределение поля, которого нет в файле, обязано доходить: символ
+// наследует блок defaults целиком, и окружение правит именно унаследованное.
+func TestEnvReachesFieldsInheritedFromDefaults(t *testing.T) {
+	t.Setenv("MMSTANDX_SYMBOLS_BTC-USD_ECONOMICS_CALIBRATIONMAXALLOCATIONUSD", "123")
+
+	cfg, err := Load(writeConfig(t, minimalConfig))
+	require.NoError(t, err)
+	require.Empty(t, cfg.IgnoredEnv)
+	require.Equal(t, 123.0, cfg.Symbols["BTC-USD"].Economics.CalibrationMaxAllocationUSD)
+}
+
+// Опечатка в файле остаётся отказом: там она правится осознанно и видна глазами,
+// а откат к умолчанию из кода означает порог, который никто не выбирал.
+func TestUnknownFileKeyStaysFatalEvenWithEnvTolerance(t *testing.T) {
+	_, err := Load(writeConfig(t, minimalConfig+`
+  ETH-USD:
+    enabled: true
+    allocationUsd: 1000
+    appetite:
+      minBpsTypo: 7.0
+`))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "minBpsTypo")
+}
+
+// Имя инструмента — ключ карты, и его регистр обязан сохраняться. Приведение
+// к нижнему заводило рядом с XAU-USD второй, фантомный символ, и настройка
+// молча не доезжала до того инструмента, которому предназначалась.
+func TestEnvOverrideDoesNotForkTheSymbolByCase(t *testing.T) {
+	t.Setenv("MMSTANDX_SYMBOLS_BTC-USD_ECONOMICS_CALIBRATIONMAXALLOCATIONUSD", "123")
+
+	cfg, err := Load(writeConfig(t, minimalConfig))
+	require.NoError(t, err)
+	require.NotContains(t, cfg.Symbols, "btc-usd", "no phantom symbol may appear")
+	require.Len(t, cfg.Symbols, 2)
+}

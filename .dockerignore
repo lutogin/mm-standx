@@ -14,3 +14,6 @@ graphify-out/
 *.log
 coverage.*
 docs/
+recordings-cpi/
+recordings-ref/
+recordings-smoke/

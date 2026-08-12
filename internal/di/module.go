@@ -101,7 +101,21 @@ func provideLogger(cfg *config.Config) *slog.Logger {
 	if cfg.Runtime.LogFormat == "json" {
 		handler = slog.NewJSONHandler(os.Stdout, opts)
 	}
-	return slog.New(handler).With("mode", string(cfg.Runtime.Mode))
+	log := slog.New(handler).With("mode", string(cfg.Runtime.Mode))
+
+	// Непонятые переменные окружения называются первой же строкой лога.
+	//
+	// Процесс на них больше не падает (см. config.Load), но тихо работать
+	// не на тех порогах, которые оператор считает заданными, — ровно тот отказ,
+	// ради исключения которого строгая проверка и заводилась. Уровень ERROR
+	// выбран не по тяжести для процесса, а по тому, что это всегда требует
+	// действия человека: либо опечатка, либо ключ от другой версии.
+	if len(cfg.IgnoredEnv) > 0 {
+		log.Error("environment variables the configuration does not understand, ignored",
+			"variables", strings.Join(cfg.IgnoredEnv, " "),
+			"effect", "the values from config.yaml apply instead")
+	}
+	return log
 }
 
 func provideClock() ports.Clock { return clock.New() }

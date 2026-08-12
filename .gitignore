@@ -22,3 +22,8 @@ coverage.*
 .DS_Store
 
 /test/live/data/session.json
+
+logs/
+recordings-cpi/
+recordings-ref/
+recordings-smoke/
