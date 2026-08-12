@@ -17,8 +17,6 @@ import (
 
 // minimalConfig — валидная основа, поверх которой тесты добавляют отклонения.
 const minimalConfig = `
-runtime:
-  mode: dry_run
 risk:
   # 70k выделенных средств при плече 4 дают 280k нотионала — общий лимит
   # обязан их вмещать, иначе конфигурация отвергается на старте.
@@ -171,9 +169,9 @@ func TestWalletKeyComesFromEnvironment(t *testing.T) {
 }
 
 func TestLiveModeRequiresWalletKey(t *testing.T) {
+	t.Setenv(modeEnv, string(ModeLive))
+
 	_, err := Load(writeConfig(t, `
-runtime:
-  mode: live
 symbols:
   BTC-USD:
     enabled: true
@@ -262,7 +260,6 @@ rateLimit:
 func TestValidationReportsAllProblemsAtOnce(t *testing.T) {
 	_, err := Load(writeConfig(t, `
 runtime:
-  mode: dry_run
   logLevel: verbose
   logFormat: xml
 rateLimit:
@@ -287,8 +284,6 @@ func TestMissingFileIsReported(t *testing.T) {
 // is no point discovering a known-in-advance mistake once money is in the market.
 func TestAggregateNotionalMustFitTheRiskLimit(t *testing.T) {
 	_, err := Load(writeConfig(t, `
-runtime:
-  mode: dry_run
 risk:
   maxNotionalUsd: 1000
 symbols:
@@ -306,10 +301,10 @@ symbols:
 // is tolerable while shadowing and not tolerable live.
 func TestLiveModeRequiresPersistedRiskState(t *testing.T) {
 	t.Setenv("STANDX_WALLET_PK", "0x01")
+	t.Setenv(modeEnv, string(ModeLive))
 
 	body := `
 runtime:
-  mode: live
   stateDir: ""
 symbols:
   BTC-USD:
@@ -453,81 +448,62 @@ symbols:
 	require.False(t, cfg.Symbols["SOL-USD"].Reference.Enabled)
 }
 
-// Файл, который едет на сервер, обязан быть боевым и один: режим и отбор
-// инструмента читаются из него же, без участия окружения.
+// Единственный файл конфигурации обязан грузиться в обоих режимах.
 //
 // Проверка существует потому, что отказ валидации на сервере выглядит не как
 // отказ. Процесс падает на старте, деплой откатывается на предыдущий образ,
 // метрики отвечают, — и прод двое суток крутит старый код при внешне исправном
 // контуре (PLAN.md §13). Дешевле обнаружить это здесь.
-func TestShippedConfigIsLiveAndSelfContained(t *testing.T) {
+func TestShippedConfigLoadsInBothModes(t *testing.T) {
 	body, err := os.ReadFile(filepath.Join("..", "..", "config", "config.yaml"))
 	require.NoError(t, err)
 	path := writeConfig(t, string(body))
 
 	t.Setenv(walletKeyEnv, "0x00")
 
-	cfg, err := Load(path)
-	require.NoError(t, err, "the shipped configuration must start in live mode")
-	require.True(t, cfg.IsLive(), "the file that reaches the server is the live one")
+	for _, mode := range []Mode{ModeDryRun, ModeLive} {
+		t.Setenv(modeEnv, string(mode))
 
-	enabled := cfg.EnabledSymbols()
-	require.Len(t, enabled, 1, "exactly the traded instrument stays enabled")
-	require.Contains(t, enabled, market.Symbol("XAU-USD"))
+		cfg, err := Load(path)
+		require.NoError(t, err, "the shipped configuration must start in %s", mode)
+		require.Equal(t, mode == ModeLive, cfg.IsLive())
+
+		enabled := cfg.EnabledSymbols()
+		require.Len(t, enabled, 1, "exactly the traded instrument stays enabled")
+		require.Contains(t, enabled, market.Symbol("XAU-USD"))
+	}
 }
 
-// Локальная конфигурация обязана грузиться и обязана быть теневой.
+// Незаданный режим означает теневой, а не боевой.
 //
-// Она существует ровно затем, чтобы `make run` на машине с ключом в .env
-// не отправил настоящие ордера: боевой файл теперь честно говорит live, и без
-// теневого двойника единственная защита от случайного запуска — память
-// запускающего.
-func TestLocalConfigIsDryRun(t *testing.T) {
-	body, err := os.ReadFile(filepath.Join("..", "..", "config", "config.local.yaml"))
-	require.NoError(t, err)
+// Умолчание здесь — единственное, что стоит между забытой строкой в .env
+// и настоящими ордерами: файл конфигурации один и одинаков везде, где его
+// запускают, поэтому «по умолчанию не торгуем» обязано жить в коде.
+func TestModeDefaultsToDryRunWhenUnset(t *testing.T) {
+	t.Setenv(modeEnv, "")
 
-	cfg, err := Load(writeConfig(t, string(body)))
+	cfg, err := Load(writeConfig(t, minimalConfig))
 	require.NoError(t, err)
-	require.False(t, cfg.IsLive(), "the local configuration must never send real orders")
+	require.False(t, cfg.IsLive(), "an unset mode must never mean live")
 }
 
-// Локальная конфигурация обязана отличаться от боевой ровно режимом.
+// Режим задаётся переменной и в файле не принимается.
 //
-// Копия, которой разрешено разойтись, расходится: местный прогон начинает
-// показывать поведение, которого в бою нет, и тем вреднее, чем больше ему
-// доверяют. Проверка сравнивает файлы по существу, без комментариев, и падает
-// на любом втором отличии — правку боевых параметров нужно скопировать сюда.
-func TestLocalConfigDiffersFromTheShippedOneOnlyInMode(t *testing.T) {
-	// Комментарии у файлов свои, поэтому сравнивается только значащая часть.
-	significant := func(t *testing.T, name string) []string {
-		t.Helper()
-		body, err := os.ReadFile(filepath.Join("..", "..", "config", name))
-		require.NoError(t, err)
+// Строка `mode: live` в версионируемом файле означала бы, что любой локальный
+// прогон на машине с рабочим ключом отправляет настоящие ордера. Опечатка
+// в имени переменной при этом обязана быть отказом, а не молчаливым dry_run:
+// оператор, включивший бой, должен узнать, что не включил.
+func TestModeComesFromTheEnvironmentOnly(t *testing.T) {
+	_, err := Load(writeConfig(t, minimalConfig+`
+runtime:
+  mode: live
+`))
+	require.ErrorContains(t, err, "mode", "the file must not be able to arm live trading")
 
-		var out []string
-		for _, line := range strings.Split(string(body), "\n") {
-			if idx := strings.Index(line, "#"); idx >= 0 {
-				line = line[:idx]
-			}
-			if line = strings.TrimRight(line, " \t"); strings.TrimSpace(line) != "" {
-				out = append(out, line)
-			}
-		}
-		return out
-	}
-
-	shipped := significant(t, "config.yaml")
-	local := significant(t, "config.local.yaml")
-	require.Equal(t, len(shipped), len(local), "the local copy has gained or lost a setting")
-
-	var differing []string
-	for i := range shipped {
-		if shipped[i] != local[i] {
-			differing = append(differing, strings.TrimSpace(shipped[i]))
-		}
-	}
-	require.Equal(t, []string{"mode: live"}, differing,
-		"only the mode may differ; copy the change across")
+	t.Setenv(modeEnv, "liev")
+	_, err = Load(writeConfig(t, minimalConfig))
+	require.ErrorContains(t, err, modeEnv)
+	require.ErrorContains(t, err, "liev")
 }
 
 // Переменные снятого слоя не действуют, но и не молчат.

@@ -78,8 +78,10 @@ func (c *Config) validateExposure() []error {
 
 func (r Runtime) validate() []error {
 	var errs []error
+	// Режим приходит из MM_MODE, поэтому и жалоба называет переменную: искать
+	// опечатку в конфигурации, которой там нет, — потерянные минуты на старте.
 	if r.Mode != ModeDryRun && r.Mode != ModeLive {
-		errs = append(errs, fmt.Errorf("runtime.mode: want %q or %q, got %q", ModeDryRun, ModeLive, r.Mode))
+		errs = append(errs, fmt.Errorf("%s: want %q or %q, got %q", modeEnv, ModeDryRun, ModeLive, r.Mode))
 	}
 	switch strings.ToLower(r.LogLevel) {
 	case "debug", "info", "warn", "error":

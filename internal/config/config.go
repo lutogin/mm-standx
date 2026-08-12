@@ -67,7 +67,16 @@ type Config struct {
 
 // Runtime — параметры процесса.
 type Runtime struct {
-	Mode          Mode          `koanf:"mode"`
+	// Mode приходит из переменной MM_MODE и в файле не принимается.
+	//
+	// Это единственный параметр, вынесенный из конфигурации, и вынесен он
+	// по цене ошибки, а не по удобству. Файл версионируется и одинаков везде,
+	// где его запускают; строка `mode: live` в нём означала бы, что любой
+	// локальный прогон на машине с рабочим ключом отправляет настоящие ордера.
+	//
+	// Незаданная переменная означает dry_run: торговля включается осознанным
+	// действием, а не тем, что кто-то забыл что-то выставить.
+	Mode          Mode          `koanf:"-"`
 	LogLevel      string        `koanf:"logLevel"`
 	LogFormat     string        `koanf:"logFormat"` // json | text
 	MetricsAddr   string        `koanf:"metricsAddr"`
@@ -455,10 +464,12 @@ type SymbolRisk struct {
 }
 
 const (
-	// dotenvPath — файл с секретами, подхватываемый при запуске.
+	// dotenvPath — файл, подхватываемый при запуске.
 	dotenvPath = ".env"
 	// walletKeyEnv — переменная с приватным ключом кошелька.
 	walletKeyEnv = "STANDX_WALLET_PK"
+	// modeEnv — переменная с режимом работы.
+	modeEnv = "MM_MODE"
 	// retiredEnvPrefix — префикс снятого слоя переопределений.
 	//
 	// Значение больше не читается ниоткуда, но имя нужно, чтобы узнать
@@ -527,8 +538,9 @@ func LoadDotEnv(nearPath string) error {
 // Load читает конфигурацию из значений по умолчанию и файла, применяет блок
 // defaults к каждому символу и валидирует результат.
 //
-// Из окружения берётся ровно одна вещь — приватный ключ кошелька. Всё
-// остальное описано в файле, и это единственное место, где его нужно искать.
+// Из окружения приходят ровно две вещи, и обе — не настройки стратегии:
+// приватный ключ кошелька (STANDX_WALLET_PK) и режим работы (MM_MODE).
+// Всё остальное описано в файле, и это единственное место, где его искать.
 //
 // Опечатка в файле — отказ загрузки, а не откат к значению по умолчанию:
 // порог, который никто не выбирал, в бою стоит денег.
@@ -543,6 +555,9 @@ func Load(path string) (*Config, error) {
 	}
 
 	cfg.Exchange.WalletPrivateKey = secret.New(os.Getenv(walletKeyEnv))
+	if mode := strings.TrimSpace(os.Getenv(modeEnv)); mode != "" {
+		cfg.Runtime.Mode = Mode(mode)
+	}
 
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)

@@ -1,8 +1,8 @@
 BIN   := bin
 IMAGE ?= lutogin/mm-standx:latest
 GO  ?= go
-# Теневой двойник боевой конфигурации. Боевая задаётся явно: CONFIG=config/config.yaml
-CONFIG ?= config/config.local.yaml
+# Конфигурация одна на всё. Режим приходит из MM_MODE, а не отсюда.
+CONFIG ?= config/config.yaml
 
 .DEFAULT_GOAL := help
 
@@ -60,13 +60,10 @@ tidy: ## Tidy go.mod
 record: build ## Collect market data for replay tests (make record DURATION=1h)
 	$(BIN)/recorder -config $(CONFIG) -duration $(or $(DURATION),15m)
 
-# Локальный запуск идёт по теневой конфигурации, а не по боевой.
-#
-# config/config.yaml честно говорит live, и на машине с рабочим ключом в .env
-# эта цель отправляла бы настоящие ордера. Боевой прогон требует сказать это
-# вслух: make run CONFIG=config/config.yaml
+# Режим берётся из MM_MODE в .env. Незаданная переменная означает dry_run;
+# теневой прогон на машине с боевым .env: make run MM_MODE=dry_run
 .PHONY: run
-run: build ## Run the bot in shadow mode (CONFIG=... to override)
+run: build ## Run the bot (mode comes from MM_MODE)
 	$(BIN)/mmbot -config $(CONFIG)
 
 .PHONY: image
