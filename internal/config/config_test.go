@@ -136,119 +136,6 @@ func TestEnabledSymbols(t *testing.T) {
 	require.NotContains(t, enabled, market.Symbol("ETH-USD"))
 }
 
-// Имена переменных окружения пишутся в верхнем регистре, а ключи конфигурации —
-// в camelCase. Без разрешения регистра переопределение молча не срабатывало бы.
-func TestEnvOverrideResolvesCamelCaseKeys(t *testing.T) {
-	t.Setenv("MMSTANDX_RUNTIME_STATSINTERVAL", "6s")
-	t.Setenv("MMSTANDX_RATELIMIT_SUSTAINEDRPS", "9")
-	t.Setenv("MMSTANDX_HEALTH_MARKSTALE", "12s")
-
-	cfg, err := Load(writeConfig(t, minimalConfig))
-	require.NoError(t, err)
-
-	require.Equal(t, 6*time.Second, cfg.Runtime.StatsInterval)
-	require.Equal(t, 9.0, cfg.RateLimit.SustainedRPS)
-	require.Equal(t, 12*time.Second, cfg.Health.MarkStale)
-}
-
-// symbolWithReference — инструмент, объявивший все ключи, которые тесты ниже
-// переопределяют.
-//
-// Объявление обязательно: переопределить можно только ключ, уже существующий
-// в дереве конфигурации. Наследование блока defaults происходит в коде, после
-// разбора, и ключа в дереве не создаёт. Ограничение не новое и одинаково
-// действует для обеих записей имени, но промолчать о нём здесь значило бы
-// написать тест, проходящий по случайной причине.
-const symbolWithReference = `
-symbols:
-  XAU-USD:
-    enabled: true
-    allocationUsd: 60
-    program: { unitSize: "30", perSideCap: "60", maxMakerHoursPerHour: 2 }
-    reference: { enabled: false, provider: binance_futures, symbol: XAUUSDT }
-`
-
-// Имя инструмента несёт дефис, а имена переменных окружения — нет: разбор .env
-// отвергает такую строку целиком, и переопределение посимвольной настройки
-// нельзя было положить туда, где живут все остальные переопределения.
-func TestSymbolOverrideAcceptsUnderscoreSpelling(t *testing.T) {
-	path := writeConfig(t, symbolWithReference)
-
-	t.Setenv("MMSTANDX_SYMBOLS_XAU_USD_ALLOCATIONUSD", "500")
-	t.Setenv("MMSTANDX_SYMBOLS_XAU_USD_REFERENCE_ENABLED", "true")
-
-	cfg, err := Load(path)
-	require.NoError(t, err)
-	require.Equal(t, 500.0, cfg.Symbols["XAU-USD"].AllocationUSD)
-	require.True(t, cfg.Symbols["XAU-USD"].Reference.Enabled)
-}
-
-// Прежнее написание продолжает работать: оно уже стоит в боевых окружениях,
-// и выкатка, требующая согласованной правки на сервере, — это выкатка, которая
-// однажды приедет без неё.
-func TestSymbolOverrideStillAcceptsTheDashedSpelling(t *testing.T) {
-	path := writeConfig(t, symbolWithReference)
-
-	t.Setenv("MMSTANDX_SYMBOLS_XAU-USD_ALLOCATIONUSD", "400")
-
-	cfg, err := Load(path)
-	require.NoError(t, err)
-	require.Equal(t, 400.0, cfg.Symbols["XAU-USD"].AllocationUSD)
-}
-
-// Псевдоним не имеет права затенить настоящий ключ: точная запись сильнее.
-func TestUnderscoreAliasNeverShadowsARealKey(t *testing.T) {
-	path := writeConfig(t, `
-symbols:
-  XAU-USD:
-    enabled: false
-    allocationUsd: 1
-    program: { unitSize: "30", perSideCap: "60", maxMakerHoursPerHour: 2 }
-  XAU_USD:
-    enabled: false
-    allocationUsd: 2
-    program: { unitSize: "30", perSideCap: "60", maxMakerHoursPerHour: 2 }
-`)
-
-	t.Setenv("MMSTANDX_SYMBOLS_XAU_USD_ALLOCATIONUSD", "700")
-
-	cfg, err := Load(path)
-	require.NoError(t, err)
-	require.Equal(t, 700.0, cfg.Symbols["XAU_USD"].AllocationUSD,
-		"the instrument actually named that way owns the variable")
-	require.NotEqual(t, 700.0, cfg.Symbols["XAU-USD"].AllocationUSD)
-}
-
-// Переопределение обязано пережить разбор .env, а не только окружение процесса:
-// именно файл едет на сервер, и именно его читает загрузчик рядом с конфигом.
-func TestSymbolOverrideSurvivesDotEnv(t *testing.T) {
-	// Разбор .env кладёт переменные в окружение процесса и за собой не убирает.
-	// Для приложения это и есть смысл файла, а для теста — утечка в следующие:
-	// без уборки один этот случай переопределял бы конфигурацию всего пакета.
-	const key = "MMSTANDX_SYMBOLS_XAU_USD_REFERENCE_ENABLED"
-	t.Cleanup(func() { os.Unsetenv(key) })
-
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	require.NoError(t, os.WriteFile(path, []byte(strings.Replace(
-		symbolWithReference, "enabled: false, provider", "enabled: true, provider", 1)), 0o600))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, ".env"),
-		[]byte(key+"=false\n"), 0o600))
-
-	cfg, err := Load(path)
-	require.NoError(t, err, "a dotenv file must be able to hold this override")
-	require.False(t, cfg.Symbols["XAU-USD"].Reference.Enabled,
-		"the file has to be able to turn the feed off, which is the whole point")
-}
-
-func TestEnvOverrideReachesSymbolFields(t *testing.T) {
-	t.Setenv("MMSTANDX_SYMBOLS_BTC-USD_ALLOCATIONUSD", "12345")
-
-	cfg, err := Load(writeConfig(t, minimalConfig))
-	require.NoError(t, err)
-	require.Equal(t, 12345.0, cfg.Symbols["BTC-USD"].AllocationUSD)
-}
-
 // Опечатка в имени параметра иначе молча вернула бы значение по умолчанию,
 // и бот торговал бы не по тем порогам.
 func TestUnknownKeyIsRejected(t *testing.T) {
@@ -449,56 +336,21 @@ defaults:
 	require.ErrorContains(t, err, "can never bind the estimate")
 }
 
-// One file ships to the server; what to trade is decided at launch. The list
-// only selects among instruments described in the file — programme parameters
-// and allocation are published by the exchange and chosen deliberately, not
-// set by an environment variable.
-func TestRuntimeSymbolsSelectsWhatToTrade(t *testing.T) {
-	t.Setenv("MMSTANDX_RUNTIME_SYMBOLS", "BTC-USD")
-
-	cfg, err := Load(writeConfig(t, minimalConfig))
-	require.NoError(t, err)
-
-	enabled := cfg.EnabledSymbols()
-	require.Len(t, enabled, 1)
-	require.Contains(t, enabled, market.Symbol("BTC-USD"))
-	require.NotContains(t, enabled, market.Symbol("XAG-USD"),
-		"the selection overrides enabled: true from the file")
-}
-
-// A typo must not start a bot with no instruments at all: silence is the one
-// failure mode that looks exactly like working correctly.
-func TestUnknownSymbolInSelectionIsRejected(t *testing.T) {
-	t.Setenv("MMSTANDX_RUNTIME_SYMBOLS", "XAU-USB")
-
-	_, err := Load(writeConfig(t, minimalConfig))
-	require.ErrorContains(t, err, "XAU-USB")
-	require.ErrorContains(t, err, "known:")
-}
-
-// Selecting an instrument the file left disabled is the point of the knob, but
-// it still has to be configured well enough to trade.
-func TestSelectionStillRequiresValidSymbolConfig(t *testing.T) {
-	body := minimalConfig + `
-  ETH-USD:
-    enabled: false
-    program: { unitSize: "60", perSideCap: "600", maxMakerHoursPerHour: 10 }
-`
-	t.Setenv("MMSTANDX_RUNTIME_SYMBOLS", "ETH-USD")
-	_, err := Load(writeConfig(t, body))
-	require.ErrorContains(t, err, "allocationUsd")
-}
-
-// Конфигурация запекается в образ и на сервере не правится, поэтому опечатка
-// в ней обнаруживается только в проде и только падением на старте. Файл
-// копируется во временный каталог: рядом с ним не должно оказаться .env
-// разработчика, иначе результат зависел бы от машины.
+// Конфигурация едет на сервер отдельным файлом, и опечатка в ней обнаруживается
+// только в проде, только падением на старте — а упавший старт откатывает деплой
+// на предыдущий образ. Дешевле проверить здесь. Файл копируется во временный
+// каталог: рядом с ним не должно оказаться .env разработчика, иначе результат
+// зависел бы от машины.
 func TestShippedConfigLoads(t *testing.T) {
-	body, err := os.ReadFile(filepath.Join("..", "..", "config.yaml"))
+	body, err := os.ReadFile(filepath.Join("..", "..", "config", "config.yaml"))
 	require.NoError(t, err)
+
+	// Файл боевой, а боевой режим требует ключа. Проверяется здесь не он,
+	// а параметры стратегии, поэтому ключ подставляется заведомо негодный.
+	t.Setenv(walletKeyEnv, "0x00")
 
 	cfg, err := Load(writeConfig(t, string(body)))
-	require.NoError(t, err, "the config baked into the image must load")
+	require.NoError(t, err, "the configuration that reaches the server must load")
 
 	gold := cfg.Symbols["XAU-USD"]
 	require.True(t, gold.Enabled)
@@ -524,10 +376,14 @@ func TestShippedConfigLoads(t *testing.T) {
 	require.GreaterOrEqual(t, (gold.Appetite.MinDeadBandBps - half).Float64(), 0.5,
 		"the outer rungs need real margin, not the boundary the start-up check accepts")
 
-	// Внешний ориентир — единственный сигнал, приходящий раньше движения mark.
-	// Без него быстрый путь опирается на середину стакана, которая двигается
-	// тем же ордером, что нас и исполняет, то есть предупреждает нулём.
-	require.True(t, gold.Reference.Enabled, "the traded instrument needs a leading reference")
+	// Внешний ориентир описан целиком и правильно, независимо от того, включён ли
+	// он сейчас. Флаг — решение, площадка и символ — факт: опечатка в них иначе
+	// всплывёт ровно в момент включения фида, то есть в бою и под нагрузкой.
+	//
+	// Сам фид пока выключен намеренно: не измерено, сколько упреждения он даёт
+	// (PLAN.md §12.15), а быстрый сигнал до тех пор берётся со смещения середины
+	// стакана. До 12 августа это решение жило переменной окружения, и файл
+	// утверждал обратное тому, чем торговал бот.
 	require.Equal(t, ProviderBinanceFutures, gold.Reference.Provider)
 	require.Equal(t, "XAUUSDT", gold.Reference.Symbol)
 	require.LessOrEqual(t, gold.Reference.StaleAfter, markTick,
@@ -597,98 +453,105 @@ symbols:
 	require.False(t, cfg.Symbols["SOL-USD"].Reference.Enabled)
 }
 
-// Тот же файл обязан грузиться и в боевом режиме, с тем же отбором инструмента,
-// каким его запускает docker-compose.
+// Файл, который едет на сервер, обязан быть боевым и один: режим и отбор
+// инструмента читаются из него же, без участия окружения.
 //
 // Проверка существует потому, что отказ валидации на сервере выглядит не как
 // отказ. Процесс падает на старте, деплой откатывается на предыдущий образ,
 // метрики отвечают, — и прод двое суток крутит старый код при внешне исправном
 // контуре (PLAN.md §13). Дешевле обнаружить это здесь.
-func TestShippedConfigLoadsInLiveMode(t *testing.T) {
-	body, err := os.ReadFile(filepath.Join("..", "..", "config.yaml"))
+func TestShippedConfigIsLiveAndSelfContained(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join("..", "..", "config", "config.yaml"))
 	require.NoError(t, err)
 	path := writeConfig(t, string(body))
 
-	t.Setenv("MMSTANDX_RUNTIME_MODE", string(ModeLive))
-	t.Setenv("MMSTANDX_RUNTIME_SYMBOLS", "XAU-USD")
 	t.Setenv(walletKeyEnv, "0x00")
 
 	cfg, err := Load(path)
-	require.NoError(t, err, "the image must be able to start in live mode")
-	require.True(t, cfg.IsLive())
+	require.NoError(t, err, "the shipped configuration must start in live mode")
+	require.True(t, cfg.IsLive(), "the file that reaches the server is the live one")
 
 	enabled := cfg.EnabledSymbols()
-	require.Len(t, enabled, 1, "the selection has to leave exactly the traded instrument")
+	require.Len(t, enabled, 1, "exactly the traded instrument stays enabled")
 	require.Contains(t, enabled, market.Symbol("XAU-USD"))
 }
 
-// Дистанция — первый параметр, который придётся править под давлением, а
-// конфигурация запечена в образ. Правка обязана быть доступна окружением,
-// иначе срочное отступление от рынка требует пересборки и публикации образа.
-func TestDistanceFloorIsOverridableFromTheEnvironment(t *testing.T) {
-	body, err := os.ReadFile(filepath.Join("..", "..", "config.yaml"))
-	require.NoError(t, err)
-	path := writeConfig(t, string(body))
-
-	base, err := Load(path)
-	require.NoError(t, err)
-	require.NotEqual(t, 6.0, float64(base.Symbols["XAU-USD"].Appetite.MinBps))
-
-	t.Setenv("MMSTANDX_DEFAULTS_APPETITE_MINBPS", "6.0")
-	t.Setenv("MMSTANDX_DEFAULTS_APPETITE_PANICFRACTION", "0.6")
-
-	cfg, err := Load(path)
-	require.NoError(t, err)
-	require.Equal(t, 6.0, float64(cfg.Symbols["XAU-USD"].Appetite.MinBps),
-		"gold inherits the defaults block, so the override has to reach it")
-	require.Equal(t, 0.6, cfg.Symbols["XAU-USD"].Appetite.PanicFraction)
-}
-
-// Ключ окружения, которого конфигурация не понимает, не имеет права ронять
-// процесс.
+// Локальная конфигурация обязана грузиться и обязана быть теневой.
 //
-// 11 августа `MMSTANDX_SYMBOLS_XAU-USD_REFERENCE_ENABLED=false`, оставшийся
-// в .env от ветки с внешним фидом, положил бота в цикл падения. Сам он ничего
-// не включал — стоял `false`. Окружение живёт на сервере и переживает откаты
-// образа, поэтому расхождение с бинарником — штатное событие, а не авария.
-func TestUnknownEnvKeyIsIgnoredAndNamed(t *testing.T) {
-	t.Setenv("MMSTANDX_SYMBOLS_BTC-USD_LEGACYFEED_ENABLED", "false")
+// Она существует ровно затем, чтобы `make run` на машине с ключом в .env
+// не отправил настоящие ордера: боевой файл теперь честно говорит live, и без
+// теневого двойника единственная защита от случайного запуска — память
+// запускающего.
+func TestLocalConfigIsDryRun(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join("..", "..", "config", "config.local.yaml"))
+	require.NoError(t, err)
 
-	cfg, err := Load(writeConfig(t, minimalConfig))
-	require.NoError(t, err, "a key from another version must not keep the process down")
-	require.Equal(t, []string{"MMSTANDX_SYMBOLS_BTC-USD_LEGACYFEED_ENABLED"}, cfg.IgnoredEnv,
-		"and it must be named: silence here is the failure mode being fixed")
+	cfg, err := Load(writeConfig(t, string(body)))
+	require.NoError(t, err)
+	require.False(t, cfg.IsLive(), "the local configuration must never send real orders")
 }
 
-// Отбрасывается ровно непонятый ключ, а не весь набор: иначе одна устаревшая
-// строка в .env отменяла бы аллокацию и лимиты риска.
-func TestUnknownEnvKeyDoesNotDisarmTheRest(t *testing.T) {
-	t.Setenv("MMSTANDX_SYMBOLS_BTC-USD_LEGACYFEED_ENABLED", "false")
-	t.Setenv("MMSTANDX_SYMBOLS_BTC-USD_ALLOCATIONUSD", "777")
+// Локальная конфигурация обязана отличаться от боевой ровно режимом.
+//
+// Копия, которой разрешено разойтись, расходится: местный прогон начинает
+// показывать поведение, которого в бою нет, и тем вреднее, чем больше ему
+// доверяют. Проверка сравнивает файлы по существу, без комментариев, и падает
+// на любом втором отличии — правку боевых параметров нужно скопировать сюда.
+func TestLocalConfigDiffersFromTheShippedOneOnlyInMode(t *testing.T) {
+	// Комментарии у файлов свои, поэтому сравнивается только значащая часть.
+	significant := func(t *testing.T, name string) []string {
+		t.Helper()
+		body, err := os.ReadFile(filepath.Join("..", "..", "config", name))
+		require.NoError(t, err)
+
+		var out []string
+		for _, line := range strings.Split(string(body), "\n") {
+			if idx := strings.Index(line, "#"); idx >= 0 {
+				line = line[:idx]
+			}
+			if line = strings.TrimRight(line, " \t"); strings.TrimSpace(line) != "" {
+				out = append(out, line)
+			}
+		}
+		return out
+	}
+
+	shipped := significant(t, "config.yaml")
+	local := significant(t, "config.local.yaml")
+	require.Equal(t, len(shipped), len(local), "the local copy has gained or lost a setting")
+
+	var differing []string
+	for i := range shipped {
+		if shipped[i] != local[i] {
+			differing = append(differing, strings.TrimSpace(shipped[i]))
+		}
+	}
+	require.Equal(t, []string{"mode: live"}, differing,
+		"only the mode may differ; copy the change across")
+}
+
+// Переменные снятого слоя не действуют, но и не молчат.
+//
+// Строка MMSTANDX_* на сервере переживает смену версии. После снятия слоя она
+// не делает ничего — и это ровно тот случай, когда оператор считает предел
+// заданным, а действует значение из файла. Разница обязана быть названа.
+func TestRetiredEnvOverridesAreInertAndNamed(t *testing.T) {
 	t.Setenv("MMSTANDX_RISK_MAXDAILYLOSSUSD", "42")
 
-	cfg, err := Load(writeConfig(t, minimalConfig))
-	require.NoError(t, err)
+	body := strings.Replace(minimalConfig,
+		"maxNotionalUsd: 300000", "maxNotionalUsd: 300000\n  maxDailyLossUsd: 7", 1)
+	require.Contains(t, body, "maxDailyLossUsd", "the substitution must have taken")
 
-	require.Equal(t, 777.0, cfg.Symbols["BTC-USD"].AllocationUSD)
-	require.Equal(t, 42.0, cfg.Risk.MaxDailyLossUSD)
-	require.Len(t, cfg.IgnoredEnv, 1)
+	cfg, err := Load(writeConfig(t, body))
+	require.NoError(t, err, "a leftover variable must not keep the process down")
+	require.Equal(t, 7.0, cfg.Risk.MaxDailyLossUSD, "the file is the only source in force")
+	require.Equal(t, []string{"MMSTANDX_RISK_MAXDAILYLOSSUSD"}, StaleEnvOverrides(),
+		"and the dead variable must be named: silence here is the failure being fixed")
 }
 
-// Переопределение поля, которого нет в файле, обязано доходить: символ
-// наследует блок defaults целиком, и окружение правит именно унаследованное.
-func TestEnvReachesFieldsInheritedFromDefaults(t *testing.T) {
-	t.Setenv("MMSTANDX_SYMBOLS_BTC-USD_ECONOMICS_CALIBRATIONMAXALLOCATIONUSD", "123")
-
-	cfg, err := Load(writeConfig(t, minimalConfig))
-	require.NoError(t, err)
-	require.Empty(t, cfg.IgnoredEnv)
-	require.Equal(t, 123.0, cfg.Symbols["BTC-USD"].Economics.CalibrationMaxAllocationUSD)
-}
-
-// Опечатка в файле остаётся отказом: там она правится осознанно и видна глазами,
+// Опечатка в файле — отказ загрузки: там она правится осознанно и видна глазами,
 // а откат к умолчанию из кода означает порог, который никто не выбирал.
-func TestUnknownFileKeyStaysFatalEvenWithEnvTolerance(t *testing.T) {
+func TestUnknownFileKeyIsFatal(t *testing.T) {
 	_, err := Load(writeConfig(t, minimalConfig+`
   ETH-USD:
     enabled: true
@@ -698,16 +561,4 @@ func TestUnknownFileKeyStaysFatalEvenWithEnvTolerance(t *testing.T) {
 `))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "minBpsTypo")
-}
-
-// Имя инструмента — ключ карты, и его регистр обязан сохраняться. Приведение
-// к нижнему заводило рядом с XAU-USD второй, фантомный символ, и настройка
-// молча не доезжала до того инструмента, которому предназначалась.
-func TestEnvOverrideDoesNotForkTheSymbolByCase(t *testing.T) {
-	t.Setenv("MMSTANDX_SYMBOLS_BTC-USD_ECONOMICS_CALIBRATIONMAXALLOCATIONUSD", "123")
-
-	cfg, err := Load(writeConfig(t, minimalConfig))
-	require.NoError(t, err)
-	require.NotContains(t, cfg.Symbols, "btc-usd", "no phantom symbol may appear")
-	require.Len(t, cfg.Symbols, 2)
 }

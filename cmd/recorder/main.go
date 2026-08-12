@@ -26,7 +26,7 @@ import (
 const shutdownTimeout = 10 * time.Second
 
 func main() {
-	configPath := flag.String("config", "config.yaml", "path to the configuration file")
+	configPath := flag.String("config", "config/config.yaml", "path to the configuration file")
 	outputDir := flag.String("out", "", "output directory for recordings (defaults to runtime.recordingDir)")
 	duration := flag.Duration("duration", 0, "recording duration; 0 means run until terminated")
 	flag.Parse()

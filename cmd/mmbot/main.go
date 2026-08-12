@@ -25,7 +25,7 @@ import (
 const shutdownTimeout = 20 * time.Second
 
 func main() {
-	configPath := flag.String("config", "config.yaml", "path to the configuration file")
+	configPath := flag.String("config", "config/config.yaml", "path to the configuration file")
 	flag.Parse()
 
 	cfg, err := config.Load(*configPath)

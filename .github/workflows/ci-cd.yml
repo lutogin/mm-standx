@@ -160,6 +160,28 @@ jobs:
             "root@${VPS_HOST}" \
             "docker login --username '$DOCKERHUB_USERNAME' --password-stdin"
 
+      # Конфигурация больше не запечена в образ и едет отдельно.
+      #
+      # Кладётся в промежуточный каталог, а не поверх работающего: обрыв ssh
+      # на середине копирования иначе оставил бы полуфайл, по которому бот
+      # поднимется при следующем же перезапуске. Подмена — на той стороне,
+      # одним mv, вместе со снимком предыдущей версии для отката.
+      #
+      # docker-compose.yml едет тем же рейсом: он описывает, каким томом эта
+      # конфигурация подключается, и разъехаться с ней не может.
+      - name: Upload configuration
+        shell: bash
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+        run: |
+          set -euo pipefail
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=yes "root@${VPS_HOST}" \
+            'rm -rf /root/opt/mm-standx/config.incoming'
+          scp -o BatchMode=yes -o StrictHostKeyChecking=yes -r \
+            ./config "root@${VPS_HOST}:/root/opt/mm-standx/config.incoming"
+          scp -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            ./docker-compose.yml "root@${VPS_HOST}:/root/opt/mm-standx/docker-compose.yml"
+
       - name: Deploy
         shell: bash
         env:
@@ -170,20 +192,36 @@ jobs:
             "root@${VPS_HOST}" 'bash -s' <<'REMOTE'
           set -Eeuo pipefail
 
-          test -f /root/opt/mm-standx/docker-compose.yml || {
-            echo "missing /root/opt/mm-standx/docker-compose.yml" >&2
+          root=/root/opt/mm-standx
+
+          test -f "$root/docker-compose.yml" || {
+            echo "missing $root/docker-compose.yml" >&2
             exit 1
           }
-          test -f /root/opt/mm-standx/.env || {
-            echo "missing /root/opt/mm-standx/.env" >&2
+          # Ключ кошелька остаётся единственным, что живёт на сервере руками.
+          test -f "$root/.env" || {
+            echo "missing $root/.env" >&2
             exit 1
           }
+          test -f "$root/config.incoming/config.yaml" || {
+            echo "missing $root/config.incoming/config.yaml: upload did not land" >&2
+            exit 1
+          }
+
+          # Снимок действующей конфигурации снимается до подмены: откат на
+          # предыдущий образ со сломавшей старт конфигурацией не откат.
+          rm -rf "$root/config.previous"
+          if [[ -d "$root/config" ]]; then
+            cp -a "$root/config" "$root/config.previous"
+          fi
+          rm -rf "$root/config"
+          mv "$root/config.incoming" "$root/config"
 
           previous_image="$(docker image inspect lutogin/mm-standx:latest \
             --format '{{.Id}}' 2>/dev/null || true)"
 
-          docker compose --project-directory /root/opt/mm-standx pull mmbot
-          docker compose --project-directory /root/opt/mm-standx \
+          docker compose --project-directory "$root" pull mmbot
+          docker compose --project-directory "$root" \
             up -d --remove-orphans mmbot
 
           for _ in $(seq 1 60); do
@@ -198,12 +236,21 @@ jobs:
             sleep 2
           done
 
-          docker compose --project-directory /root/opt/mm-standx \
+          docker compose --project-directory "$root" \
             logs --no-color --tail=100 mmbot >&2 || true
+
+          # Откатывается пара целиком — образ и конфигурация. Порознь они
+          # не совпадают: сломать старт способна любая из двух половин, и
+          # старый бинарь с новым файлом — такое же несочетание, как наоборот.
+          if [[ -d "$root/config.previous" ]]; then
+            rm -rf "$root/config"
+            mv "$root/config.previous" "$root/config"
+            echo "configuration rolled back to the previous version" >&2
+          fi
 
           if [[ -n "$previous_image" ]]; then
             docker tag "$previous_image" lutogin/mm-standx:latest
-            docker compose --project-directory /root/opt/mm-standx \
+            docker compose --project-directory "$root" \
               up -d --force-recreate mmbot
           fi
 

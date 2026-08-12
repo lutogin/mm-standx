@@ -1,7 +1,18 @@
 // Package config загружает и валидирует конфигурацию бота.
 //
-// Источники в порядке возрастания приоритета: значения по умолчанию, YAML-файл,
-// переменные окружения с префиксом MMSTANDX_. Секреты берутся только из окружения.
+// Источник настроек ровно один — YAML-файл поверх значений по умолчанию.
+// Окружение не переопределяет ничего: из него читается единственная вещь,
+// которой в файле не место, — приватный ключ кошелька.
+//
+// Так было не всегда. Прежде любой параметр переопределялся переменной
+// MMSTANDX_*, и это стоило дважды. 11 августа устаревший ключ `reference`,
+// оставшийся в .env от закрытой ветки, уронил процесс в цикл падения; деплой
+// на упавший старт откатывается на предыдущий образ, то есть одна забытая
+// строка тихо заморозила прод на старой сборке. Второй раз — тише и дороже:
+// действующие пределы риска разъехались с записанными в файле, и по числам
+// в репозитории нельзя было сказать, чем именно торгует бот.
+//
+// Отсюда правило: действующее значение читается в одном месте, и это файл.
 //
 // Валидация строгая и происходит на старте: неверно упорядоченные пороги дистанций
 // или отсутствующая аллокация — это ошибки, которые в бою стоят денег, поэтому
@@ -12,7 +23,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -52,15 +63,6 @@ type Config struct {
 	News      News              `koanf:"news"`
 	Defaults  Symbol            `koanf:"defaults"`
 	Symbols   map[string]Symbol `koanf:"symbols"`
-
-	// IgnoredEnv — переменные MMSTANDX_*, которых конфигурация не понимает.
-	//
-	// Пустой список — норма. Непустой означает, что окружение на сервере
-	// разошлось с выкаченным бинарником: либо опечатка, либо ключ от другой
-	// версии. Процесс при этом работает на значениях из config.yaml, но знать
-	// об этом обязан тот, кто эти переменные ставил, — поэтому список
-	// печатается при старте и выкладывается в метрику.
-	IgnoredEnv []string `koanf:"-"`
 }
 
 // Runtime — параметры процесса.
@@ -89,16 +91,6 @@ type Runtime struct {
 	StatsDir string `koanf:"statsDir"`
 	// StatsSample — период съёма показаний внутри часа.
 	StatsSample time.Duration `koanf:"statsSample"`
-	// Symbols — какие инструменты торговать, поверх флагов enabled в файле.
-	//
-	// Существует ради окружения: MMSTANDX_RUNTIME_SYMBOLS=XAU-USD выбирает
-	// инструмент, не трогая конфигурацию. Один и тот же файл едет на сервер,
-	// а решение о том, что торговать, принимается при запуске.
-	//
-	// Список только отбирает из описанных в файле и не может добавить
-	// неизвестный инструмент: параметры начисления и аллокация публикуются
-	// биржей и подбираются осознанно, а не задаются переменной среды.
-	Symbols []string `koanf:"symbols"`
 }
 
 // Exchange — координаты и учётные данные биржи.
@@ -463,26 +455,61 @@ type SymbolRisk struct {
 }
 
 const (
-	// envPrefix — префикс переменных окружения, переопределяющих конфигурацию.
-	envPrefix = "MMSTANDX_"
 	// dotenvPath — файл с секретами, подхватываемый при запуске.
 	dotenvPath = ".env"
 	// walletKeyEnv — переменная с приватным ключом кошелька.
 	walletKeyEnv = "STANDX_WALLET_PK"
+	// retiredEnvPrefix — префикс снятого слоя переопределений.
+	//
+	// Значение больше не читается ниоткуда, но имя нужно, чтобы узнать
+	// оставшуюся строку на сервере и сказать о ней вслух.
+	retiredEnvPrefix = "MMSTANDX_"
 )
+
+// StaleEnvOverrides перечисляет переменные снятого слоя MMSTANDX_*, ещё
+// присутствующие в окружении.
+//
+// Пустой список — норма и ожидаемый исход. Непустой означает, что окружение
+// на сервере пережило смену версии: строка стоит, оператор считает параметр
+// заданным, а действует значение из файла. Разница между «параметр задан»
+// и «параметр действует» — ровно тот отказ, который здесь ловится.
+//
+// Список отсортирован: одинаковое окружение обязано давать одинаковую строку
+// в логе, иначе её нельзя сравнить с предыдущим запуском.
+func StaleEnvOverrides() []string {
+	var out []string
+	for _, entry := range os.Environ() {
+		name, _, ok := strings.Cut(entry, "=")
+		if ok && strings.HasPrefix(name, retiredEnvPrefix) {
+			out = append(out, name)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
 
 // LoadDotEnv подхватывает переменные из файла .env, если он существует.
 //
-// Файл ищется рядом с конфигурацией, а не в текущем каталоге: процесс могут
+// Файл ищется от конфигурации, а не только в текущем каталоге: процесс могут
 // запустить откуда угодно, а тесты — вообще из каталога пакета. Привязка
 // к расположению конфигурации делает поиск предсказуемым.
+//
+// Каталогов три, в порядке убывания точности: рядом с самим файлом, на уровень
+// выше и в текущем каталоге. Средний — не запас прочности, а рабочая раскладка:
+// конфигурации лежат в config/, а .env с ключом — рядом с docker-compose.yml,
+// то есть ровно на уровень выше.
 //
 // Уже установленные переменные окружения не перезаписываются: то, что задано
 // явно при запуске, приоритетнее файла.
 func LoadDotEnv(nearPath string) error {
-	candidates := []string{filepath.Join(filepath.Dir(nearPath), dotenvPath)}
-	if nearPath == "" {
-		candidates = []string{dotenvPath}
+	candidates := []string{dotenvPath}
+	if nearPath != "" {
+		dir := filepath.Dir(nearPath)
+		candidates = []string{
+			filepath.Join(dir, dotenvPath),
+			filepath.Join(filepath.Dir(dir), dotenvPath),
+			dotenvPath,
+		}
 	}
 
 	for _, path := range candidates {
@@ -497,55 +524,21 @@ func LoadDotEnv(nearPath string) error {
 	return nil
 }
 
-// envOverride — одно переопределение из окружения вместе с исходным именем.
+// Load читает конфигурацию из значений по умолчанию и файла, применяет блок
+// defaults к каждому символу и валидирует результат.
 //
-// Имя хранится потому, что оператор действует именно им: ключ конфигурации
-// `symbols.xau-usd.reference.enabled` не подскажет, какую строку править в .env.
-type envOverride struct {
-	Name  string
-	Value string
-}
-
-// Load читает конфигурацию из значений по умолчанию, файла и окружения,
-// применяет блок defaults к каждому символу и валидирует результат.
+// Из окружения берётся ровно одна вещь — приватный ключ кошелька. Всё
+// остальное описано в файле, и это единственное место, где его нужно искать.
 //
-// Опечатка в файле остаётся отказом, а непонятый ключ окружения — нет, и это
-// не послабление, а разная цена ошибки. Файл лежит в репозитории, правится
-// осознанно и просматривается глазами; откат к умолчанию из кода там означает
-// порог, который никто не выбирал. Окружение живёт на сервере, переживает
-// смены версий и откаты образа, а откат к значению из config.yaml означает
-// порог версионированный и проверенный.
-//
-// Цена обратного решения измерена: 11 августа ключ `reference`, оставшийся
-// в .env от ветки с внешним фидом, уронил процесс в цикл падения. Сам по себе
-// он ничего не включал — стоял `false`. А деплой на упавший старт откатывается
-// на предыдущий образ, то есть один устаревший ключ способен тихо заморозить
-// прод на старой сборке.
+// Опечатка в файле — отказ загрузки, а не откат к значению по умолчанию:
+// порог, который никто не выбирал, в бою стоит денег.
 func Load(path string) (*Config, error) {
 	if err := LoadDotEnv(path); err != nil {
 		return nil, err
 	}
 
-	// Файл проверяется сам по себе и строго: то, что не понято без окружения,
-	// не понято в самом config.yaml.
-	if _, err := assemble(path, nil); err != nil {
-		return nil, err
-	}
-
-	overrides, err := environmentOverrides(path)
+	cfg, err := assemble(path)
 	if err != nil {
-		return nil, err
-	}
-
-	cfg, ignored, err := applyEnvironment(path, overrides)
-	if err != nil {
-		return nil, err
-	}
-	cfg.IgnoredEnv = ignored
-
-	// Отбор инструментов идёт после отбора переопределений: неизвестное имя
-	// символа — ошибка по существу, а не непонятый ключ, и молчать о ней нельзя.
-	if err := cfg.applySymbolSelection(); err != nil {
 		return nil, err
 	}
 
@@ -557,12 +550,12 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
-// baseKoanf собирает умолчания и файл — всё, что известно до окружения.
+// baseKoanf собирает умолчания и файл поверх них.
 func baseKoanf(path string) (*koanf.Koanf, error) {
 	k := koanf.New(".")
 
-	// Значения по умолчанию задают канонический набор ключей с правильным
-	// регистром — по нему разрешаются переменные окружения.
+	// Значения по умолчанию задают канонический набор ключей: то, чего файл
+	// не упоминает, остаётся на умолчании, а не обнуляется.
 	if err := k.Load(structs.Provider(*defaults(), "koanf"), nil); err != nil {
 		return nil, fmt.Errorf("load defaults: %w", err)
 	}
@@ -572,20 +565,11 @@ func baseKoanf(path string) (*koanf.Koanf, error) {
 	return k, nil
 }
 
-// assemble декодирует конфигурацию из файла и заданного набора переопределений.
-//
-// Отбор инструментов сюда не входит: функция вызывается многократно при отборе
-// понятых переопределений, а отказ по неизвестному символу — не тот исход,
-// который следует принимать за «ключ не понят».
-func assemble(path string, overrides map[string]envOverride) (*Config, error) {
+// assemble декодирует конфигурацию из файла поверх значений по умолчанию.
+func assemble(path string) (*Config, error) {
 	k, err := baseKoanf(path)
 	if err != nil {
 		return nil, err
-	}
-	for key, override := range overrides {
-		if err := k.Set(key, override.Value); err != nil {
-			return nil, fmt.Errorf("apply %s: %w", override.Name, err)
-		}
 	}
 
 	cfg := defaults()
@@ -594,7 +578,8 @@ func assemble(path string, overrides map[string]envOverride) (*Config, error) {
 	}
 
 	// Каждый символ наследует блок defaults, затем накрывается своими полями.
-	// Merge делается кодом, а не YAML-якорями: якоря не переживают env-override.
+	// Merge делается кодом, а не YAML-якорями: якорь копирует поддерево целиком
+	// в момент разбора, и отличие в одном поле пришлось бы выписывать заново.
 	resolved := make(map[string]Symbol, len(cfg.Symbols))
 	for name := range cfg.Symbols {
 		sym := cfg.Defaults
@@ -605,126 +590,6 @@ func assemble(path string, overrides map[string]envOverride) (*Config, error) {
 	}
 	cfg.Symbols = resolved
 	return cfg, nil
-}
-
-// environmentOverrides приводит переменные MMSTANDX_* к ключам конфигурации.
-func environmentOverrides(path string) (map[string]envOverride, error) {
-	k, err := baseKoanf(path)
-	if err != nil {
-		return nil, err
-	}
-	resolve := envKeyResolver(k)
-
-	out := make(map[string]envOverride)
-	for _, entry := range os.Environ() {
-		name, value, ok := strings.Cut(entry, "=")
-		if !ok || !strings.HasPrefix(name, envPrefix) {
-			continue
-		}
-		out[resolve(name)] = envOverride{Name: name, Value: value}
-	}
-	return out, nil
-}
-
-// applyEnvironment применяет понятые переопределения и называет непонятые.
-//
-// Общий случай — одна сборка: обычно понятно всё. Разбор по одному включается
-// только когда полный набор не собрался, и стоит по сборке на переменную,
-// то есть доли секунды на старте один раз за жизнь процесса.
-func applyEnvironment(
-	path string,
-	overrides map[string]envOverride,
-) (*Config, []string, error) {
-	cfg, err := assemble(path, overrides)
-	if err == nil {
-		return cfg, nil, nil
-	}
-
-	// Ключи применяются в устойчивом порядке: иначе на одном и том же наборе
-	// отвергались бы разные ключи от запуска к запуску.
-	keys := make([]string, 0, len(overrides))
-	for key := range overrides {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-
-	accepted := make(map[string]envOverride, len(overrides))
-	var ignored []string
-	for _, key := range keys {
-		accepted[key] = overrides[key]
-		if _, err := assemble(path, accepted); err != nil {
-			delete(accepted, key)
-			ignored = append(ignored, overrides[key].Name)
-		}
-	}
-
-	cfg, err = assemble(path, accepted)
-	if err != nil {
-		return nil, nil, err
-	}
-	return cfg, ignored, nil
-}
-
-// envKeyResolver сопоставляет переменную окружения с ключом конфигурации.
-//
-// Имена переменных пишутся в верхнем регистре с подчёркиваниями, а ключи
-// конфигурации — в camelCase, поэтому прямое преобразование их не находит:
-// MMSTANDX_RUNTIME_STATSINTERVAL никогда не совпало бы с runtime.statsInterval.
-// Резолвер строит индекс уже известных ключей и ищет в нём без учёта регистра.
-//
-// Не найденное имя возвращается как есть: тогда неизвестный ключ дойдёт до
-// декодера и будет отвергнут, а не проигнорирован молча.
-func envKeyResolver(k *koanf.Koanf) func(string) string {
-	// В индекс попадают и промежуточные узлы, а не только листья: переопределять
-	// приходится в том числе поля, которых в файле нет — символ наследует блок
-	// defaults целиком, и в его поддереве описано лишь отличающееся.
-	index := make(map[string]string)
-	for _, key := range k.Keys() {
-		parts := strings.Split(key, ".")
-		for i := 1; i <= len(parts); i++ {
-			path := strings.Join(parts[:i], ".")
-			flat := strings.ToLower(strings.ReplaceAll(path, ".", "_"))
-			index[flat] = path
-
-			// Имя инструмента несёт дефис — XAU-USD — и попадает в ключ как есть,
-			// а оттуда в имя переменной окружения. Имена переменных дефис не несут:
-			// разбор .env отвергает такую строку целиком, и переопределение
-			// посимвольной настройки оказывалось невозможно положить именно туда,
-			// где живут все остальные переопределения. Написание через подчёркивание
-			// разрешается в тот же ключ.
-			//
-			// Точная форма всегда сильнее: псевдоним ставится только на свободное
-			// место, а собственная запись ключа перекрывает чужой псевдоним.
-			if alias := strings.ReplaceAll(flat, "-", "_"); alias != flat {
-				if _, taken := index[alias]; !taken {
-					index[alias] = path
-				}
-			}
-		}
-	}
-
-	return func(name string) string {
-		trimmed := strings.ToLower(strings.TrimPrefix(name, envPrefix))
-		if key, ok := index[trimmed]; ok {
-			return key
-		}
-
-		// Целиком ключ неизвестен — берётся самый длинный известный префикс.
-		//
-		// Регистр здесь не косметика: имена инструментов — ключи карты, и
-		// приведение их к нижнему регистру создавало не переопределение, а
-		// второй, фантомный символ. `MMSTANDX_SYMBOLS_XAU-USD_ECONOMICS_...`
-		// заводил `symbols.xau-usd` рядом с `symbols.XAU-USD`, и настройка
-		// молча не доезжала до инструмента, которому предназначалась.
-		// Остаток пути разрешит декодер, он к регистру нечувствителен.
-		parts := strings.Split(trimmed, "_")
-		for i := len(parts) - 1; i > 0; i-- {
-			if key, ok := index[strings.Join(parts[:i], "_")]; ok {
-				return key + "." + strings.Join(parts[i:], ".")
-			}
-		}
-		return strings.ReplaceAll(trimmed, "_", ".")
-	}
 }
 
 // unmarshal декодирует поддерево конфигурации в структуру, уже заполненную
@@ -744,40 +609,6 @@ func unmarshal(k *koanf.Koanf, path string, out any) error {
 			Result:           out,
 		},
 	})
-}
-
-// applySymbolSelection сужает набор инструментов до перечисленных в runtime.symbols.
-//
-// Неизвестное имя — ошибка, а не пустой результат: молча запустить бота вообще
-// без инструментов из-за опечатки в переменной среды хуже, чем не запустить.
-func (c *Config) applySymbolSelection() error {
-	if len(c.Runtime.Symbols) == 0 {
-		return nil
-	}
-
-	wanted := make(map[string]bool, len(c.Runtime.Symbols))
-	for _, name := range c.Runtime.Symbols {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
-		}
-		if _, ok := c.Symbols[name]; !ok {
-			known := make([]string, 0, len(c.Symbols))
-			for s := range c.Symbols {
-				known = append(known, s)
-			}
-			sort.Strings(known)
-			return fmt.Errorf("runtime.symbols: %q is not described in the configuration; known: %s",
-				name, strings.Join(known, ", "))
-		}
-		wanted[name] = true
-	}
-
-	for name, sym := range c.Symbols {
-		sym.Enabled = wanted[name]
-		c.Symbols[name] = sym
-	}
-	return nil
 }
 
 // EnabledSymbols возвращает только включённые инструменты.

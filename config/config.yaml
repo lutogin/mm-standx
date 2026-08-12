@@ -1,15 +1,26 @@
-# Конфигурация mm-standx.
+# Конфигурация mm-standx. Боевая: этот файл едет на сервер и по нему торгует бот.
 #
-# Приватный ключ здесь не хранится и не принимается: он читается только из
-# переменной окружения STANDX_WALLET_PK. Попытка задать его в этом файле
-# приведёт к отказу загрузки.
+# Единственный источник настроек. Окружение не переопределяет ничего — из него
+# читается только приватный ключ (STANDX_WALLET_PK), которому в файле не место:
+# попытка задать его здесь приведёт к отказу загрузки.
 #
-# Любой параметр переопределяется окружением с префиксом MMSTANDX_, например
-# MMSTANDX_RUNTIME_MODE=live. Неизвестные ключи считаются ошибкой: опечатка
-# не должна молча вернуть значение по умолчанию.
+# Неизвестные ключи считаются ошибкой: опечатка не должна молча вернуть значение
+# по умолчанию.
+#
+# В образ файл не запекается. На сервере он лежит рядом с docker-compose.yml,
+# в каталоге config/, и подключается томом. Значит, параметр правится на месте:
+#
+#   vim /root/opt/mm-standx/config/config.yaml
+#   docker compose --project-directory /root/opt/mm-standx restart mmbot
+#
+# Правка живёт до следующего деплоя: CI кладёт сюда версию из репозитория.
+# Изменение, которое должно пережить деплой, коммитится.
+#
+# Локальный запуск берёт config.local.yaml — теневой двойник этого файла.
+# Здесь стоит live, и `make run` с боевым файлом отправит настоящие ордера.
 
 runtime:
-  mode: dry_run # dry_run | live — переключать осознанно
+  mode: live # dry_run | live — переключать осознанно
   logLevel: info
   logFormat: json # json для разбора, text для чтения глазами
   metricsAddr: ":9090"
@@ -25,10 +36,8 @@ runtime:
   # Реестр в памяти отвечает по HTTP только мгновенным снимком.
   statsDir: data/stats
   statsSample: 15s
-  # Какие инструменты торговать. Пусто — берутся флаги enabled ниже.
-  # Задаётся окружением, чтобы один файл ехал на сервер, а решение
-  # принималось при запуске: MMSTANDX_RUNTIME_SYMBOLS=XAU-USD
-  symbols: []
+  # Какие инструменты торговать, задаётся флагами enabled в блоке symbols ниже.
+  # Второго способа сказать то же самое здесь больше нет.
 
 exchange:
   authBaseUrl: https://api.standx.com
@@ -57,7 +66,7 @@ rateLimit:
 # на той же странице — см. PLAN.md §12.1.
 reward:
   bandBps: 10
-  maxWeightPct: 200
+  maxWeightPct: 120
   minWeightPct: 40
   uptimeTiers:
     - { thresholdPct: 70, multiplier: 1.0 }
@@ -69,10 +78,14 @@ risk:
   # худшая из двух оценок. Взведённая остановка переживает перезапуск.
   # На время калибровки — доля депозита, а не круглое число: при 95 DUSD
   # на счёте лимит в 500 не сработал бы никогда.
-  maxDailyLossUsd: 10
+  maxDailyLossUsd: 30
   # Проверяется на старте: сумма allocationUsd × leverage по включённым
   # инструментам не должна превышать этот потолок.
-  maxNotionalUsd: 120000
+  #
+  # Держится вплотную к действующему размеру, а не с запасом на вырост: потолок
+  # в 120000 при аллокации 1000 не отвергал вообще ничего и проверял только то,
+  # что число положительное.
+  maxNotionalUsd: 10000
   # Не денежный лимит, а детектор рассогласования модели с рынком: стратегия
   # построена на том, что исполнения редки.
   #
@@ -160,7 +173,7 @@ defaults:
     # scaling is blocked unless it covers the measured 22 USD/MH fill cost.
     rewardRateLowerBoundUsdPerMakerHour: 0
     breakEvenUsdPerMakerHour: 22
-    calibrationMaxAllocationUsd: 60
+    calibrationMaxAllocationUsd: 1000
   quote:
     ladderLayers: 3 # лесенка компенсирует отсутствие amend в API
     # The reward band is only 10 bps wide and ends abruptly, so the width of
@@ -332,7 +345,7 @@ defaults:
     hardFloorPct: 72
     reservePct: 8
   risk:
-    leverage: 4
+    leverage: 9
     maxNetPositionBase: "0" # 0 — закрывать любую позицию немедленно
   # External venue whose price leads the exchange mark. Off by default and
   # named per instrument: a symbol that tracks a different underlying is worse
@@ -365,7 +378,10 @@ symbols:
   # с 31 USD за Maker Hour. См. docs/ab-appetite-2026-08-05.md.
   XAU-USD:
     enabled: true
-    allocationUsd: 60 # калибровочный размер, поднимается после сверки MH
+    # Рабочий размер. Поднимается вместе с calibrationMaxAllocationUsd в блоке
+    # defaults: экономический контроль сверяет аллокацию именно с ним и не даст
+    # поднять её в одиночку.
+    allocationUsd: 1000
     program:
       unitSize: "30"
       perSideCap: "60"
@@ -388,8 +404,13 @@ symbols:
     # volume and 875k trades a day at a 0.02 bps spread, measured 10 August.
     # An order of magnitude past Bybit's book on the same underlying, and the
     # only venue where gold moves before the exchange mark shows it.
+    #
+    # Выключен: не измерено, сколько упреждения фид даёт на самом деле
+    # (PLAN.md §12.15). Пока бот работает на прежнем быстром сигнале — смещении
+    # середины стакана. Площадка и символ описаны заранее, чтобы включение
+    # стоило одной строки, а не подбора имени инструмента в бою.
     reference:
-      enabled: true
+      enabled: false
       provider: binance_futures
       symbol: XAUUSDT
 

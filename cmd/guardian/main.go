@@ -34,7 +34,7 @@ import (
 )
 
 func main() {
-	configPath := flag.String("config", "config.yaml", "path to the configuration file")
+	configPath := flag.String("config", "config/config.yaml", "path to the configuration file")
 	timeout := flag.Duration("timeout", 15*time.Second,
 		"how long the heartbeat may be silent before quotes are withdrawn")
 	interval := flag.Duration("interval", 2*time.Second, "how often the heartbeat is checked")

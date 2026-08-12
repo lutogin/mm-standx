@@ -1,6 +1,8 @@
 BIN   := bin
 IMAGE ?= lutogin/mm-standx:latest
 GO  ?= go
+# Теневой двойник боевой конфигурации. Боевая задаётся явно: CONFIG=config/config.yaml
+CONFIG ?= config/config.local.yaml
 
 .DEFAULT_GOAL := help
 
@@ -56,14 +58,19 @@ tidy: ## Tidy go.mod
 
 .PHONY: record
 record: build ## Collect market data for replay tests (make record DURATION=1h)
-	$(BIN)/recorder -config config.yaml -duration $(or $(DURATION),15m)
+	$(BIN)/recorder -config $(CONFIG) -duration $(or $(DURATION),15m)
 
+# Локальный запуск идёт по теневой конфигурации, а не по боевой.
+#
+# config/config.yaml честно говорит live, и на машине с рабочим ключом в .env
+# эта цель отправляла бы настоящие ордера. Боевой прогон требует сказать это
+# вслух: make run CONFIG=config/config.yaml
 .PHONY: run
-run: build ## Run the bot with the current configuration
-	$(BIN)/mmbot -config config.yaml
+run: build ## Run the bot in shadow mode (CONFIG=... to override)
+	$(BIN)/mmbot -config $(CONFIG)
 
 .PHONY: image
-image: ## Собрать образ (конфигурация запекается внутрь)
+image: ## Собрать образ (конфигурация в него не входит)
 	docker build -t $(IMAGE) .
 
 .PHONY: push

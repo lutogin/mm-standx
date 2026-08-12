@@ -123,7 +123,7 @@ func configPath() string {
 	if p := os.Getenv("STANDX_CONFIG"); p != "" {
 		return p
 	}
-	return "../../config.yaml"
+	return "../../config/config.yaml"
 }
 
 // symbolUnderTest picks the instrument to trade. The default is the cheapest

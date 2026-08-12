@@ -103,17 +103,16 @@ func provideLogger(cfg *config.Config) *slog.Logger {
 	}
 	log := slog.New(handler).With("mode", string(cfg.Runtime.Mode))
 
-	// Непонятые переменные окружения называются первой же строкой лога.
+	// Переменные от снятого слоя переопределений называются первой же строкой лога.
 	//
-	// Процесс на них больше не падает (см. config.Load), но тихо работать
-	// не на тех порогах, которые оператор считает заданными, — ровно тот отказ,
-	// ради исключения которого строгая проверка и заводилась. Уровень ERROR
-	// выбран не по тяжести для процесса, а по тому, что это всегда требует
-	// действия человека: либо опечатка, либо ключ от другой версии.
-	if len(cfg.IgnoredEnv) > 0 {
-		log.Error("environment variables the configuration does not understand, ignored",
-			"variables", strings.Join(cfg.IgnoredEnv, " "),
-			"effect", "the values from config.yaml apply instead")
+	// Раньше MMSTANDX_* меняли любой параметр; теперь их не читает никто. Молчать
+	// об оставшейся строке нельзя именно поэтому: тот, кто её поставил, считает
+	// предел риска заданным, а действует значение из файла. Уровень ERROR выбран
+	// не по тяжести для процесса, а по тому, что это всегда требует руки человека.
+	if stale := config.StaleEnvOverrides(); len(stale) > 0 {
+		log.Error("environment variables from the removed override layer, no longer read",
+			"variables", strings.Join(stale, " "),
+			"effect", "the values from the configuration file apply instead")
 	}
 	return log
 }

@@ -30,7 +30,7 @@ import (
 const commandTimeout = 30 * time.Second
 
 func main() {
-	configPath := flag.String("config", "config.yaml", "path to the configuration file")
+	configPath := flag.String("config", "config/config.yaml", "path to the configuration file")
 	symbol := flag.String("symbol", "", "symbol to filter the orders and positions commands")
 	flag.Usage = usage
 	flag.Parse()
