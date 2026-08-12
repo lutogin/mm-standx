@@ -1,0 +1,541 @@
+# Локальная конфигурация: точная копия боевой, но в теневом режиме.
+#
+# Существует ради одной вещи — чтобы `make run` на машине, где в .env лежит
+# рабочий ключ, не отправил настоящие ордера. Боевой файл честно говорит live,
+# и без этого двойника единственной защитой была бы память запускающего.
+#
+# Отличаться от config.yaml разрешено ровно строкой runtime.mode: расхождение
+# в любой другой проверяется тестом. Локальный прогон обязан воспроизводить
+# то, чем торгует бот, иначе он ничего не показывает.
+#
+# Правка боевых параметров идёт в config.yaml, сюда — копированием.
+runtime:
+  mode: dry_run # dry_run | live — переключать осознанно
+  logLevel: info
+  logFormat: json # json для разбора, text для чтения глазами
+  metricsAddr: ":9090"
+  heartbeatPath: data/mmbot.hb
+  # Запись сырого потока для повторного разбора. В бою выключена: даёт около
+  # 100 МБ в час на инструмент и нужна только для пересчёта профиля риска.
+  recordingDir: ""
+  statsInterval: 30s
+  # Снимки защитного контура. Пустое значение допустимо только в теневом режиме:
+  # счётчик убытка, обнуляемый перезапуском, не защищает ни от чего.
+  stateDir: data/state
+  # Почасовая свёртка показателей: один файл на сутки, забирается по ssh.
+  # Реестр в памяти отвечает по HTTP только мгновенным снимком.
+  statsDir: data/stats
+  statsSample: 15s
+  # Какие инструменты торговать, задаётся флагами enabled в блоке symbols ниже.
+  # Второго способа сказать то же самое здесь больше нет.
+
+exchange:
+  authBaseUrl: https://api.standx.com
+  restBaseUrl: https://perps.standx.com
+  wsStreamUrl: wss://perps.standx.com/ws-stream/v1
+  wsApiUrl: wss://perps.standx.com/ws-api/v1
+  chain: bsc
+  tokenTtl: 24h
+  tokenRefreshLead: 2h
+  wsRotateAfter: 20h # биржа рвёт соединение на 24-м часе
+  wsReconnectMin: 250ms
+  wsReconnectMax: 30s
+  # Живость определяется по молчанию, а не пингом: сервер StandX на клиентские
+  # ping не отвечает, и активная проверка рвала бы исправное соединение.
+  wsIdleTimeout: 30s
+  wsHeartbeatInterval: 10s
+  requestTimeout: 5s
+
+rateLimit:
+  sustainedRps: 15 # биржевой предел ~22, оставляем запас
+  burst: 12
+  safetyReservePct: 30 # доля бакета, доступная только командам безопасности
+
+# Параметры программы наград StandX. Вынесены в конфиг, потому что биржа меняет
+# их без предупреждения, а таблица весов в документации противоречит формуле
+# на той же странице — см. PLAN.md §12.1.
+reward:
+  bandBps: 10
+  maxWeightPct: 200
+  minWeightPct: 40
+  uptimeTiers:
+    - { thresholdPct: 70, multiplier: 1.0 }
+    - { thresholdPct: 50, multiplier: 0.5 }
+
+risk:
+  # Лимиты применяются защитным контуром (internal/app/risk). Дневной убыток
+  # считается по данным биржи и независимо по модели стоимости; принимается
+  # худшая из двух оценок. Взведённая остановка переживает перезапуск.
+  # На время калибровки — доля депозита, а не круглое число: при 95 DUSD
+  # на счёте лимит в 500 не сработал бы никогда.
+  maxDailyLossUsd: 30
+  # Проверяется на старте: сумма allocationUsd × leverage по включённым
+  # инструментам не должна превышать этот потолок.
+  #
+  # Держится вплотную к действующему размеру, а не с запасом на вырост: потолок
+  # в 120000 при аллокации 1000 не отвергал вообще ничего и проверял только то,
+  # что число положительное.
+  maxNotionalUsd: 4000
+  # Не денежный лимит, а детектор рассогласования модели с рынком: стратегия
+  # построена на том, что исполнения редки.
+  #
+  # Reaching it pauses quoting until the episodes leave the sliding hour; it
+  # does not arm the kill switch. It used to, and that was the wedge: the
+  # measured condition expired an hour later, the flag lasted until midnight
+  # UTC, and it survived the restart meant to clear it.
+  maxFillsPerHour: 6
+  # Ставки StandX, одинаковые для всех рынков. Нужны для независимой оценки
+  # стоимости залива, см. PLAN.md §1.3.
+  fees: { makerBps: 1, takerBps: 4 }
+  marginMode: isolated # isolated изолирует риск между инструментами
+  flattenPolicy: immediate_market
+  # Every observed fill delta is closed immediately. Zero also makes the
+  # position-based fallback retry as soon as a PositionUpdated event arrives.
+  flattenDebounce: 0ms
+  postFillCooldown: 3s
+  # Two independent fill episodes in ten minutes indicate a temporary regime
+  # mismatch. Step away, then re-evaluate current data; this is deliberately
+  # self-resetting and does not wedge the bot for the day.
+  #
+  # Three minutes, not twenty. Accrual is tiered, so idling costs nothing while
+  # presence stays above the tier threshold and costs the whole hour one step
+  # past it. During calibration only the 1.0x tier is eligible, which leaves
+  # about 28% of the hour — under 17 minutes — to spend in total. A twenty
+  # minute pause therefore did not merely cost more than intended: it lost the
+  # hour outright, after which uptime.Lost withdrew the quotes for whatever
+  # remained. The engine now also clamps this to whatever the hour can still
+  # absorb (Engine.burstCooldown); the configured value should not be relying
+  # on that clamp.
+  fillBurstLimit: 2
+  fillBurstWindow: 10m
+  fillBurstCooldown: 3m
+  killSwitchOnDrawdown: true
+
+health:
+  # Канал price обновляется примерно раз в 3 секунды — заметно реже стакана.
+  # Порог даёт запас на три пропущенных обновления; уточняется по записи.
+  markStale: 10s
+  reconcileInterval: 5s
+  ackTimeout: 2s
+  heartbeatInterval: 1s
+
+# Наследуется каждым инструментом; ниже переопределяются только отличия.
+# Blackout around scheduled economic releases — the only guard in the loop that
+# acts ahead of the move rather than in response to it. Everything else answers
+# a move already under way; against a release whose time is published in advance
+# that does not work at all, because a cancel takes about 400 ms round trip and
+# gold covers tens of basis points in the first second of a CPI print.
+news:
+  enabled: true
+  url: "" # empty uses the published weekly feed
+  currencies: [USD] # what the traded instruments actually react to
+  impacts: [high] # an empty list matches nothing, deliberately
+  # Fifteen minutes is not symmetry for its own sake. Ahead of the print the
+  # book thins out and quotes get picked off by anyone repositioning; after it
+  # the first minute is the move and the next quarter hour is the argument
+  # about it, when the spread is widest and the mark least trustworthy.
+  defensiveBefore: 15m
+  defensiveAfter: 15m
+  # A minute either side of the number itself: the only stretch where no
+  # distance inside the reward band is safe, so the only answer is absence.
+  hardBefore: 1m
+  hardAfter: 1m
+  # Standing back is not the same as leaving. The programme scores a percentile
+  # of the samples, so half an hour of zeros drags the whole hour down a tier
+  # or past it, while the same half hour spent at the outer edge of the band
+  # keeps the hour payable and still cuts the loss if the move arrives early.
+  defensiveInsetBps: 1.5 # room inside the band edge; the 0.8 bps ladder still fits
+  defensiveSizeMultiple: 0.5 # free in accrual terms, proportional in loss terms
+  refresh: 2h
+  maxAge: 6h
+  timeout: 15s
+  # An unavailable publisher is not a reason to stop for a day: the weekly file
+  # covers the week ahead, and the known releases stay true. Set false to refuse
+  # to quote until the calendar is confirmed.
+  failOpen: true
+
+defaults:
+  enabled: false
+  allocationUsd: 0
+  economics:
+    # Until the daily pool is observed, only the small calibration allocation
+    # may go live. After enough days, set the conservative lower bound here;
+    # scaling is blocked unless it covers the measured 22 USD/MH fill cost.
+    rewardRateLowerBoundUsdPerMakerHour: 0
+    breakEvenUsdPerMakerHour: 22
+    calibrationMaxAllocationUsd: 1000
+  quote:
+    ladderLayers: 3 # лесенка компенсирует отсутствие amend в API
+    # The reward band is only 10 bps wide and ends abruptly, so the width of
+    # the ladder comes straight out of the distance budget: at 1.0 the three
+    # rungs took 2 of those 10 bps. They buy no risk diversification in return
+    # — on 6 August all three went in a single sweep, 51 ms apart. A 0.4 bps
+    # step is about 1.7 ticks on gold.
+    ladderSpreadBps: 0.4
+    minRest: 3200ms # ≥3с, иначе ордер не засчитывается в Maker Points
+    requoteCooldown: 250ms
+    # Distance kept from the opposing top of book, in exchange ticks. The
+    # crossing check only answers "will the exchange reject this"; an order
+    # resting on the touch is accepted and then taken by the first move.
+    # On gold two ticks is 0.46 bps, so the clamp binds only when the book has
+    # run past a mark that has not caught up — and that quote is refused rather
+    # than sent, because its whole geometry rests on a stale price.
+    postOnlyBufferTicks: 2
+  # Дистанции здесь нет: она вычисляется из спреда и измеренного скачка.
+  # Задаётся только готовность рисковать. См. PLAN.md §4.5.
+  appetite:
+    # Мера риска — максимум окна, то есть уже оценка хвоста. Множитель покрывает
+    # только смену режима: при 2.0 бот отказывался котировать BTC днём в будни.
+    #
+    # Held at 1.25, and the reason is arithmetic rather than appetite.
+    #
+    # Measured live on 10 August: with the gold spread at 4.4-5.1 bps the half
+    # spread alone takes 2.5 of the 10 bps band, and a single-tick jump of
+    # 4.6 bps put the requirement at 2.5 + 1.25x4.6 + 1.5 = 9.75 against a
+    # band of 9.5 — the actor refused to quote for hours and earned nothing.
+    # At 1.5 the same market demands 10.4 bps, so the refusal becomes
+    # permanent whenever the spread widens. There is no room in a 10 bps band
+    # to buy caution with this multiple; it has to be bought with distance
+    # (minBps) while the market is calm enough for distance to exist.
+    jumpMultiple: 1.25
+    floorMarginBps: 1.5 # запас когда скачок обманчиво мал (выходные, короткое окно)
+    deadBandJumps: 2.0 # шире мёртвая зона → реже перестановки, дольше в стакане
+    # Не меньше полуширины лесенки (ladderLayers-1) x ladderSpreadBps / 2,
+    # иначе крайние ступени стоят вне мёртвой зоны и переставляются бесконечно.
+    # Проверяется при запуске.
+    #
+    # Raised from 0.5, which was the bare minimum the startup check accepts and
+    # left the geometry below the resolution of the instrument.
+    #
+    # The dead band is measured from the centre of the ladder and applied to
+    # every rung, so what the outer rungs actually get is the band minus the
+    # half width: 0.5 - 0.4 = 0.1 bps. One price tick on gold is 0.1 USD, which
+    # at 4335 is 0.23 bps — the margin was smaller than the smallest price the
+    # exchange accepts, so snapping alone could push a rung out of the band it
+    # was just placed in. Measured consequence on 10 August: 1044 placements in
+    # six hours, three a minute, most of them not surviving the three seconds
+    # the programme requires before an order counts at all.
+    #
+    # At 1.2 the outer rungs get 0.8 bps, about three and a half ticks. The cost
+    # is that a rung may sit up to 1.2 bps off the ideal distance instead of
+    # 0.6 — roughly 19% of weight against 10% — and that weight is worth having
+    # only on orders that live long enough to be scored.
+    #
+    # Note this value also sets how far the required distance must move before
+    # the ladder centre follows it (Engine.stickyTarget). Widening is applied
+    # immediately regardless; the stickiness only delays moving back in.
+    minDeadBandBps: 1.2
+    # Доля целевой дистанции, ближе которой сторона снимается целиком
+    # аварийным путём. Больше значение — раньше отход.
+    #
+    # The physical threshold alone (half spread plus one jump) sits at 0.4-2.7
+    # bps on gold while the quote stands at 7.4, and everything between them was
+    # handled by the ordinary path: one command in flight per side, one rung at
+    # a time, place-first leaving the approached order in the book for the round
+    # trip. A trending market crosses those four basis points over several
+    # ticks, and every one of them went to slow reaction — that is how the fills
+    # actually arrive, rather than through a single instantaneous jump.
+    #
+    # Ladder.Danger is free of all of it: it bypasses the requote cooldown, the
+    # minimum rest and the round-robin queue, and cancels the side in one batch.
+    # Widening where it applies is the most direct lever on the fill rate.
+    #
+    # 0.5 pulls when the market has eaten half the way to the quote: at a target
+    # of 7.4 bps that is 3.7 instead of ~1. Cost is presence — a withdrawn side
+    # scores nothing until it returns, and re-entry is bounded by minRest.
+    panicFraction: 0.5
+    # Мёртвая зона для решения «котировать или нет», а не для дистанции.
+    #
+    # Порог осуществимости был единственным решением в контуре без гистерезиса,
+    # и рынок стоял ровно на нём: половина спреда ходит от 0.12 до 3.5 bps
+    # внутри часа, и каждый заход хвоста за край полосы снимал всю лесенку.
+    # 6 августа в двенадцатом часу это дало 564 съёма при аптайме 99% —
+    # ордера жили в среднем 6.4 секунды при программном требовании в три,
+    # а на дрожание уходило 13% бюджета запросов.
+    #
+    # Уходим по обычному порогу и немедленно; возвращаемся, только когда
+    # требуемая дистанция не дотягивает до края полосы на эту величину.
+    reentryDeadBandBps: 1.0
+    # Абсолютный пол. С появлением memoryHalfLife он перестал быть основной
+    # защитой от заниженной оценки риска и связывает дистанцию редко; снижать
+    # его следует по результатам суточного прогона в будни, а не умозрительно.
+    #
+    # In practice it is not rare at all — it binds almost always. On gold the
+    # requirement computes to roughly 2 bps (half spread ~0.1-2.4, effective
+    # jump a few tenths, floor margin 1.5), so the floor is what actually
+    # decides where the near rung stands.
+    #
+    # Raised from 5.5 to 7.0 because 5.5 sat inside the observed tail: the
+    # single-tick jump of 6 August was 5.38 bps and swept all three rungs in
+    # 51 ms. No pull can defend against that — the danger path needs a tick to
+    # see the move, and the move is the tick. Standing outside the tail is the
+    # only defence, and it is bought with reward weight: 88% at 7.0 against
+    # 112% at 5.5, a fifth of the rate, against removing the dominant fill mode.
+    # That is the intended trade — a fill is money, the weight is a rate.
+    minBps: 7.0
+    maxBps: 9.5 # дальше награда обнуляется
+  volatility:
+    # Мера риска — максимум окна, поэтому один тик правит ею ровно столько,
+    # сколько живёт окно. Это и есть длительность отказа котировать после
+    # всплеска, и никакого таймера, кроме неё, в контуре нет.
+    #
+    # Сокращено с 20m. Измерено 10-11 августа: тик 7.55 bps встал в окне и
+    # держал требуемую дистанцию выше всей полосы награды двадцать минут,
+    # после чего эстафету приняла ограниченная память — итого сорок минут
+    # простоя на рынке, который успокоился через пять. При тиерном зачёте
+    # семнадцать минут отсутствия в начале часа списывают час целиком, так
+    # что двадцатиминутное окно означало гарантированную потерю часа на каждом
+    # крупном тике. За ночь так списались три часа из семи.
+    #
+    # Восемь минут при такте около трёх секунд — это 160 замеров, вдвое больше
+    # зрелости оценки (fullConfidenceAt), так что точность не страдает.
+    window: 8m
+    minSamples: 40 # 2 минуты прогрева до первой котировки
+    fullConfidenceAt: 100 # 5 минут до зрелой оценки
+    # A floor on the risk measure that outlives the window: without it a frozen
+    # market yields a mature estimate of a near-zero jump, and the actor walks
+    # in just before the market wakes up.
+    #
+    # NOT justified by the weekend any more — that case is handled directly by
+    # program.offHours, see PLAN.md section 12.14. What justifies it is that the
+    # window is 20 minutes and forgets a burst entirely, while volatility
+    # clusters: the fill of 6 August was hours of quiet, then 5.38 bps in one
+    # tick.
+    #
+    # Six hours is also what kept the actor out of the book for hours at a
+    # stretch that same day. The trade is settled by arithmetic once the price
+    # of a Maker Hour and the fill rate are measured, not before.
+    memoryHalfLife: 6h
+    # Верхняя граница рекорда: он не вправе требовать больше, чем эта доля
+    # от максимума живого окна.
+    #
+    # Затухающий максимум не возвращается к среднему — понизить его не может
+    # ни одно последующее наблюдение, только часы. 7 августа всплеск длиной
+    # в минуту выключил бота на 8.4 часа, тогда как окно уже полчаса как
+    # показывало десятую долю этой величины. Ограничение даёт то же свойство,
+    # ради которого в EWMA и GARCH затухание считают по наблюдениям: рекорд
+    # сходится к тому, что рынок показывает сейчас, а не к нулю по расписанию.
+    #
+    # Пока всплеск внутри окна, ограничение не действует — защита полная.
+    # Ноль отключает его и возвращает безусловный рекорд.
+    #
+    # Единица не отключает память, а запрещает ей требовать больше живого окна.
+    # Разница существенная: при незрелой оценке и при полностью замершем окне
+    # ограничение не применяется вовсе (Estimator.bounded), и рекорд действует
+    # безусловно — то есть ровно в тех двух случаях, ради которых он и написан.
+    #
+    # Снижено с 3 по замеру 11 августа: живое окно показывало 2.97 bps, память
+    # 7.32, ограничение 2x давало 5.95 и требование 9.73 при полосе 8.50 —
+    # отказ котировать на спокойном рынке. С единицей мера равна 2.97,
+    # требование 6.0, то есть упирается в пол minBps и котирует с запасом.
+    # Держала не волатильность, а воспоминание о тике, из окна уже вышедшем.
+    memoryWindowMultiple: 1
+  uptime:
+    targetPct: 80 # выше 70% зачёт не растёт, разница — страховой запас
+    hardFloorPct: 72
+    reservePct: 8
+  risk:
+    leverage: 4
+    maxNetPositionBase: "0" # 0 — закрывать любую позицию немедленно
+  # External venue whose price leads the exchange mark. Off by default and
+  # named per instrument: a symbol that tracks a different underlying is worse
+  # than no feed, because a wrong signal is still acted upon.
+  #
+  # Its drift since the last mark tick feeds the danger thresholds, replacing
+  # the drift of the exchange's own book mid (PLAN.md §4.7). The book mid moves
+  # with the very order that fills us, so its warning has zero length; the
+  # external venue shows the same move earlier.
+  #
+  # The feed is advisory. Losing it, or letting it go stale, returns the bot to
+  # the picture it had before and never stops quoting on its own.
+  reference:
+    enabled: false
+    provider: binance_futures # binance_futures | binance_spot | bybit_linear | bybit_spot
+    symbol: ""
+    # One mark tick. Silence on a book-ticker stream means the top of book did
+    # not change — information, not the absence of it — so the threshold exists
+    # to catch a socket that died quietly, not a calm market. Past one tick the
+    # official price supersedes the estimate anyway. At two seconds this warned
+    # about a perfectly healthy gold feed once every two minutes.
+    staleAfter: 3s
+
+# Параметры начисления публикуются StandX и меняются оперативной командой:
+# https://docs.standx.com/docs/standx-perps-solutions/community-maker-yield
+symbols:
+  # Золото — рабочий инструмент. Выбрано по измерениям 3–5 августа:
+  # глубина стакана внутри полосы p05 = 1.9M USD (у остальных, кроме BTC,
+  # около нуля), самый тонкий хвост и спреда, и скачка, окупаемость
+  # с 31 USD за Maker Hour. См. docs/ab-appetite-2026-08-05.md.
+  XAU-USD:
+    enabled: true
+    # Рабочий размер. Поднимается вместе с calibrationMaxAllocationUsd в блоке
+    # defaults: экономический контроль сверяет аллокацию именно с ним и не даст
+    # поднять её в одиночку.
+    allocationUsd: 1000
+    program:
+      unitSize: "30"
+      perSideCap: "60"
+      maxMakerHoursPerHour: 2
+      # The reference market is shut over the weekend: the exchange scales
+      # the hour's accrual by 0.1 while the fill risk is unchanged, so the
+      # break-even price of a Maker Hour rises tenfold. The window is
+      # deliberately wider than the venue's real hours (COMEX closes Fri
+      # 21:00 UTC and reopens Sun 22:00): erring towards "closed" costs idle
+      # time, erring the other way costs money. Narrow it once the first
+      # actual accrual has been reconciled.
+      offHoursMultiplier: 0.1
+      offHours:
+        from: "Fri 20:00"
+        to: "Mon 00:00"
+        # The exchange publishes no machine-readable holiday calendar, so this
+        # list is maintained by hand. Empty is not a claim that there are none.
+        holidays: []
+    # Binance USD-M XAUUSDT, a TradFi-tracking perpetual: 1.26 bn USD of quote
+    # volume and 875k trades a day at a 0.02 bps spread, measured 10 August.
+    # An order of magnitude past Bybit's book on the same underlying, and the
+    # only venue where gold moves before the exchange mark shows it.
+    #
+    # Выключен: не измерено, сколько упреждения фид даёт на самом деле
+    # (PLAN.md §12.15). Пока бот работает на прежнем быстром сигнале — смещении
+    # середины стакана. Площадка и символ описаны заранее, чтобы включение
+    # стоило одной строки, а не подбора имени инструмента в бою.
+    reference:
+      enabled: false
+      provider: binance_futures
+      symbol: XAUUSDT
+
+  # Единственная реальная альтернатива: стакан глубже золотого, но полоса
+  # награды съедена волатильностью — проигрывает при любом $/MH.
+  BTC-USD:
+    enabled: false
+    allocationUsd: 60
+    program: { unitSize: "2", perSideCap: "20", maxMakerHoursPerHour: 10 }
+    reference: { enabled: true, provider: binance_futures, symbol: BTCUSDT }
+
+  ETH-USD:
+    enabled: false
+    program: { unitSize: "60", perSideCap: "600", maxMakerHoursPerHour: 10 }
+    reference: { enabled: true, provider: binance_futures, symbol: ETHUSDT }
+  SOL-USD:
+    enabled: false
+    program: { unitSize: "1500", perSideCap: "15000", maxMakerHoursPerHour: 10 }
+    reference: { enabled: true, provider: binance_futures, symbol: SOLUSDT }
+  BNB-USD:
+    enabled: false
+    program: { unitSize: "300", perSideCap: "3000", maxMakerHoursPerHour: 10 }
+    reference: { enabled: true, provider: binance_futures, symbol: BNBUSDT }
+  HYPE-USD:
+    enabled: false
+    program: { unitSize: "4000", perSideCap: "40000", maxMakerHoursPerHour: 10 }
+    reference: { enabled: true, provider: binance_futures, symbol: HYPEUSDT }
+
+  # Металлы: спред шире, движение рваное — см. PLAN.md §1.4.
+  XAG-USD:
+    enabled: false
+    program:
+      unitSize: "1500"
+      perSideCap: "3000"
+      maxMakerHoursPerHour: 2
+      # The reference market is shut over the weekend: the exchange scales
+      # the hour's accrual by 0.1 while the fill risk is unchanged, so the
+      # break-even price of a Maker Hour rises tenfold. The window is
+      # deliberately wider than the venue's real hours (COMEX closes Fri
+      # 21:00 UTC and reopens Sun 22:00): erring towards "closed" costs idle
+      # time, erring the other way costs money. Narrow it once the first
+      # actual accrual has been reconciled.
+      offHoursMultiplier: 0.1
+      offHours:
+        from: "Fri 20:00"
+        to: "Mon 00:00"
+        # The exchange publishes no machine-readable holiday calendar, so this
+        # list is maintained by hand. Empty is not a claim that there are none.
+        holidays: []
+    reference: { enabled: true, provider: binance_futures, symbol: XAGUSDT }
+  CL-USD:
+    enabled: false
+    program:
+      unitSize: "1400"
+      perSideCap: "2800"
+      maxMakerHoursPerHour: 2
+      # The reference market is shut over the weekend: the exchange scales
+      # the hour's accrual by 0.1 while the fill risk is unchanged, so the
+      # break-even price of a Maker Hour rises tenfold. The window is
+      # deliberately wider than the venue's real hours (COMEX closes Fri
+      # 21:00 UTC and reopens Sun 22:00): erring towards "closed" costs idle
+      # time, erring the other way costs money. Narrow it once the first
+      # actual accrual has been reconciled.
+      offHoursMultiplier: 0.1
+      offHours:
+        from: "Fri 20:00"
+        to: "Mon 00:00"
+        # The exchange publishes no machine-readable holiday calendar, so this
+        # list is maintained by hand. Empty is not a claim that there are none.
+        holidays: []
+
+  # Oil and the equities are left without a reference on purpose. A venue that
+  # lists the ticker is not the same thing as a venue where it leads, and an
+  # unverified mapping is worse than none: a wrong signal is still acted upon.
+  # Fill one in only after checking the venue's own turnover on that symbol,
+  # the way XAUUSDT was checked above.
+
+  # Акции: гэпы на открытии и закрытии базового рынка.
+  TSLA-USD:
+    enabled: false
+    program:
+      unitSize: "400"
+      perSideCap: "800"
+      maxMakerHoursPerHour: 2
+      # The reference market is shut over the weekend: the exchange scales
+      # the hour's accrual by 0.1 while the fill risk is unchanged, so the
+      # break-even price of a Maker Hour rises tenfold. The window is
+      # deliberately wider than the venue's real hours (COMEX closes Fri
+      # 21:00 UTC and reopens Sun 22:00): erring towards "closed" costs idle
+      # time, erring the other way costs money. Narrow it once the first
+      # actual accrual has been reconciled.
+      offHoursMultiplier: 0.1
+      offHours:
+        from: "Fri 20:00"
+        to: "Mon 00:00"
+        # The exchange publishes no machine-readable holiday calendar, so this
+        # list is maintained by hand. Empty is not a claim that there are none.
+        holidays: []
+  MU-USD:
+    enabled: false
+    program:
+      unitSize: "200"
+      perSideCap: "400"
+      maxMakerHoursPerHour: 2
+      # The reference market is shut over the weekend: the exchange scales
+      # the hour's accrual by 0.1 while the fill risk is unchanged, so the
+      # break-even price of a Maker Hour rises tenfold. The window is
+      # deliberately wider than the venue's real hours (COMEX closes Fri
+      # 21:00 UTC and reopens Sun 22:00): erring towards "closed" costs idle
+      # time, erring the other way costs money. Narrow it once the first
+      # actual accrual has been reconciled.
+      offHoursMultiplier: 0.1
+      offHours:
+        from: "Fri 20:00"
+        to: "Mon 00:00"
+        # The exchange publishes no machine-readable holiday calendar, so this
+        # list is maintained by hand. Empty is not a claim that there are none.
+        holidays: []
+  SPCX-USD:
+    enabled: false
+    program:
+      unitSize: "800"
+      perSideCap: "800"
+      maxMakerHoursPerHour: 1
+      # The reference market is shut over the weekend: the exchange scales
+      # the hour's accrual by 0.1 while the fill risk is unchanged, so the
+      # break-even price of a Maker Hour rises tenfold. The window is
+      # deliberately wider than the venue's real hours (COMEX closes Fri
+      # 21:00 UTC and reopens Sun 22:00): erring towards "closed" costs idle
+      # time, erring the other way costs money. Narrow it once the first
+      # actual accrual has been reconciled.
+      offHoursMultiplier: 0.1
+      offHours:
+        from: "Fri 20:00"
+        to: "Mon 00:00"
+        # The exchange publishes no machine-readable holiday calendar, so this
+        # list is maintained by hand. Empty is not a claim that there are none.
+        holidays: []
