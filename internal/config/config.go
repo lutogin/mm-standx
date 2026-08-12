@@ -49,6 +49,7 @@ type Config struct {
 	Reward    Reward            `koanf:"reward"`
 	Risk      Risk              `koanf:"risk"`
 	Health    Health            `koanf:"health"`
+	News      News              `koanf:"news"`
 	Defaults  Symbol            `koanf:"defaults"`
 	Symbols   map[string]Symbol `koanf:"symbols"`
 
@@ -188,6 +189,62 @@ type Health struct {
 	HeartbeatInterval time.Duration `koanf:"heartbeatInterval"`
 }
 
+// News — блэкаут вокруг запланированных экономических публикаций.
+//
+// Единственная защита в контуре, работающая на упреждение, а не на реакцию.
+// Всё остальное отвечает на движение, которое уже началось; против публикации,
+// время которой известно заранее, это не работает вовсе — круг отмены занимает
+// около 400 мс (PLAN.md §2.4), а золото на CPI проходит десятки базисных
+// пунктов за первую секунду.
+type News struct {
+	Enabled bool `koanf:"enabled"`
+	// URL недельного календаря. Пусто — адрес по умолчанию.
+	URL string `koanf:"url"`
+	// Currencies и Impacts отбирают публикации, которые нас касаются.
+	// Пустой список не пропускает ничего: соглашение «пусто значит всё»
+	// обнуляло бы стакан на каждой мелкой цифре недели.
+	Currencies []string `koanf:"currencies"`
+	Impacts    []string `koanf:"impacts"`
+
+	// DefensiveBefore и DefensiveAfter — окно, в котором бот отходит к внешнему
+	// краю полосы и уменьшает размер, но остаётся в стакане.
+	DefensiveBefore time.Duration `koanf:"defensiveBefore"`
+	DefensiveAfter  time.Duration `koanf:"defensiveAfter"`
+	// HardBefore и HardAfter — окно, в котором бот уходит из стакана совсем.
+	HardBefore time.Duration `koanf:"hardBefore"`
+	HardAfter  time.Duration `koanf:"hardAfter"`
+
+	// DefensiveInsetBps — насколько внутрь от края полосы разрешено стоять
+	// в защитной позе. Ноль прижимает котировку вплотную к краю, где вес
+	// минимален, но зачёт ещё идёт.
+	DefensiveInsetBps money.Bps `koanf:"defensiveInsetBps"`
+	// DefensiveSizeMultiple — во сколько раз уменьшается размер в защитной позе.
+	//
+	// Урезание бесплатно по зачёту и прямо пропорционально снижает потери
+	// от исполнения: тир 0.5x берётся с медианы замеров, а её держат обычные
+	// полчаса часа, тогда как урезанные замеры попадают лишь в верхний
+	// перцентиль, который защитная поза и так отдала, уйдя к краю полосы.
+	DefensiveSizeMultiple float64 `koanf:"defensiveSizeMultiple"`
+
+	// Refresh — период повторного чтения календаря.
+	Refresh time.Duration `koanf:"refresh"`
+	// MaxAge — возраст, после которого расписанию перестают доверять.
+	MaxAge time.Duration `koanf:"maxAge"`
+	// Timeout ограничивает одно обращение к издателю.
+	Timeout time.Duration `koanf:"timeout"`
+
+	// FailOpen решает, что означает недоступный или устаревший календарь.
+	//
+	// True — котировать дальше по уже известному расписанию; недельный файл
+	// покрывает неделю вперёд, и суточная недоступность издателя сама по себе
+	// ничего не меняет. False — не котировать, пока расписание не подтверждено.
+	//
+	// По умолчанию true: остановка на сбое третьей стороны стоит присутствия
+	// каждый раз, а слепота — только в те редкие часы, когда публикацию
+	// перенесли ровно в окно недоступности.
+	FailOpen bool `koanf:"failOpen"`
+}
+
 // Symbol — настройки котирования одного инструмента.
 type Symbol struct {
 	Enabled       bool       `koanf:"enabled"`
@@ -199,6 +256,57 @@ type Symbol struct {
 	Program       Program    `koanf:"program"`
 	Uptime        Uptime     `koanf:"uptime"`
 	SymbolRisk    SymbolRisk `koanf:"risk"`
+	Reference     Reference  `koanf:"reference"`
+}
+
+// Reference identifies the external venue whose price leads this instrument.
+//
+// The exchange publishes its mark about once every three seconds. What reaches
+// a resting quote inside that window is arbitrage against a move that already
+// happened on a faster venue, so watching that venue is watching the cause
+// rather than the effect.
+//
+// The feed is advisory by construction. Losing it degrades the fast signal and
+// must never stop quoting: the bot falls back to what it can see on the
+// exchange itself. That is the whole reason there is no "required" flag here.
+type Reference struct {
+	Enabled bool `koanf:"enabled"`
+	// Provider names the venue and market type, see the Provider* constants.
+	Provider string `koanf:"provider"`
+	// Symbol is the instrument as that venue names it, for example BTCUSDT.
+	// It must track the same underlying: a mismatch is worse than no feed,
+	// because a wrong signal is still acted upon.
+	Symbol string `koanf:"symbol"`
+	// StaleAfter is how much silence makes the reference unusable as a signal.
+	//
+	// The threshold is a property of the venue, not of the exchange: a liquid
+	// book ticks tens of times a second, so silence measured in seconds means
+	// the connection is broken in a way the socket has not noticed yet. Past
+	// it the actor falls back to the exchange's own book mid rather than
+	// steering by a price that stopped moving.
+	StaleAfter time.Duration `koanf:"staleAfter"`
+}
+
+// Supported reference providers.
+//
+// The vocabulary lives here rather than in the adapter because the adapter
+// depends on this package for connection settings, and the reverse dependency
+// would close a cycle.
+const (
+	ProviderBinanceFutures = "binance_futures"
+	ProviderBinanceSpot    = "binance_spot"
+	ProviderBybitLinear    = "bybit_linear"
+	ProviderBybitSpot      = "bybit_spot"
+)
+
+// ReferenceProviders lists every supported venue in a stable order.
+func ReferenceProviders() []string {
+	return []string{
+		ProviderBinanceFutures,
+		ProviderBinanceSpot,
+		ProviderBybitLinear,
+		ProviderBybitSpot,
+	}
 }
 
 // Economics contains the measured unit economics for one market.
@@ -221,6 +329,14 @@ type Quote struct {
 	LadderSpreadBps money.Bps     `koanf:"ladderSpreadBps"`
 	MinRest         time.Duration `koanf:"minRest"`
 	RequoteCooldown time.Duration `koanf:"requoteCooldown"`
+
+	// PostOnlyBufferTicks — на сколько тиков цена отодвигается от противоположной
+	// вершины стакана перед отправкой.
+	//
+	// Проверка на пересечение отвечает только на вопрос «отвергнет ли биржа».
+	// Ордер на самой вершине она примет, а рынок заберёт первым же движением.
+	// Ноль возвращает прежнее поведение.
+	PostOnlyBufferTicks int `koanf:"postOnlyBufferTicks"`
 }
 
 // Appetite — готовность рисковать ради награды.
@@ -567,7 +683,23 @@ func envKeyResolver(k *koanf.Koanf) func(string) string {
 		parts := strings.Split(key, ".")
 		for i := 1; i <= len(parts); i++ {
 			path := strings.Join(parts[:i], ".")
-			index[strings.ToLower(strings.ReplaceAll(path, ".", "_"))] = path
+			flat := strings.ToLower(strings.ReplaceAll(path, ".", "_"))
+			index[flat] = path
+
+			// Имя инструмента несёт дефис — XAU-USD — и попадает в ключ как есть,
+			// а оттуда в имя переменной окружения. Имена переменных дефис не несут:
+			// разбор .env отвергает такую строку целиком, и переопределение
+			// посимвольной настройки оказывалось невозможно положить именно туда,
+			// где живут все остальные переопределения. Написание через подчёркивание
+			// разрешается в тот же ключ.
+			//
+			// Точная форма всегда сильнее: псевдоним ставится только на свободное
+			// место, а собственная запись ключа перекрывает чужой псевдоним.
+			if alias := strings.ReplaceAll(flat, "-", "_"); alias != flat {
+				if _, taken := index[alias]; !taken {
+					index[alias] = path
+				}
+			}
 		}
 	}
 

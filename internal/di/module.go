@@ -21,6 +21,7 @@ import (
 	"github.com/nd/mm-standx/internal/adapters/clock"
 	"github.com/nd/mm-standx/internal/adapters/dryrun"
 	"github.com/nd/mm-standx/internal/adapters/metrics"
+	"github.com/nd/mm-standx/internal/adapters/news"
 	"github.com/nd/mm-standx/internal/adapters/ratelimit"
 	"github.com/nd/mm-standx/internal/adapters/recorder"
 	"github.com/nd/mm-standx/internal/adapters/standx/auth"
@@ -51,6 +52,7 @@ var Core = fx.Module("core",
 		provideRecorder,
 		provideMetrics,
 		provideStateStore,
+		provideNewsSource,
 	),
 	fx.WithLogger(provideFxLogger),
 )
@@ -183,6 +185,15 @@ func provideRecorder(cfg *config.Config, clk ports.Clock, lc fx.Lifecycle) (port
 func provideMetrics() (*metrics.Prometheus, ports.Metrics) {
 	p := metrics.New()
 	return p, p
+}
+
+// provideNewsSource создаёт клиент календаря экономических публикаций.
+//
+// Отдельный http.Client с собственным таймаутом: общий настроен под частые
+// мелкие запросы к бирже с пятисекундным пределом, а недельный календарь
+// читается раз в два часа и вправе отвечать дольше.
+func provideNewsSource(cfg *config.Config) ports.NewsSource {
+	return news.New(cfg.News.URL, &http.Client{Timeout: cfg.News.Timeout})
 }
 
 // provideStateStore открывает хранилище снимков защитного контура.

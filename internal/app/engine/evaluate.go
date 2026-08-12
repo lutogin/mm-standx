@@ -106,6 +106,16 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 		return
 	}
 
+	// Единственная защита контура, работающая на упреждение. Всё остальное
+	// отвечает на движение, которое уже началось; против публикации, время
+	// которой известно заранее, это не работает вовсе.
+	news := e.assessNews(now, hour)
+	if news.blocked != "" {
+		e.reportBlocked(now, conditions, estimate, news.blocked, e.geometry(e.appetite, conditions))
+		e.withdraw(ctx, news.cause, news.blocked)
+		return
+	}
+
 	appetite := e.appetite
 	switch hour.Mode {
 	case uptime.Lost:
@@ -134,6 +144,13 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 	}
 
 	bounds := e.quotingBounds()
+	if news.defensive {
+		// Защитная поза выражена границей, а не отдельной геометрией: правило
+		// дистанции остаётся тем же, ему лишь запрещено подходить ближе края
+		// полосы. Вердикт риска при этом не отменяется — если рынок требует
+		// большего, чем полоса вмещает, котировки не будет и здесь.
+		bounds = bounds.Outer(e.newsGuard.DefensiveInsetBps)
+	}
 	// Лесенка сужается до той, что помещается, вместо отказа котировать:
 	// её ширина берётся из того же бюджета дистанции, что и сама котировка,
 	// и перестаёт помещаться раньше неё. См. policy.Ladder.Fit.
@@ -167,9 +184,18 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 	}
 
 	e.blocked = ""
+	// Размер режется вместе с отходом, и это бесплатно по зачёту. Тир 0.5x
+	// берётся с медианы замеров, а её держат обычные полчаса часа; урезанные
+	// замеры попадают только в верхний перцентиль, который защитная поза
+	// и так отдала, уйдя к краю полосы. Потери же от исполнения размеру прямо
+	// пропорциональны.
+	allocation := e.cfg.AllocationUSD
+	if news.defensive {
+		allocation *= e.newsGuard.DefensiveSizeMultiple
+	}
 	plan, err := sizing.Compute(sizing.Inputs{
 		Budget: sizing.Budget{
-			AllocationUSD:  decimal.NewFromFloat(e.cfg.AllocationUSD),
+			AllocationUSD:  decimal.NewFromFloat(allocation),
 			AvailableUSD:   e.available,
 			Leverage:       e.cfg.SymbolRisk.Leverage,
 			UtilizationPct: utilizationPct,
@@ -404,8 +430,16 @@ func (e *Engine) place(
 		e.deps.Log.Warn("size rejected", "symbol", e.symbol, "error", err)
 		return
 	}
+	if clamped, ok := e.clampPostOnly(side, price); ok {
+		price = clamped
+	} else {
+		return
+	}
 	// Биржа отклонит пересекающий ALO-ордер сама, но проверка на нашей стороне
 	// экономит запрос и, что важнее, ловит ошибку в расчёте дистанции.
+	//
+	// После зажима она уже не должна срабатывать, и именно поэтому остаётся:
+	// сработавшая означает, что зажим выключен либо стакан односторонний.
 	if e.book.WouldCross(side, price) {
 		e.deps.Log.Warn("quote would cross the book, skipping",
 			"symbol", e.symbol, "side", side, "price", price)
@@ -445,6 +479,39 @@ func (e *Engine) place(
 		"price", price, "qty", qty, "distance", action.Distance, "reason", action.Reason)
 
 	e.ladderFor(side).OnPlaceSent(action.Slot, id, price, qty, now)
+}
+
+// clampPostOnly отодвигает цену от вершины стакана и решает, стоит ли отправлять
+// то, что получилось.
+//
+// Второй результат false означает отказ от размещения. Отказ здесь дешевле
+// отправки: зажим срабатывает лишь тогда, когда стакан ушёл дальше, чем успела
+// обновиться справочная цена, и вся геометрия котировки в этот момент построена
+// на устаревшем mark. Прежде такой ордер уходил на биржу и возвращался отказом
+// post-only — круг запроса и пустая ступень до следующего такта, — либо, что
+// хуже, вставал на вершину и забирался ближайшим движением.
+//
+// Проверка односторонняя, потому что односторонний и зажим: он уводит цену
+// только от mark. Ближе разрешённого котировка после него оказаться не может,
+// а вот за краем полосы — вполне, и там она не стоит ничего.
+func (e *Engine) clampPostOnly(side market.Side, price money.Price) (money.Price, bool) {
+	clamped := market.ClampPostOnly(price, side, e.book, e.spec, e.cfg.Quote.PostOnlyBufferTicks)
+	if clamped.Cmp(price) == 0 {
+		return price, true
+	}
+
+	distance, err := market.DistanceBps(e.mark, side, clamped)
+	if err != nil || !clamped.IsPositive() || distance > e.bounds.MaxBps {
+		e.deps.Log.Info("skipping a quote the post-only buffer pushed out of the band",
+			"symbol", e.symbol, "side", side,
+			"price", price, "clamped", clamped, "distance", distance, "band", e.bounds.MaxBps)
+		return price, false
+	}
+
+	e.deps.Log.Info("post-only buffer moved the quote off the touch",
+		"symbol", e.symbol, "side", side,
+		"price", price, "clamped", clamped, "distance", distance)
+	return clamped, true
 }
 
 // withdraw снимает обе стороны.
@@ -883,6 +950,13 @@ func (e *Engine) reportStatus(
 		"accrual_multiplier", fmt.Sprintf("%.2f", hour.Multiplier),
 		"bids_live", e.bids.LiveCount(),
 		"asks_live", e.asks.LiveCount(),
+		// Какой сигнал сейчас правит порогами опасности. Без этого разбор
+		// пропущенного залива начинается с догадки о том, работал ли ориентир.
+		"fast_signal", e.fastSignal(),
+		// Поза по календарю: обычная, отход или отсутствие. Печатается всегда,
+		// а не только при отходе — «обычная» здесь такое же утверждение,
+		// как остальные, и именно его хочется видеть после публикации.
+		"news", e.newsSummary(now),
 		// Свободная маржа и связывающее размер ограничение: без них нельзя
 		// понять, сколько депозита допустимо выделить, а с ними это видно
 		// за сутки наблюдения.
@@ -1007,6 +1081,8 @@ func (e *Engine) reportMetrics(
 	m := e.deps.Metrics
 	hour := e.hour.Assess(now)
 
+	e.noteFastSignal(now)
+
 	m.QuoteUptime(e.symbol, hour.QualifiedPct/100)
 	m.EstimatedMakerHours(e.symbol, hour.MakerHours)
 	m.HalfSpread(e.symbol, float64(conditions.HalfSpreadBps))
@@ -1023,6 +1099,65 @@ func (e *Engine) reportMetrics(
 	if quoting {
 		m.TargetDistance(e.symbol, float64(quote.Distance))
 	}
+}
+
+// fastSignal называет источник, питающий пороги опасности прямо сейчас.
+func (e *Engine) fastSignal() string {
+	switch {
+	case e.refStaleAfter <= 0:
+		return "book"
+	case e.referenceLeading:
+		return "reference"
+	default:
+		return "book (reference stale)"
+	}
+}
+
+// noteFastSignal публикует возраст ориентира и печатает смену источника
+// быстрого сигнала.
+//
+// Переход именно печатается, а не выводится из метрики: замолчавший ориентир
+// не проявляется ничем — котирование продолжается, дистанции те же, исчезает
+// лишь предупреждение, а отсутствие предупреждения ненаблюдаемо по определению.
+// Строка на переходе, а не на каждом такте: смена источника — событие, и в логе
+// она должна выглядеть событием.
+func (e *Engine) noteFastSignal(now time.Time) {
+	if e.refStaleAfter <= 0 {
+		return // ориентир для инструмента не настроен
+	}
+
+	// Возраст обязан быть конечным и растущим.
+	//
+	// Бесконечность на «ещё не приходил» напрашивалась, но почасовая свёртка
+	// кладёт квантили в JSON, а json.Encode на ±Inf возвращает ошибку — то есть
+	// одна ненастроенная площадка стоила бы всей истории показателей за час.
+	// Отсчёт от момента, с которого актор ждёт, даёт конечное число и делает
+	// «не подключился ни разу» неотличимым от «умер»: для быстрого сигнала это
+	// и есть одно и то же.
+	if e.referenceWaitSince.IsZero() {
+		e.referenceWaitSince = now
+	}
+	since := e.referenceAt
+	if since.IsZero() {
+		since = e.referenceWaitSince
+	}
+	e.deps.Metrics.ReferenceStaleness(e.symbol, now.Sub(since).Seconds())
+
+	_, leading := e.referenceDrift()
+	if leading == e.referenceLeading {
+		return
+	}
+	e.referenceLeading = leading
+
+	if leading {
+		e.deps.Log.Info("fast signal now leads on the external reference",
+			"symbol", e.symbol, "reference", e.reference)
+		return
+	}
+	e.deps.Log.Warn("external reference is stale, falling back to the book mid",
+		"symbol", e.symbol,
+		"age", now.Sub(since).Truncate(time.Millisecond).String(),
+		"stale_after", e.refStaleAfter)
 }
 
 // bookDepth возвращает нотионал в пределах полосы награды по каждой стороне.

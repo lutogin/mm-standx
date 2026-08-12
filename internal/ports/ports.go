@@ -9,6 +9,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/nd/mm-standx/internal/domain/calendar"
 	"github.com/nd/mm-standx/internal/domain/market"
 	"github.com/nd/mm-standx/internal/domain/money"
 	"github.com/nd/mm-standx/internal/domain/trading"
@@ -140,6 +141,15 @@ type Clock interface {
 type Ticker interface {
 	C() <-chan time.Time
 	Stop()
+}
+
+// NewsSource отдаёт расписание экономических публикаций на ближайшее время.
+//
+// Отдельный порт, а не поле конфигурации: календарь приходит от третьей
+// стороны, у которой перед нами обязательств нет, и подменить его в тестах
+// нужно так же, как биржу.
+type NewsSource interface {
+	Events(ctx context.Context) ([]calendar.Event, error)
 }
 
 // Recorder сохраняет сырые сообщения потока для последующего воспроизведения

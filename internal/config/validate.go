@@ -4,11 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/shopspring/decimal"
 
+	"github.com/nd/mm-standx/internal/domain/calendar"
 	"github.com/nd/mm-standx/internal/domain/money"
 	"github.com/nd/mm-standx/internal/domain/policy"
 	"github.com/nd/mm-standx/internal/domain/trading"
@@ -27,6 +29,7 @@ func (c *Config) Validate() error {
 	errs = append(errs, c.Reward.validate()...)
 	errs = append(errs, c.Risk.validate()...)
 	errs = append(errs, c.Health.validate()...)
+	errs = append(errs, c.News.validate()...)
 
 	enabled := 0
 	for name, sym := range c.Symbols {
@@ -277,6 +280,9 @@ func (s Symbol) validate(name string, band money.Bps, tiers []UptimeTier, live b
 			prefix, s.Uptime.HardFloorPct, tiers[0].ThresholdPct))
 	}
 	errs = append(errs, s.Volatility.validate(prefix+".volatility")...)
+	// Checked for disabled instruments too, for the same reason as the shutdown
+	// window: a typo would otherwise surface when the instrument is switched on.
+	errs = append(errs, s.Reference.validate(prefix+".reference")...)
 	if s.Enabled {
 		errs = append(errs, s.Program.validate(prefix+".program")...)
 	}
@@ -327,6 +333,9 @@ func (q Quote) validate(prefix string) []error {
 	}
 	if q.MinRest < 0 || q.RequoteCooldown < 0 {
 		errs = append(errs, fmt.Errorf("%s: minRest and requoteCooldown must not be negative", prefix))
+	}
+	if q.PostOnlyBufferTicks < 0 {
+		errs = append(errs, fmt.Errorf("%s.postOnlyBufferTicks must not be negative", prefix))
 	}
 	return errs
 }
@@ -475,6 +484,121 @@ func validateOffHours(prefix string, p Program) []error {
 	}
 	return errs
 }
+
+// Policy converts the configured windows into the domain form.
+func (n News) Policy() calendar.Policy {
+	return calendar.Policy{
+		DefensiveBefore: n.DefensiveBefore,
+		DefensiveAfter:  n.DefensiveAfter,
+		HardBefore:      n.HardBefore,
+		HardAfter:       n.HardAfter,
+	}
+}
+
+// Filter converts the configured selection into the domain form.
+func (n News) Filter() calendar.Filter {
+	impacts := make([]calendar.Impact, 0, len(n.Impacts))
+	for _, raw := range n.Impacts {
+		impacts = append(impacts, calendar.ParseImpact(raw))
+	}
+	return calendar.Filter{Currencies: n.Currencies, Impacts: impacts}
+}
+
+// validate checks the news blackout.
+//
+// An enabled guard with an empty selection is the failure worth catching here:
+// it starts, fetches, logs a healthy calendar and protects nothing, and the
+// only way to notice is to still be standing in the book when the number
+// prints.
+func (n News) validate() []error {
+	if !n.Enabled {
+		return nil
+	}
+
+	var errs []error
+	if err := n.Policy().Validate(); err != nil {
+		errs = append(errs, fmt.Errorf("news: %w", err))
+	}
+	if len(n.Currencies) == 0 {
+		errs = append(errs, errors.New(
+			"news.currencies is empty, so the guard would match no release at all"))
+	}
+	if len(n.Impacts) == 0 {
+		errs = append(errs, errors.New(
+			"news.impacts is empty, so the guard would match no release at all"))
+	}
+	for _, raw := range n.Impacts {
+		switch calendar.ParseImpact(raw) {
+		case calendar.ImpactHigh, calendar.ImpactMedium, calendar.ImpactLow, calendar.ImpactHoliday:
+		default:
+			errs = append(errs, fmt.Errorf(
+				"news.impacts: unknown value %q, known: high, medium, low, holiday", raw))
+		}
+	}
+	if n.Refresh <= 0 {
+		errs = append(errs, errors.New("news.refresh must be positive"))
+	}
+	// Расписание, устаревающее раньше, чем его успевают перечитать, в режиме
+	// fail-closed останавливало бы котирование между двумя удачными чтениями.
+	if n.MaxAge <= n.Refresh {
+		errs = append(errs, fmt.Errorf(
+			"news.maxAge (%s) must exceed news.refresh (%s), or the calendar is stale between reads",
+			n.MaxAge, n.Refresh))
+	}
+	if n.Timeout <= 0 {
+		errs = append(errs, errors.New("news.timeout must be positive"))
+	}
+	if n.DefensiveInsetBps < 0 {
+		errs = append(errs, errors.New("news.defensiveInsetBps must not be negative"))
+	}
+	// Множитель больше единицы означал бы наращивание размера перед публикацией,
+	// то есть прямо противоположное назначению позы.
+	if n.DefensiveSizeMultiple <= 0 || n.DefensiveSizeMultiple > 1 {
+		errs = append(errs, fmt.Errorf(
+			"news.defensiveSizeMultiple (%.2f) must be within (0, 1]", n.DefensiveSizeMultiple))
+	}
+	if n.URL != "" {
+		if u, err := url.Parse(n.URL); err != nil || u.Host == "" {
+			errs = append(errs, fmt.Errorf("news.url: malformed URL %q", n.URL))
+		}
+	}
+	return errs
+}
+
+// validate checks the external reference feed.
+//
+// A disabled feed is left alone: naming a venue for an instrument that is not
+// watched costs nothing. An enabled one must be complete, because the failure
+// it would otherwise produce is silent — a feed that never connects looks
+// exactly like a feed on a quiet market.
+func (r Reference) validate(prefix string) []error {
+	if !r.Enabled {
+		return nil
+	}
+
+	var errs []error
+	if !slices.Contains(ReferenceProviders(), r.Provider) {
+		errs = append(errs, fmt.Errorf("%s.provider: unsupported value %q, known: %s",
+			prefix, r.Provider, strings.Join(ReferenceProviders(), ", ")))
+	}
+	if strings.TrimSpace(r.Symbol) == "" {
+		errs = append(errs, fmt.Errorf(
+			"%s.symbol is required for an enabled feed: it names the instrument on the venue, for example BTCUSDT",
+			prefix))
+	}
+	// A threshold at or past the mark tick makes the feed pointless without
+	// saying so: the reference would be trusted right up to the moment the
+	// official price arrives and supersedes it anyway.
+	if r.StaleAfter <= 0 || r.StaleAfter > markTick {
+		errs = append(errs, fmt.Errorf(
+			"%s.staleAfter (%s) must be within (0, %s]: the feed exists to see inside the mark tick",
+			prefix, r.StaleAfter, markTick))
+	}
+	return errs
+}
+
+// markTick — измеренный шаг канала price, см. PLAN.md §1.4.
+const markTick = 3 * time.Second
 
 func (u Uptime) validate(prefix string) []error {
 	var errs []error

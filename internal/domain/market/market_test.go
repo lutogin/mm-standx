@@ -152,6 +152,90 @@ func TestEmptyBookHasNoBest(t *testing.T) {
 	require.False(t, ok)
 }
 
+// Спецификация золота: десятицентовый шаг цены.
+func goldSpec() SymbolSpec {
+	return SymbolSpec{Symbol: "XAU-USD", PriceTickDecimals: 1, QtyTickDecimals: 3}
+}
+
+func twoSidedBook(bid, ask string) Book {
+	return NewBook("XAU-USD",
+		[]Level{{Price: money.MustParsePrice(bid), Qty: money.MustParseQty("1")}},
+		[]Level{{Price: money.MustParsePrice(ask), Qty: money.MustParseQty("1")}},
+		time.Time{})
+}
+
+func TestTickFollowsThePriceDecimals(t *testing.T) {
+	require.Equal(t, "0.1", goldSpec().Tick().String())
+	require.Equal(t, "0.01", SymbolSpec{PriceTickDecimals: 2}.Tick().String())
+}
+
+// В обычной обстановке котировка стоит глубже вершины на несколько базисных
+// пунктов, и предел до неё не достаёт: зажим не имеет права трогать цену,
+// которая и так безопасна.
+func TestPostOnlyClampLeavesADeepQuoteAlone(t *testing.T) {
+	book := twoSidedBook("4275", "4277")
+
+	require.Equal(t, "4273", ClampPostOnly(money.MustParsePrice("4273"), Buy, book, goldSpec(), 2).String())
+	require.Equal(t, "4279", ClampPostOnly(money.MustParsePrice("4279"), Sell, book, goldSpec(), 2).String())
+}
+
+// Ордер на самой вершине биржа примет, а рынок заберёт первым же движением.
+// Между «не тейкер» и «не будет исполнен через мгновение» лежит расстояние,
+// и зажим его отдаёт.
+func TestPostOnlyClampPushesAQuoteOffTheTouch(t *testing.T) {
+	book := twoSidedBook("4275", "4277")
+
+	require.Equal(t, "4276.8", ClampPostOnly(money.MustParsePrice("4277"), Buy, book, goldSpec(), 2).String(),
+		"a buy standing on the ask retreats by two ticks")
+	require.Equal(t, "4275.2", ClampPostOnly(money.MustParsePrice("4275"), Sell, book, goldSpec(), 2).String(),
+		"a sell standing on the bid retreats by two ticks")
+}
+
+// Смещение всегда направлено от mark price и никогда к нему.
+func TestPostOnlyClampOnlyEverMovesAway(t *testing.T) {
+	book := twoSidedBook("4275", "4277")
+	spec := goldSpec()
+
+	for _, price := range []string{"4270", "4276", "4276.9", "4280"} {
+		p := money.MustParsePrice(price)
+		require.True(t, ClampPostOnly(p, Buy, book, spec, 2).Lte(p), "buy %s", price)
+		require.True(t, ClampPostOnly(p, Sell, book, spec, 2).Gte(p), "sell %s", price)
+	}
+}
+
+func TestPostOnlyClampIsOffAtZeroBuffer(t *testing.T) {
+	book := twoSidedBook("4275", "4277")
+	price := money.MustParsePrice("4277")
+
+	require.Equal(t, price, ClampPostOnly(price, Buy, book, goldSpec(), 0))
+}
+
+// Односторонний стакан не даёт от чего отступать: цена остаётся как есть,
+// а пересечение ловит отдельная проверка.
+func TestPostOnlyClampNeedsTheOpposingSide(t *testing.T) {
+	oneSided := NewBook("XAU-USD",
+		[]Level{{Price: money.MustParsePrice("4275"), Qty: money.MustParseQty("1")}},
+		nil, time.Time{})
+	price := money.MustParsePrice("4277")
+
+	require.Equal(t, price, ClampPostOnly(price, Buy, oneSided, goldSpec(), 2))
+}
+
+// Зажатая цена обязана лежать на тике: биржа отвергнет цену между тиками,
+// и округление в сторону смещения не отдаёт обратно только что отданный запас.
+func TestPostOnlyClampSnapsAwayFromTheTouch(t *testing.T) {
+	book := twoSidedBook("4275.05", "4277.05")
+	spec := goldSpec()
+
+	buy := ClampPostOnly(money.MustParsePrice("4277"), Buy, book, spec, 1)
+	require.Equal(t, "4276.9", buy.String())
+	require.False(t, book.WouldCross(Buy, buy))
+
+	sell := ClampPostOnly(money.MustParsePrice("4275"), Sell, book, spec, 1)
+	require.Equal(t, "4275.2", sell.String())
+	require.False(t, book.WouldCross(Sell, sell))
+}
+
 func TestWouldCross(t *testing.T) {
 	book := NewBook("BTC-USD",
 		[]Level{{Price: money.MustParsePrice("99950"), Qty: money.MustParseQty("1")}},

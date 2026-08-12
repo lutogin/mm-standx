@@ -117,6 +117,32 @@ func TestNoFlappingInsideDeadBand(t *testing.T) {
 	})
 }
 
+// Требуемая дистанция способна лечь ровно на край полосы, и тогда мёртвая зона
+// над целью схлопывается: над краем нет ничего, во что можно сдвинуться. Это
+// допустимая геометрия, а не сломанная, — и единственная, которую рынок
+// в такой момент допускает.
+func TestDeadBandMayCollapseOnlyAgainstTheBandEdge(t *testing.T) {
+	atEdge := Thresholds{
+		PullBps:    1,
+		PanicBps:   2,
+		MinKeepBps: 3,
+		TargetBps:  9.5,
+		MaxKeepBps: 9.5,
+		BandBps:    9.5,
+	}
+	require.NoError(t, atEdge.Validate())
+	require.Equal(t, Hold, atEdge.Classify(9.5).Action,
+		"an order standing on the edge is still inside the band")
+	require.Equal(t, Requote, atEdge.Classify(9.6).Action,
+		"past the edge it earns nothing and has to move at once")
+
+	// Внутри полосы схлопнутая зона по-прежнему означает бесконечную
+	// перестановку и остаётся ошибкой.
+	inside := atEdge
+	inside.TargetBps, inside.MaxKeepBps = 8, 8
+	require.ErrorContains(t, inside.Validate(), "target < maxKeep")
+}
+
 func TestValidateRejectsMisorderedThresholds(t *testing.T) {
 	require.NoError(t, thresholds().Validate())
 

@@ -27,11 +27,12 @@ type Prometheus struct {
 	liveQuotes *prometheus.GaugeVec
 	quoting    *prometheus.GaugeVec
 
-	target     *prometheus.GaugeVec
-	halfSpread *prometheus.GaugeVec
-	bookDepth  *prometheus.GaugeVec
-	jump       *prometheus.GaugeVec
-	staleness  *prometheus.GaugeVec
+	target       *prometheus.GaugeVec
+	halfSpread   *prometheus.GaugeVec
+	bookDepth    *prometheus.GaugeVec
+	jump         *prometheus.GaugeVec
+	staleness    *prometheus.GaugeVec
+	refStaleness *prometheus.GaugeVec
 
 	fills         *prometheus.CounterVec
 	shadowFills   *prometheus.CounterVec
@@ -89,6 +90,14 @@ func New() *Prometheus {
 		"Notional resting within the reward band, by side", "symbol", "side")
 	p.jump = gauge("jump_bps", "Risk measure: mark price move per tick, adjusted", "symbol")
 	p.staleness = gauge("mark_staleness_seconds", "Age of the last mark price", "symbol")
+	// A reference feed that silently goes quiet degrades the fast signal back
+	// to the book mid without any other visible change: quoting continues,
+	// distances look the same, and the only symptom is a warning that stopped
+	// arriving. Publishing its age is what makes that state observable.
+	// Absent for instruments that never configured a feed, and counted from
+	// the moment the actor started waiting until the first price arrives.
+	p.refStaleness = gauge("reference_staleness_seconds",
+		"Age of the last external reference price", "symbol")
 
 	p.fills = counter("fills_total", "Quotes hit by the market", "symbol", "side")
 	p.shadowFills = counter("shadow_fills_total",
@@ -115,7 +124,7 @@ func New() *Prometheus {
 
 	p.registry.MustRegister(
 		p.uptime, p.makerHours, p.distance, p.liveQuotes, p.quoting,
-		p.target, p.halfSpread, p.bookDepth, p.jump, p.staleness,
+		p.target, p.halfSpread, p.bookDepth, p.jump, p.staleness, p.refStaleness,
 		p.fills, p.shadowFills, p.flattenCost, p.realizedPnL, p.estimatedCost, p.fillsPerHour, p.killSwitch,
 		p.riskLimit,
 		p.ordersSent, p.ordersFailed, p.aloRejects, p.rateTokens, p.reconnects, p.withdrawals,
@@ -164,6 +173,10 @@ func (p *Prometheus) Jump(s market.Symbol, bps float64) {
 
 func (p *Prometheus) MarkStaleness(s market.Symbol, seconds float64) {
 	p.staleness.WithLabelValues(s.String()).Set(seconds)
+}
+
+func (p *Prometheus) ReferenceStaleness(s market.Symbol, seconds float64) {
+	p.refStaleness.WithLabelValues(s.String()).Set(seconds)
 }
 
 func (p *Prometheus) Fill(s market.Symbol, side market.Side) {

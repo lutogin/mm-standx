@@ -5,6 +5,7 @@ import (
 
 	"github.com/shopspring/decimal"
 
+	"github.com/nd/mm-standx/internal/domain/calendar"
 	"github.com/nd/mm-standx/internal/domain/market"
 	"github.com/nd/mm-standx/internal/domain/money"
 	"github.com/nd/mm-standx/internal/domain/trading"
@@ -32,6 +33,34 @@ type BookUpdated struct {
 }
 
 func (BookUpdated) EventName() string { return "market.book_updated" }
+
+// ReferencePriceUpdated — обновилась цена на внешней площадке, опережающей mark.
+//
+// Награда по этой цене не считается никогда: она приходит с чужой площадки
+// и к полосе биржи отношения не имеет. Её единственная роль — снять слепоту
+// между тактами mark, то есть питать пороги опасности (PLAN.md §4.7).
+type ReferencePriceUpdated struct {
+	Reference market.ReferencePrice
+}
+
+func (ReferencePriceUpdated) EventName() string { return "market.reference_price_updated" }
+
+// NewsCalendarUpdated — обновлено расписание экономических публикаций.
+//
+// Передаётся расписание целиком, а не команда «уйти из стакана». Актор
+// вычисляет позу сам, по своим часам: событие о переходе могло бы не прийти,
+// и тогда бот стоял бы в стакане на публикации либо, наоборот, не возвращался
+// после неё. Расписание же остаётся верным независимо от того, пришло ли
+// следующее сообщение.
+type NewsCalendarUpdated struct {
+	Calendar calendar.Calendar
+	// Fetched — когда расписание последний раз удалось прочитать. Пустое
+	// значение означает, что не удавалось ни разу.
+	Fetched time.Time
+	At      time.Time
+}
+
+func (NewsCalendarUpdated) EventName() string { return "market.news_calendar_updated" }
 
 // --- Состояние аккаунта ---
 
@@ -133,6 +162,14 @@ type StreamDisconnected struct {
 	Stream string
 	Reason error
 	At     time.Time
+	// Optional отличает поток, улучшающий решение, от потока, без которого
+	// решение принимать нельзя.
+	//
+	// Разрыв обязательного канала означает торговлю вслепую и приводит
+	// к немедленному съёму котировок. Разрыв необязательного означает лишь,
+	// что мы вернулись к той картине, которую видели и раньше, — снимать
+	// котировки в этом случае значило бы платить присутствием за чужой сбой.
+	Optional bool
 }
 
 func (StreamDisconnected) EventName() string { return "conn.stream_disconnected" }

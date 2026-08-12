@@ -117,6 +117,40 @@ health:
   heartbeatInterval: 1s
 
 # Наследуется каждым инструментом; ниже переопределяются только отличия.
+# Blackout around scheduled economic releases — the only guard in the loop that
+# acts ahead of the move rather than in response to it. Everything else answers
+# a move already under way; against a release whose time is published in advance
+# that does not work at all, because a cancel takes about 400 ms round trip and
+# gold covers tens of basis points in the first second of a CPI print.
+news:
+  enabled: true
+  url: "" # empty uses the published weekly feed
+  currencies: [USD] # what the traded instruments actually react to
+  impacts: [high] # an empty list matches nothing, deliberately
+  # Fifteen minutes is not symmetry for its own sake. Ahead of the print the
+  # book thins out and quotes get picked off by anyone repositioning; after it
+  # the first minute is the move and the next quarter hour is the argument
+  # about it, when the spread is widest and the mark least trustworthy.
+  defensiveBefore: 15m
+  defensiveAfter: 15m
+  # A minute either side of the number itself: the only stretch where no
+  # distance inside the reward band is safe, so the only answer is absence.
+  hardBefore: 1m
+  hardAfter: 1m
+  # Standing back is not the same as leaving. The programme scores a percentile
+  # of the samples, so half an hour of zeros drags the whole hour down a tier
+  # or past it, while the same half hour spent at the outer edge of the band
+  # keeps the hour payable and still cuts the loss if the move arrives early.
+  defensiveInsetBps: 1.5 # room inside the band edge; the 0.8 bps ladder still fits
+  defensiveSizeMultiple: 0.5 # free in accrual terms, proportional in loss terms
+  refresh: 2h
+  maxAge: 6h
+  timeout: 15s
+  # An unavailable publisher is not a reason to stop for a day: the weekly file
+  # covers the week ahead, and the known releases stay true. Set false to refuse
+  # to quote until the calendar is confirmed.
+  failOpen: true
+
 defaults:
   enabled: false
   allocationUsd: 0
@@ -137,6 +171,13 @@ defaults:
     ladderSpreadBps: 0.4
     minRest: 3200ms # ≥3с, иначе ордер не засчитывается в Maker Points
     requoteCooldown: 250ms
+    # Distance kept from the opposing top of book, in exchange ticks. The
+    # crossing check only answers "will the exchange reject this"; an order
+    # resting on the touch is accepted and then taken by the first move.
+    # On gold two ticks is 0.46 bps, so the clamp binds only when the book has
+    # run past a mark that has not caught up — and that quote is refused rather
+    # than sent, because its whole geometry rests on a stale price.
+    postOnlyBufferTicks: 2
   # Дистанции здесь нет: она вычисляется из спреда и измеренного скачка.
   # Задаётся только готовность рисковать. См. PLAN.md §4.5.
   appetite:
@@ -293,6 +334,27 @@ defaults:
   risk:
     leverage: 4
     maxNetPositionBase: "0" # 0 — закрывать любую позицию немедленно
+  # External venue whose price leads the exchange mark. Off by default and
+  # named per instrument: a symbol that tracks a different underlying is worse
+  # than no feed, because a wrong signal is still acted upon.
+  #
+  # Its drift since the last mark tick feeds the danger thresholds, replacing
+  # the drift of the exchange's own book mid (PLAN.md §4.7). The book mid moves
+  # with the very order that fills us, so its warning has zero length; the
+  # external venue shows the same move earlier.
+  #
+  # The feed is advisory. Losing it, or letting it go stale, returns the bot to
+  # the picture it had before and never stops quoting on its own.
+  reference:
+    enabled: false
+    provider: binance_futures # binance_futures | binance_spot | bybit_linear | bybit_spot
+    symbol: ""
+    # One mark tick. Silence on a book-ticker stream means the top of book did
+    # not change — information, not the absence of it — so the threshold exists
+    # to catch a socket that died quietly, not a calm market. Past one tick the
+    # official price supersedes the estimate anyway. At two seconds this warned
+    # about a perfectly healthy gold feed once every two minutes.
+    staleAfter: 3s
 
 # Параметры начисления публикуются StandX и меняются оперативной командой:
 # https://docs.standx.com/docs/standx-perps-solutions/community-maker-yield
@@ -322,6 +384,14 @@ symbols:
         # The exchange publishes no machine-readable holiday calendar, so this
         # list is maintained by hand. Empty is not a claim that there are none.
         holidays: []
+    # Binance USD-M XAUUSDT, a TradFi-tracking perpetual: 1.26 bn USD of quote
+    # volume and 875k trades a day at a 0.02 bps spread, measured 10 August.
+    # An order of magnitude past Bybit's book on the same underlying, and the
+    # only venue where gold moves before the exchange mark shows it.
+    reference:
+      enabled: true
+      provider: binance_futures
+      symbol: XAUUSDT
 
   # Единственная реальная альтернатива: стакан глубже золотого, но полоса
   # награды съедена волатильностью — проигрывает при любом $/MH.
@@ -329,19 +399,24 @@ symbols:
     enabled: false
     allocationUsd: 60
     program: { unitSize: "2", perSideCap: "20", maxMakerHoursPerHour: 10 }
+    reference: { enabled: true, provider: binance_futures, symbol: BTCUSDT }
 
   ETH-USD:
     enabled: false
     program: { unitSize: "60", perSideCap: "600", maxMakerHoursPerHour: 10 }
+    reference: { enabled: true, provider: binance_futures, symbol: ETHUSDT }
   SOL-USD:
     enabled: false
     program: { unitSize: "1500", perSideCap: "15000", maxMakerHoursPerHour: 10 }
+    reference: { enabled: true, provider: binance_futures, symbol: SOLUSDT }
   BNB-USD:
     enabled: false
     program: { unitSize: "300", perSideCap: "3000", maxMakerHoursPerHour: 10 }
+    reference: { enabled: true, provider: binance_futures, symbol: BNBUSDT }
   HYPE-USD:
     enabled: false
     program: { unitSize: "4000", perSideCap: "40000", maxMakerHoursPerHour: 10 }
+    reference: { enabled: true, provider: binance_futures, symbol: HYPEUSDT }
 
   # Металлы: спред шире, движение рваное — см. PLAN.md §1.4.
   XAG-USD:
@@ -364,6 +439,7 @@ symbols:
         # The exchange publishes no machine-readable holiday calendar, so this
         # list is maintained by hand. Empty is not a claim that there are none.
         holidays: []
+    reference: { enabled: true, provider: binance_futures, symbol: XAGUSDT }
   CL-USD:
     enabled: false
     program:
@@ -384,6 +460,12 @@ symbols:
         # The exchange publishes no machine-readable holiday calendar, so this
         # list is maintained by hand. Empty is not a claim that there are none.
         holidays: []
+
+  # Oil and the equities are left without a reference on purpose. A venue that
+  # lists the ticker is not the same thing as a venue where it leads, and an
+  # unverified mapping is worse than none: a wrong signal is still acted upon.
+  # Fill one in only after checking the venue's own turnover on that symbol,
+  # the way XAUUSDT was checked above.
 
   # Акции: гэпы на открытии и закрытии базового рынка.
   TSLA-USD:

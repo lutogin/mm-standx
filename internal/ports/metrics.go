@@ -46,6 +46,17 @@ type Metrics interface {
 	Jump(s market.Symbol, bps float64)
 	// MarkStaleness — возраст последней справочной цены в секундах.
 	MarkStaleness(s market.Symbol, seconds float64)
+	// ReferenceStaleness — возраст последней цены внешнего ориентира в секундах.
+	//
+	// Замолчавший ориентир не проявляется никак: котирование продолжается,
+	// дистанции те же, быстрый сигнал молча возвращается к середине стакана.
+	// Единственный симптом — переставшее приходить предупреждение, а его
+	// отсутствие ненаблюдаемо по определению.
+	//
+	// Пока ориентир не приходил ни разу, отсчёт идёт с момента, когда актор
+	// начал его ждать: величина обязана оставаться конечной, потому что
+	// почасовая свёртка кладёт квантили в JSON.
+	ReferenceStaleness(s market.Symbol, seconds float64)
 
 	// --- Цена стратегии ---
 
@@ -121,6 +132,18 @@ const (
 	// CauseOffHours — the reference market is shut and the hour accrues at a
 	// reduced multiplier while the fill risk stays the same.
 	CauseOffHours WithdrawCause = "off_hours"
+	// CauseNewsBlackout — идёт запланированная публикация. Единственный отрезок,
+	// на котором никакая дистанция внутри полосы не защищает.
+	CauseNewsBlackout WithdrawCause = "news_blackout"
+	// CauseNewsHourSpent — запланированное затемнение уже отняло у часа
+	// возможность окупиться, и оставаться в стакане до него незачем.
+	//
+	// Отличается от CauseHourLost тем, что решение принято заранее и по
+	// известному расписанию, а не обнаружено по факту накопленного простоя.
+	CauseNewsHourSpent WithdrawCause = "news_hour_spent"
+	// CauseNewsUnavailable — расписание публикаций не читается, и режим
+	// fail-closed запрещает котировать вслепую.
+	CauseNewsUnavailable WithdrawCause = "news_unavailable"
 	// CauseEconomics — the conservative reward lower bound does not cover the
 	// measured cost of fill risk, or the calibration allocation is exceeded.
 	CauseEconomics WithdrawCause = "economics"
@@ -162,6 +185,7 @@ func (NopMetrics) HalfSpread(market.Symbol, float64)                 {}
 func (NopMetrics) BookDepth(market.Symbol, market.Side, float64)     {}
 func (NopMetrics) Jump(market.Symbol, float64)                       {}
 func (NopMetrics) MarkStaleness(market.Symbol, float64)              {}
+func (NopMetrics) ReferenceStaleness(market.Symbol, float64)         {}
 func (NopMetrics) Fill(market.Symbol, market.Side)                   {}
 func (NopMetrics) ShadowFill(market.Symbol, market.Side)             {}
 func (NopMetrics) FlattenCost(market.Symbol, float64)                {}

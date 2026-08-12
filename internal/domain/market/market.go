@@ -92,6 +92,22 @@ type MarkPrice struct {
 	Received time.Time // локальное время получения, а не время биржи
 }
 
+// ReferencePrice — снимок цены с внешней площадки, чьи движения опережают mark.
+//
+// Держится отдельно от MarkPrice намеренно. Награда считается только от mark,
+// и смешать эти две цены в одном типе значило бы однажды выставить ордер
+// по чужой площадке — то есть вне полосы. Опорная цена допускается лишь туда,
+// где ошибка стоит лишней осторожности: к порогам опасности (PLAN.md §4.7).
+type ReferencePrice struct {
+	// Symbol — инструмент биржи, за которым следит эта цена, а не имя символа
+	// на внешней площадке.
+	Symbol Symbol
+	// Venue — площадка и тип рынка, для логов и метрик.
+	Venue    string
+	Price    money.Price
+	Received time.Time // локальное время получения
+}
+
 // PriceAtDistance возвращает цену ордера, стоящего на дистанции d от mark price.
 //
 // Покупка размещается ниже mark, продажа — выше. Отрицательная дистанция даёт
@@ -159,6 +175,54 @@ func (b Book) BestAsk() (money.Price, bool) {
 		return money.Price{}, false
 	}
 	return b.Asks[0].Price, true
+}
+
+// Tick — шаг цены инструмента.
+func (s SymbolSpec) Tick() decimal.Decimal { return decimal.New(1, -s.PriceTickDecimals) }
+
+// ClampPostOnly отодвигает цену от противоположной вершины стакана на buffer тиков.
+//
+// Проверка на пересечение отвечает на вопрос «отвергнет ли биржа», и этого мало.
+// Ордер, поставленный ровно на вершину, биржа примет, а рынок заберёт первым же
+// движением: между «не тейкер» и «не будет исполнен через мгновение» лежит
+// расстояние, которое надо назвать явно.
+//
+// Смещение всегда направлено от mark price, никогда к нему: покупка уезжает
+// вниз, продажа вверх. Отсюда и односторонняя проверка у вызывающего — после
+// зажима дистанция способна только вырасти, то есть выйти за полосу награды,
+// но не подойти к рынку ближе разрешённого.
+//
+// Зажим срабатывает редко и ровно в тех случаях, ради которых заведён: когда
+// стакан ушёл дальше, чем успела обновиться справочная цена. В обычной
+// обстановке котировка стоит на несколько базисных пунктов глубже вершины,
+// и предел до неё не достаёт.
+func ClampPostOnly(price money.Price, side Side, book Book, spec SymbolSpec, buffer int) money.Price {
+	if buffer <= 0 {
+		return price
+	}
+	offset := spec.Tick().Mul(decimal.NewFromInt(int64(buffer)))
+
+	if side == Buy {
+		ask, ok := book.BestAsk()
+		if !ok {
+			return price
+		}
+		// Снэп в ту же сторону, что и смещение: округление вверх вернуло бы
+		// часть только что отданного запаса.
+		if limit := ask.Sub(money.NewPrice(offset)).SnapDown(spec.PriceTickDecimals); limit.Lt(price) {
+			return limit
+		}
+		return price
+	}
+
+	bid, ok := book.BestBid()
+	if !ok {
+		return price
+	}
+	if limit := bid.Add(money.NewPrice(offset)).SnapUp(spec.PriceTickDecimals); limit.Gt(price) {
+		return limit
+	}
+	return price
 }
 
 // WouldCross сообщает, пересечёт ли лимитный ордер противоположную сторону стакана.

@@ -13,12 +13,14 @@ import (
 	"go.uber.org/fx"
 
 	"github.com/nd/mm-standx/internal/adapters/metrics"
+	"github.com/nd/mm-standx/internal/adapters/reference"
 	"github.com/nd/mm-standx/internal/adapters/standx/auth"
 	"github.com/nd/mm-standx/internal/adapters/standx/wsapi"
 	"github.com/nd/mm-standx/internal/adapters/standx/wsstream"
 	"github.com/nd/mm-standx/internal/app/account"
 	"github.com/nd/mm-standx/internal/app/engine"
 	"github.com/nd/mm-standx/internal/app/heartbeat"
+	"github.com/nd/mm-standx/internal/app/news"
 	"github.com/nd/mm-standx/internal/app/observer"
 	"github.com/nd/mm-standx/internal/app/risk"
 	"github.com/nd/mm-standx/internal/app/stats"
@@ -42,6 +44,8 @@ import (
 var Runtime = fx.Module("runtime",
 	fx.Provide(
 		fx.Annotate(provideStreams, fx.ResultTags(`group:"runnables,flatten"`)),
+		fx.Annotate(provideReferenceFeeds, fx.ResultTags(`group:"runnables,flatten"`)),
+		fx.Annotate(provideNewsPoller, fx.ResultTags(`group:"runnables,flatten"`)),
 		fx.Annotate(provideMetricsServer, fx.As(new(ports.Runnable)), fx.ResultTags(`group:"runnables"`)),
 		fx.Annotate(provideRiskGuard, fx.As(new(ports.Runnable)), fx.ResultTags(`group:"runnables"`)),
 		fx.Annotate(provideWatchdog, fx.As(new(ports.Runnable)), fx.ResultTags(`group:"runnables"`)),
@@ -116,6 +120,63 @@ func provideStreams(
 		streams = append(streams, orderAPI.Runnable())
 	}
 	return streams
+}
+
+// provideReferenceFeeds поднимает по одному соединению с внешней площадкой
+// на каждый инструмент, для которого она названа.
+//
+// Соединение на инструмент, а не одно общее: площадки различаются, символы
+// тоже, и разрыв ориентира по одному инструменту не должен трогать другой.
+// Инструментов у нас единицы, поэтому экономить сокеты незачем.
+func provideReferenceFeeds(
+	cfg *config.Config,
+	bus *events.Bus,
+	clk ports.Clock,
+	rec ports.Recorder,
+	log *slog.Logger,
+) ([]ports.Runnable, error) {
+	var feeds []ports.Runnable
+	for _, symbol := range sortedSymbols(cfg) {
+		ref := cfg.Symbols[symbol.String()].Reference
+		if !ref.Enabled {
+			continue
+		}
+		feed, err := reference.New(symbol, ref, cfg.Exchange, bus, clk, rec, log)
+		if err != nil {
+			return nil, fmt.Errorf("reference feed for %s: %w", symbol, err)
+		}
+		log.Info("external reference feed enabled",
+			"symbol", symbol, "provider", ref.Provider, "venue_symbol", ref.Symbol)
+		feeds = append(feeds, feed)
+	}
+	return feeds, nil
+}
+
+// provideNewsPoller поднимает чтение календаря экономических публикаций.
+//
+// Один поллер на процесс, а не на инструмент: расписание общее, а публикация
+// CPI — один и тот же факт для каждого долларового рынка на доске.
+//
+// Возвращается срез, чтобы выключенный календарь просто не давал компонента:
+// пустой поллер, исправно опрашивающий никого, выглядел бы в логе работающим.
+func provideNewsPoller(
+	cfg *config.Config,
+	source ports.NewsSource,
+	bus *events.Bus,
+	clk ports.Clock,
+	log *slog.Logger,
+) []ports.Runnable {
+	if !cfg.News.Enabled {
+		log.Info("news blackout disabled: scheduled releases will not stop quoting")
+		return nil
+	}
+	return []ports.Runnable{news.New(news.Config{
+		Refresh: cfg.News.Refresh,
+		MaxAge:  cfg.News.MaxAge,
+		Filter:  cfg.News.Filter(),
+		Policy:  cfg.News.Policy(),
+		Timeout: cfg.News.Timeout,
+	}, source, bus, clk, log)}
 }
 
 func provideWatchdog(cfg *config.Config, bus *events.Bus, clk ports.Clock, log *slog.Logger) *watchdog.Watchdog {
@@ -292,6 +353,17 @@ func provideEngines(
 					BreakEvenUSDPerMakerHour:            symCfg.Economics.BreakEvenUSDPerMakerHour,
 					CalibrationMaxAllocationUSD:         symCfg.Economics.CalibrationMaxAllocationUSD,
 				},
+				// Ноль, когда ориентир для инструмента не поднят: путь быстрого
+				// сигнала тогда не задействуется вовсе, а это отличается
+				// от «настроен и молчит».
+				ReferenceStaleAfter: referenceStaleAfter(symCfg.Reference),
+				News: engine.NewsGuard{
+					Enabled:               cfg.News.Enabled,
+					MaxAge:                cfg.News.MaxAge,
+					FailOpen:              cfg.News.FailOpen,
+					DefensiveInsetBps:     cfg.News.DefensiveInsetBps,
+					DefensiveSizeMultiple: cfg.News.DefensiveSizeMultiple,
+				},
 				MaxNetPosition: maxPosition,
 			},
 			engine.Deps{
@@ -305,6 +377,18 @@ func provideEngines(
 		))
 	}
 	return out, nil
+}
+
+// referenceStaleAfter отдаёт порог молчания только для поднятого ориентира.
+//
+// Выключенный фид обязан выглядеть в акторе как отсутствующий, а не как
+// молчащий: иначе выключение оставляло бы в сводке и метриках вечно устаревший
+// ориентир, а тревога о нём приходила бы каждый раз, когда его никто не ждёт.
+func referenceStaleAfter(ref config.Reference) time.Duration {
+	if !ref.Enabled {
+		return 0
+	}
+	return ref.StaleAfter
 }
 
 func buildProgram(rewardCfg config.Reward, p config.Program) (reward.Program, error) {

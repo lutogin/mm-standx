@@ -76,6 +76,24 @@ type Heartbeater interface {
 	Heartbeat(ctx context.Context, s Sender) error
 }
 
+// Optional реализуется каналами, потеря которых ухудшает сигнал, но не лишает
+// нас права принимать решения.
+//
+// Признак нужен подписчикам StreamDisconnected. Актор снимает котировки
+// на разрыве потока, и это верно для каналов биржи: без mark price мы торгуем
+// вслепую. Внешний ориентир устроен наоборот — без него мы возвращаемся ровно
+// к той картине, по которой работали до его появления, и съём котировок платил
+// бы присутствием за сбой чужой площадки.
+type Optional interface {
+	Optional() bool
+}
+
+// optional сообщает, объявил ли обработчик свой поток необязательным.
+func optional(h Handler) bool {
+	o, ok := h.(Optional)
+	return ok && o.Optional()
+}
+
 // Loop поддерживает соединение живым, переподключаясь при разрывах.
 type Loop struct {
 	name    string
@@ -85,6 +103,10 @@ type Loop struct {
 	bus     *events.Bus
 	clock   ports.Clock
 	log     *slog.Logger
+	// optional запоминает ответ обработчика один раз: он не меняется в течение
+	// жизни соединения, а спрашивать его на каждом разрыве значило бы допускать,
+	// что мог бы измениться.
+	optional bool
 
 	// active хранит соединение, открытое для внешних отправителей. Устанавливается
 	// только после успешного рукопожатия: до этого писать в сокет вправе лишь
@@ -105,14 +127,15 @@ func New(
 	log *slog.Logger,
 ) *Loop {
 	return &Loop{
-		name:    name,
-		url:     url,
-		cfg:     cfg,
-		handler: handler,
-		bus:     bus,
-		clock:   clock,
-		log:     log.With("component", "wsconn", "stream", name),
-		done:    make(chan struct{}),
+		name:     name,
+		url:      url,
+		cfg:      cfg,
+		handler:  handler,
+		bus:      bus,
+		clock:    clock,
+		log:      log.With("component", "wsconn", "stream", name),
+		optional: optional(handler),
+		done:     make(chan struct{}),
 	}
 }
 
@@ -187,7 +210,7 @@ func (l *Loop) run(ctx context.Context) {
 		}
 		l.handler.OnDisconnect(err)
 		events.Publish(l.bus, ctx, events.StreamDisconnected{
-			Stream: l.name, Reason: err, At: l.clock.Now(),
+			Stream: l.name, Reason: err, At: l.clock.Now(), Optional: l.optional,
 		})
 
 		// Соединение, прожившее заметное время, считаем здоровым: иначе плановая

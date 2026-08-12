@@ -72,6 +72,42 @@ func defaults() *Config {
 			// Ставки одинаковы для всех рынков StandX, см. PLAN.md §1.3.
 			Fees: Fees{MakerBps: 1, TakerBps: 4},
 		},
+		News: News{
+			// On by default, unlike the reference feed: the feed needs a venue
+			// chosen per instrument and can be wrong, while a scheduled release
+			// is the same fact for every USD-quoted market on the board.
+			Enabled:    true,
+			Currencies: []string{"USD"},
+			Impacts:    []string{"high"},
+			// Fifteen minutes is not symmetry for its own sake. Ahead of the
+			// print the book thins out and quotes get picked off by anyone
+			// repositioning; after it the first minute is the move and the next
+			// quarter hour is the argument about it, which is when the spread
+			// is widest and the mark is least trustworthy.
+			DefensiveBefore: 15 * time.Minute,
+			DefensiveAfter:  15 * time.Minute,
+			// A minute either side of the number itself. This is the only
+			// stretch where no distance inside the reward band is safe, so the
+			// only available answer is absence.
+			HardBefore: time.Minute,
+			HardAfter:  time.Minute,
+			// One and a half basis points of room inside the band edge: enough
+			// for the three-rung ladder (0.8 bps wide) to still fit, so the
+			// defensive posture keeps the presence that pays for the hour
+			// instead of collapsing to a single order.
+			DefensiveInsetBps: 1.5,
+			// Halving is the conventional choice and here it is also the free
+			// one — see the field's own note. Anything smaller starts to bite
+			// the median sample that carries the 0.5x tier.
+			DefensiveSizeMultiple: 0.5,
+			Refresh:               2 * time.Hour,
+			// Six hours of silence still leaves a calendar worth using — the
+			// file covers the week — but past that a postponed release could
+			// have gone unnoticed.
+			MaxAge:   6 * time.Hour,
+			Timeout:  15 * time.Second,
+			FailOpen: true,
+		},
 		Health: Health{
 			// Канал price обновляется заметно реже стакана: на живом рынке
 			// наблюдалось около 0.3 сообщения в секунду, то есть шаг порядка
@@ -96,6 +132,11 @@ func defaults() *Config {
 				LadderSpreadBps: 1.0,
 				MinRest:         3200 * time.Millisecond, // ≥3с для зачёта Maker Points
 				RequoteCooldown: 250 * time.Millisecond,
+				// Two ticks. On gold that is 0.46 bps, small next to the seven
+				// the quote normally stands at, so the clamp binds only when the
+				// book has run past a mark that has not caught up yet — which is
+				// exactly the moment an order placed on the touch gets taken.
+				PostOnlyBufferTicks: 2,
 			},
 			Appetite: Appetite{
 				// Мера риска — максимум скользящего окна, то есть уже оценка
@@ -159,6 +200,25 @@ func defaults() *Config {
 			SymbolRisk: SymbolRisk{
 				Leverage:           4,
 				MaxNetPositionBase: "0",
+			},
+			Reference: Reference{
+				// Off by default: an external symbol that does not track the same
+				// underlying is worse than no feed at all, because a wrong signal
+				// is still acted upon. It has to be named per instrument and
+				// switched on deliberately.
+				Enabled:  false,
+				Provider: ProviderBinanceFutures,
+				Symbol:   "",
+				// One mark tick, and for a reason worth stating: silence on a
+				// book-ticker stream means the top of book did not change,
+				// which is information rather than the absence of it. The
+				// threshold is not there to notice a quiet market — it is there
+				// to notice a socket that died without saying so, and past one
+				// tick the official price supersedes the estimate anyway.
+				//
+				// Measured at two seconds this flapped once every two minutes
+				// on gold, warning about a feed that was working perfectly.
+				StaleAfter: 3 * time.Second,
 			},
 		},
 		Symbols: map[string]Symbol{},

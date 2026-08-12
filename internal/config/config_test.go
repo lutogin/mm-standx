@@ -151,6 +151,96 @@ func TestEnvOverrideResolvesCamelCaseKeys(t *testing.T) {
 	require.Equal(t, 12*time.Second, cfg.Health.MarkStale)
 }
 
+// symbolWithReference — инструмент, объявивший все ключи, которые тесты ниже
+// переопределяют.
+//
+// Объявление обязательно: переопределить можно только ключ, уже существующий
+// в дереве конфигурации. Наследование блока defaults происходит в коде, после
+// разбора, и ключа в дереве не создаёт. Ограничение не новое и одинаково
+// действует для обеих записей имени, но промолчать о нём здесь значило бы
+// написать тест, проходящий по случайной причине.
+const symbolWithReference = `
+symbols:
+  XAU-USD:
+    enabled: true
+    allocationUsd: 60
+    program: { unitSize: "30", perSideCap: "60", maxMakerHoursPerHour: 2 }
+    reference: { enabled: false, provider: binance_futures, symbol: XAUUSDT }
+`
+
+// Имя инструмента несёт дефис, а имена переменных окружения — нет: разбор .env
+// отвергает такую строку целиком, и переопределение посимвольной настройки
+// нельзя было положить туда, где живут все остальные переопределения.
+func TestSymbolOverrideAcceptsUnderscoreSpelling(t *testing.T) {
+	path := writeConfig(t, symbolWithReference)
+
+	t.Setenv("MMSTANDX_SYMBOLS_XAU_USD_ALLOCATIONUSD", "500")
+	t.Setenv("MMSTANDX_SYMBOLS_XAU_USD_REFERENCE_ENABLED", "true")
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.Equal(t, 500.0, cfg.Symbols["XAU-USD"].AllocationUSD)
+	require.True(t, cfg.Symbols["XAU-USD"].Reference.Enabled)
+}
+
+// Прежнее написание продолжает работать: оно уже стоит в боевых окружениях,
+// и выкатка, требующая согласованной правки на сервере, — это выкатка, которая
+// однажды приедет без неё.
+func TestSymbolOverrideStillAcceptsTheDashedSpelling(t *testing.T) {
+	path := writeConfig(t, symbolWithReference)
+
+	t.Setenv("MMSTANDX_SYMBOLS_XAU-USD_ALLOCATIONUSD", "400")
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.Equal(t, 400.0, cfg.Symbols["XAU-USD"].AllocationUSD)
+}
+
+// Псевдоним не имеет права затенить настоящий ключ: точная запись сильнее.
+func TestUnderscoreAliasNeverShadowsARealKey(t *testing.T) {
+	path := writeConfig(t, `
+symbols:
+  XAU-USD:
+    enabled: false
+    allocationUsd: 1
+    program: { unitSize: "30", perSideCap: "60", maxMakerHoursPerHour: 2 }
+  XAU_USD:
+    enabled: false
+    allocationUsd: 2
+    program: { unitSize: "30", perSideCap: "60", maxMakerHoursPerHour: 2 }
+`)
+
+	t.Setenv("MMSTANDX_SYMBOLS_XAU_USD_ALLOCATIONUSD", "700")
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.Equal(t, 700.0, cfg.Symbols["XAU_USD"].AllocationUSD,
+		"the instrument actually named that way owns the variable")
+	require.NotEqual(t, 700.0, cfg.Symbols["XAU-USD"].AllocationUSD)
+}
+
+// Переопределение обязано пережить разбор .env, а не только окружение процесса:
+// именно файл едет на сервер, и именно его читает загрузчик рядом с конфигом.
+func TestSymbolOverrideSurvivesDotEnv(t *testing.T) {
+	// Разбор .env кладёт переменные в окружение процесса и за собой не убирает.
+	// Для приложения это и есть смысл файла, а для теста — утечка в следующие:
+	// без уборки один этот случай переопределял бы конфигурацию всего пакета.
+	const key = "MMSTANDX_SYMBOLS_XAU_USD_REFERENCE_ENABLED"
+	t.Cleanup(func() { os.Unsetenv(key) })
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(strings.Replace(
+		symbolWithReference, "enabled: false, provider", "enabled: true, provider", 1)), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".env"),
+		[]byte(key+"=false\n"), 0o600))
+
+	cfg, err := Load(path)
+	require.NoError(t, err, "a dotenv file must be able to hold this override")
+	require.False(t, cfg.Symbols["XAU-USD"].Reference.Enabled,
+		"the file has to be able to turn the feed off, which is the whole point")
+}
+
 func TestEnvOverrideReachesSymbolFields(t *testing.T) {
 	t.Setenv("MMSTANDX_SYMBOLS_BTC-USD_ALLOCATIONUSD", "12345")
 
@@ -433,6 +523,103 @@ func TestShippedConfigLoads(t *testing.T) {
 	}.HalfWidth()
 	require.GreaterOrEqual(t, (gold.Appetite.MinDeadBandBps - half).Float64(), 0.5,
 		"the outer rungs need real margin, not the boundary the start-up check accepts")
+
+	// Внешний ориентир — единственный сигнал, приходящий раньше движения mark.
+	// Без него быстрый путь опирается на середину стакана, которая двигается
+	// тем же ордером, что нас и исполняет, то есть предупреждает нулём.
+	require.True(t, gold.Reference.Enabled, "the traded instrument needs a leading reference")
+	require.Equal(t, ProviderBinanceFutures, gold.Reference.Provider)
+	require.Equal(t, "XAUUSDT", gold.Reference.Symbol)
+	require.LessOrEqual(t, gold.Reference.StaleAfter, markTick,
+		"a reference older than the official price it anticipates adds nothing")
+}
+
+// Порог молчания за пределом такта mark делает фид бессмысленным, ничего
+// об этом не сообщая: ориентиру доверяли бы ровно до момента, когда приходит
+// официальная цена и всё равно его вытесняет.
+func TestReferenceStalenessMustFitInsideTheMarkTick(t *testing.T) {
+	_, err := Load(writeConfig(t, `
+symbols:
+  BTC-USD:
+    enabled: false
+    reference: { enabled: true, provider: binance_futures, symbol: BTCUSDT, staleAfter: 10s }
+`))
+	require.ErrorContains(t, err, "reference.staleAfter")
+}
+
+// Включённый ориентир без символа никогда не подключится, и молчащий фид
+// выглядит в точности как фид на спокойном рынке.
+func TestEnabledReferenceRequiresSymbol(t *testing.T) {
+	_, err := Load(writeConfig(t, `
+symbols:
+  BTC-USD:
+    enabled: false
+    reference:
+      enabled: true
+      provider: binance_futures
+      symbol: ""
+`))
+	require.ErrorContains(t, err, "reference.symbol is required")
+}
+
+func TestReferenceProviderMustBeKnown(t *testing.T) {
+	_, err := Load(writeConfig(t, `
+symbols:
+  BTC-USD:
+    enabled: false
+    reference: { enabled: true, provider: kraken, symbol: BTCUSD }
+`))
+	require.ErrorContains(t, err, "reference.provider: unsupported value \"kraken\"")
+}
+
+// Ориентир проверяется и у выключенного инструмента: опечатка иначе всплывёт
+// в тот момент, когда инструмент включают, то есть в проде.
+func TestReferenceIsValidatedForDisabledSymbols(t *testing.T) {
+	_, err := Load(writeConfig(t, `
+symbols:
+  SOL-USD:
+    enabled: false
+    reference: { enabled: true, provider: binance_futures, symbol: "" }
+`))
+	require.ErrorContains(t, err, "symbols.SOL-USD.reference.symbol is required")
+}
+
+// Выключенный ориентир не обязан быть заполненным: назвать площадку для
+// инструмента, за которым не следят, незачем.
+func TestDisabledReferenceNeedsNothing(t *testing.T) {
+	cfg, err := Load(writeConfig(t, `
+symbols:
+  SOL-USD:
+    enabled: false
+    reference: { enabled: false, provider: "", symbol: "" }
+`))
+	require.NoError(t, err)
+	require.False(t, cfg.Symbols["SOL-USD"].Reference.Enabled)
+}
+
+// Тот же файл обязан грузиться и в боевом режиме, с тем же отбором инструмента,
+// каким его запускает docker-compose.
+//
+// Проверка существует потому, что отказ валидации на сервере выглядит не как
+// отказ. Процесс падает на старте, деплой откатывается на предыдущий образ,
+// метрики отвечают, — и прод двое суток крутит старый код при внешне исправном
+// контуре (PLAN.md §13). Дешевле обнаружить это здесь.
+func TestShippedConfigLoadsInLiveMode(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join("..", "..", "config.yaml"))
+	require.NoError(t, err)
+	path := writeConfig(t, string(body))
+
+	t.Setenv("MMSTANDX_RUNTIME_MODE", string(ModeLive))
+	t.Setenv("MMSTANDX_RUNTIME_SYMBOLS", "XAU-USD")
+	t.Setenv(walletKeyEnv, "0x00")
+
+	cfg, err := Load(path)
+	require.NoError(t, err, "the image must be able to start in live mode")
+	require.True(t, cfg.IsLive())
+
+	enabled := cfg.EnabledSymbols()
+	require.Len(t, enabled, 1, "the selection has to leave exactly the traded instrument")
+	require.Contains(t, enabled, market.Symbol("XAU-USD"))
 }
 
 // Дистанция — первый параметр, который придётся править под давлением, а
@@ -465,18 +652,18 @@ func TestDistanceFloorIsOverridableFromTheEnvironment(t *testing.T) {
 // не включал — стоял `false`. Окружение живёт на сервере и переживает откаты
 // образа, поэтому расхождение с бинарником — штатное событие, а не авария.
 func TestUnknownEnvKeyIsIgnoredAndNamed(t *testing.T) {
-	t.Setenv("MMSTANDX_SYMBOLS_BTC-USD_REFERENCE_ENABLED", "false")
+	t.Setenv("MMSTANDX_SYMBOLS_BTC-USD_LEGACYFEED_ENABLED", "false")
 
 	cfg, err := Load(writeConfig(t, minimalConfig))
 	require.NoError(t, err, "a key from another version must not keep the process down")
-	require.Equal(t, []string{"MMSTANDX_SYMBOLS_BTC-USD_REFERENCE_ENABLED"}, cfg.IgnoredEnv,
+	require.Equal(t, []string{"MMSTANDX_SYMBOLS_BTC-USD_LEGACYFEED_ENABLED"}, cfg.IgnoredEnv,
 		"and it must be named: silence here is the failure mode being fixed")
 }
 
 // Отбрасывается ровно непонятый ключ, а не весь набор: иначе одна устаревшая
 // строка в .env отменяла бы аллокацию и лимиты риска.
 func TestUnknownEnvKeyDoesNotDisarmTheRest(t *testing.T) {
-	t.Setenv("MMSTANDX_SYMBOLS_BTC-USD_REFERENCE_ENABLED", "false")
+	t.Setenv("MMSTANDX_SYMBOLS_BTC-USD_LEGACYFEED_ENABLED", "false")
 	t.Setenv("MMSTANDX_SYMBOLS_BTC-USD_ALLOCATIONUSD", "777")
 	t.Setenv("MMSTANDX_RISK_MAXDAILYLOSSUSD", "42")
 
