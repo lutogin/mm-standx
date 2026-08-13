@@ -22,7 +22,7 @@ import (
 
 // PositionConfig возвращает действующие плечо и режим маржи инструмента.
 func (c *Client) PositionConfig(ctx context.Context, s market.Symbol) (trading.PositionConfig, error) {
-	var out []dto.PositionConfig
+	var out dto.PositionConfig
 	err := c.do(ctx, request{
 		method:   http.MethodGet,
 		path:     "/api/query_position_config",
@@ -33,16 +33,14 @@ func (c *Client) PositionConfig(ctx context.Context, s market.Symbol) (trading.P
 	if err != nil {
 		return trading.PositionConfig{}, fmt.Errorf("position config %s: %w", s, err)
 	}
-	for _, cfg := range out {
-		if cfg.Symbol == s.String() {
-			return trading.PositionConfig{
-				Symbol:     s,
-				Leverage:   cfg.Leverage,
-				MarginMode: trading.MarginMode(cfg.MarginMode),
-			}, nil
-		}
+	if out.Symbol != s.String() {
+		return trading.PositionConfig{}, fmt.Errorf("position config %s: not in the response", s)
 	}
-	return trading.PositionConfig{}, fmt.Errorf("position config %s: not in the response", s)
+	return trading.PositionConfig{
+		Symbol:     s,
+		Leverage:   out.Leverage,
+		MarginMode: trading.MarginMode(out.MarginMode),
+	}, nil
 }
 
 // SetLeverage меняет плечо счёта по инструменту.
