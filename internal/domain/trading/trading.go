@@ -152,3 +152,14 @@ type Trade struct {
 	// IsTaker выбирает ставку комиссии, когда биржа её не прислала.
 	IsTaker bool
 }
+
+// PositionConfig — настройки счёта по инструменту: плечо и режим маржи.
+//
+// Плечо здесь — не то, что уходит в ордер. Блокировку маржи под висящей
+// заявкой определяет именно эта настройка, а поле ордера биржа игнорирует
+// (PLAN.md §12.5).
+type PositionConfig struct {
+	Symbol     market.Symbol
+	Leverage   int
+	MarginMode MarginMode
+}

@@ -65,12 +65,15 @@ func (c *Config) validateExposure() []error {
 		if !sym.Enabled {
 			continue
 		}
-		leverage := max(sym.SymbolRisk.Leverage, 1)
-		total += sym.AllocationUSD * float64(leverage)
+		// Нотионал ограничен долей блокировки, а не плечом: плечо в ордере
+		// на неё не влияет (PLAN.md §12.5).
+		if rate := sym.SymbolRisk.InitialMarginPct; rate > 0 {
+			total += sym.AllocationUSD / (rate / 100)
+		}
 	}
 	if c.Risk.MaxNotionalUSD > 0 && total > c.Risk.MaxNotionalUSD {
 		return []error{fmt.Errorf(
-			"enabled symbols allow up to %.0f USD of notional (allocation × leverage) "+
+			"enabled symbols allow up to %.0f USD of notional (allocation ÷ initialMarginPct) "+
 				"but risk.maxNotionalUsd is %.0f", total, c.Risk.MaxNotionalUSD)}
 	}
 	return nil
@@ -291,6 +294,13 @@ func (s Symbol) validate(name string, band money.Bps, tiers []UptimeTier, live b
 
 	if s.SymbolRisk.Leverage < 1 {
 		errs = append(errs, fmt.Errorf("%s.risk.leverage must be at least 1", prefix))
+	}
+	// Ноль здесь — не «выключено», а деление на ноль в расчёте размера.
+	if s.SymbolRisk.InitialMarginPct <= 0 || s.SymbolRisk.InitialMarginPct > 100 {
+		errs = append(errs, fmt.Errorf(
+			"%s.risk.initialMarginPct (%.4f) must be within (0, 100]: it is the share of order "+
+				"notional the exchange locks, measured by test/live/margin_test.go",
+			prefix, s.SymbolRisk.InitialMarginPct))
 	}
 	// Экономические ворота намеренно не проверяются здесь.
 	//

@@ -60,7 +60,7 @@ func dangerEngine(t *testing.T) (*Engine, *recordingGateway, *testClock) {
 			},
 			Health: config.Health{AckTimeout: 2 * time.Second},
 			Config: config.Symbol{
-				SymbolRisk: config.SymbolRisk{Leverage: 4},
+				SymbolRisk: config.SymbolRisk{Leverage: 4, InitialMarginPct: 25},
 				Quote: config.Quote{
 					LadderLayers:    1,
 					MinRest:         3200 * time.Millisecond,
@@ -230,7 +230,7 @@ func TestQuotingResumesWhenTheReferenceMarketOpens(t *testing.T) {
 
 	clk.now = time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC) // Monday morning
 	primeVolatility(t, e, clk)
-	e.available = decimal.NewFromInt(1000)
+	e.available, e.equity = decimal.NewFromInt(1000), decimal.NewFromInt(1000)
 	e.evaluate(ctx, true)
 
 	require.NotEmpty(t, gw.placed, "an open market is quoted as usual")
@@ -277,7 +277,7 @@ func wideBook(e *Engine, halfSpreadBps float64, at time.Time) {
 func TestQuotingDoesNotResumeInsideTheReentryDeadBand(t *testing.T) {
 	ctx := context.Background()
 	e, gw, clk := dangerEngine(t)
-	e.available = decimal.NewFromInt(1000)
+	e.available, e.equity = decimal.NewFromInt(1000), decimal.NewFromInt(1000)
 
 	// Wide enough that the requirement no longer fits the band: with a jump of
 	// 0.23 bps the fixed part is 1.79, so nine of half spread puts it at 10.8.
@@ -306,7 +306,7 @@ func TestQuotingDoesNotResumeInsideTheReentryDeadBand(t *testing.T) {
 func TestLeavingTheBandIsImmediate(t *testing.T) {
 	ctx := context.Background()
 	e, gw, clk := dangerEngine(t)
-	e.available = decimal.NewFromInt(1000)
+	e.available, e.equity = decimal.NewFromInt(1000), decimal.NewFromInt(1000)
 
 	wideBook(e, 5.0, clk.now)
 	e.evaluate(ctx, true)
@@ -349,7 +349,7 @@ func TestPanicFractionPullsBothSidesBeforeTheMarketArrives(t *testing.T) {
 	e.bids, e.asks = quotes.New(market.Buy, 3), quotes.New(market.Sell, 3)
 	// Без свободных средств расчёт размера падает штатно и снимает обе стороны
 	// по CauseSizing — то есть по причине, не имеющей отношения к делу.
-	e.available = decimal.NewFromInt(1000)
+	e.available, e.equity = decimal.NewFromInt(1000), decimal.NewFromInt(1000)
 
 	// Рынок прошёл больше трети пути до котировки: 2.1–2.6 bps при цели 5.9.
 	for slot, price := range []string{"4275.1", "4275.0", "4274.9"} {

@@ -158,3 +158,13 @@ type Recorder interface {
 	Record(stream string, received time.Time, payload []byte) error
 	Close() error
 }
+
+// PositionConfigurer читает и меняет настройки счёта по инструменту.
+//
+// Вынесено из ExchangeReader намеренно: чтение здесь идёт в паре с записью,
+// и разделять их значило бы разрешить менять плечо, не проверив результат.
+// Ответ биржи означает приём запроса, а не применение настройки.
+type PositionConfigurer interface {
+	PositionConfig(ctx context.Context, s market.Symbol) (trading.PositionConfig, error)
+	SetLeverage(ctx context.Context, s market.Symbol, leverage int) error
+}

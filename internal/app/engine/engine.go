@@ -156,6 +156,18 @@ type Engine struct {
 	// Состояние счёта.
 	position  money.Qty
 	available decimal.Decimal
+	// equity — весь капитал, включая заблокированное нашими же ордерами.
+	//
+	// Размер считается от него, а не от свободного остатка: остаток уже
+	// уменьшен тем, что мы сами и выставили, и бюджет от него превращается
+	// в петлю, упирающуюся примерно в 40% капитала (sizing.Budget.EquityUSD).
+	equity decimal.Decimal
+	// locked — сколько биржа держит под висящими ордерами.
+	//
+	// Нужен для наблюдения, а не для решения: отношение locked к выставленному
+	// нотионалу — единственный способ увидеть действующую долю блокировки,
+	// то есть проверить, применилось ли плечо счёта.
+	locked decimal.Decimal
 
 	// Управляющее состояние.
 	halted bool
@@ -583,6 +595,8 @@ func (e *Engine) handle(ctx context.Context, ev events.Event) {
 		}
 	case events.BalanceUpdated:
 		e.available = v.Balance.Available
+		e.equity = v.Balance.Equity
+		e.locked = v.Balance.Locked
 	case events.OpenOrdersSnapshot:
 		e.reconcile(ctx, v)
 	case events.MarkPriceStale:

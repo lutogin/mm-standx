@@ -244,3 +244,17 @@ type CancelOrderRequest struct {
 type CancelOrdersRequest struct {
 	ClOrdIDList []string `json:"cl_ord_id_list"`
 }
+
+// PositionConfig — ответ query_position_config: действующие настройки счёта
+// по инструменту.
+type PositionConfig struct {
+	Symbol     string `json:"symbol"`
+	Leverage   int    `json:"leverage"`
+	MarginMode string `json:"margin_mode"`
+}
+
+// ChangeLeverageRequest — тело change_leverage.
+type ChangeLeverageRequest struct {
+	Symbol   string `json:"symbol"`
+	Leverage int    `json:"leverage"`
+}

@@ -49,8 +49,12 @@ func defaults() *Config {
 			SafetyReservePct: 30,
 		},
 		Reward: Reward{
-			BandBps:      10,
-			MaxWeightPct: 200,
+			BandBps: 10,
+			// Measured against credited samples, not read off the campaign page:
+			// its formula says 200 and its own table says otherwise, and the
+			// exchange scores by the table. Reconciliation matched to 0.04%
+			// (PLAN.md §12.1).
+			MaxWeightPct: 120,
 			MinWeightPct: 40,
 			UptimeTiers: []UptimeTier{
 				{ThresholdPct: 70, Multiplier: 1.0},
@@ -86,11 +90,14 @@ func defaults() *Config {
 			// is widest and the mark is least trustworthy.
 			DefensiveBefore: 15 * time.Minute,
 			DefensiveAfter:  15 * time.Minute,
-			// A minute either side of the number itself. This is the only
-			// stretch where no distance inside the reward band is safe, so the
-			// only available answer is absence.
+			// Measured, not guessed. The CPI print of 12 August moved the mark
+			// 48 bps in a single tick, and twelve of that day's fourteen touches
+			// of a 7.4 bps quote fell between 12:30:04 and 12:31:57, in two
+			// clusters: the print and the reaction a minute behind it. A
+			// symmetric minute covers the first and misses the second entirely.
+			// Nothing was touched before the release.
 			HardBefore: time.Minute,
-			HardAfter:  time.Minute,
+			HardAfter:  3 * time.Minute,
 			// One and a half basis points of room inside the band edge: enough
 			// for the three-rung ladder (0.8 bps wide) to still fit, so the
 			// defensive posture keeps the presence that pays for the hour
@@ -198,7 +205,10 @@ func defaults() *Config {
 				ReservePct:   8,
 			},
 			SymbolRisk: SymbolRisk{
-				Leverage:           4,
+				Leverage: 4,
+				// Измерено на живом счёте пятью пробами при плечах 4, 8 и 20 —
+				// все дали одну и ту же долю (test/live/margin_test.go).
+				InitialMarginPct:   10.542,
 				MaxNetPositionBase: "0",
 			},
 			Reference: Reference{

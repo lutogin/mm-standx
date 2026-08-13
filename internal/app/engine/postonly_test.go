@@ -18,7 +18,7 @@ import (
 // не защитой, а сдвигом всей геометрии.
 func TestPostOnlyBufferDoesNotTouchAnOrdinaryQuote(t *testing.T) {
 	e, gw, clk := dangerEngine(t)
-	e.available = decimal.NewFromInt(1000)
+	e.available, e.equity = decimal.NewFromInt(1000), decimal.NewFromInt(1000)
 	e.cfg.Quote.PostOnlyBufferTicks = 2
 
 	e.evaluate(context.Background(), true)
@@ -39,7 +39,7 @@ func TestPostOnlyBufferDoesNotTouchAnOrdinaryQuote(t *testing.T) {
 // ступень, — либо вставал на вершину и забирался ближайшим движением.
 func TestQuotePushedOutOfTheBandIsNotSent(t *testing.T) {
 	e, gw, clk := dangerEngine(t)
-	e.available = decimal.NewFromInt(1000)
+	e.available, e.equity = decimal.NewFromInt(1000), decimal.NewFromInt(1000)
 	e.cfg.Quote.PostOnlyBufferTicks = 2
 
 	var buf bytes.Buffer
@@ -69,7 +69,7 @@ func TestQuotePushedOutOfTheBandIsNotSent(t *testing.T) {
 func TestZeroBufferLeavesTheOldPath(t *testing.T) {
 	placedPrices := func(buffer int) []money.Price {
 		e, gw, _ := dangerEngine(t)
-		e.available = decimal.NewFromInt(1000)
+		e.available, e.equity = decimal.NewFromInt(1000), decimal.NewFromInt(1000)
 		e.cfg.Quote.PostOnlyBufferTicks = buffer
 		e.evaluate(context.Background(), true)
 

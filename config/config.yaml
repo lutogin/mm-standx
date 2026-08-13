@@ -350,7 +350,28 @@ defaults:
     hardFloorPct: 72
     reservePct: 8
   risk:
-    leverage: 8
+    # Leverage of the account, applied on the exchange at start-up and verified
+    # by reading it back (account.ApplyLeverage). The same field inside an order
+    # is ignored by the venue — five probes at 4x, 8x and 20x all locked the
+    # identical share of notional (PLAN.md §12.5).
+    #
+    # Forty because that is what the account allows and what a comparable
+    # operator runs. Our effective leverage was 9.49, the venue default, purely
+    # because this call did not exist: a dollar of margin carried nine dollars
+    # of notional instead of forty.
+    leverage: 40
+    # Share of an order's notional the exchange locks. This is what sizing
+    # divides by; the leverage above only reaches it through the account
+    # setting, never through the order.
+    #
+    # 10.542% was measured at an effective leverage of 9.49 and is deliberately
+    # kept until the probe is repeated at forty. Overstating it costs size,
+    # which is recoverable; understating it inflates the size, and after a fill
+    # the closing order can fail for want of free margin.
+    #
+    #   STANDX_LIVE=1 STANDX_SMOKE_SYMBOL=XAU-USD \
+    #     go test -v -tags=live -run TestMarginFormula -count=1 ./test/live/
+    initialMarginPct: 10.542
     maxNetPositionBase: "0" # 0 — закрывать любую позицию немедленно
   # External venue whose price leads the exchange mark. Off by default and
   # named per instrument: a symbol that tracks a different underlying is worse
@@ -415,7 +436,7 @@ symbols:
     # середины стакана. Площадка и символ описаны заранее, чтобы включение
     # стоило одной строки, а не подбора имени инструмента в бою.
     reference:
-      enabled: false
+      enabled: true
       provider: binance_futures
       symbol: XAUUSDT
 

@@ -459,8 +459,19 @@ type Uptime struct {
 
 // SymbolRisk — ограничения риска на инструмент.
 type SymbolRisk struct {
-	Leverage           int    `koanf:"leverage"`
-	MaxNetPositionBase string `koanf:"maxNetPositionBase"`
+	// Leverage — плечо счёта по инструменту. Выставляется на бирже при старте
+	// (account.ApplyLeverage); в самом ордере это поле биржа игнорирует.
+	Leverage int `koanf:"leverage"`
+	// InitialMarginPct — доля нотионала, блокируемая под висящим ордером.
+	//
+	// Свойство биржи, а не наша политика, и потому измеряется, а не выбирается:
+	// `test/live/margin_test.go`, PLAN.md §12.5. Значение зависит от плеча
+	// счёта, поэтому меняется вместе с ним и требует нового замера.
+	//
+	// Заниженное опаснее завышенного: оно раздувает размер, и после залива
+	// закрывающему ордеру может не хватить свободных средств.
+	InitialMarginPct   float64 `koanf:"initialMarginPct"`
+	MaxNetPositionBase string  `koanf:"maxNetPositionBase"`
 }
 
 const (

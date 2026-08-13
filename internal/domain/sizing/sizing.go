@@ -21,15 +21,27 @@ import (
 type Budget struct {
 	// AllocationUSD — сколько средств выделено этому инструменту конфигурацией.
 	AllocationUSD decimal.Decimal
-	// AvailableUSD — сколько средств биржа считает свободными прямо сейчас.
-	AvailableUSD decimal.Decimal
-	// Leverage — плечо позиции.
-	Leverage int
-	// UtilizationPct — какую долю доступного разрешено занимать.
+	// EquityUSD — весь капитал счёта, включая уже заблокированное.
 	//
-	// Остаток нужен не про запас, а по необходимости: висящие ордера блокируют
-	// маржу, и при полной утилизации закрывающий ордер после залива может
-	// не пройти по нехватке средств.
+	// Именно equity, а не available. Свободный остаток уже уменьшен тем, что
+	// мы сами и заблокировали, поэтому бюджет от него — петля: каждый
+	// выставленный доллар сокращает разрешённое. Она сходится примерно
+	// на 40% капитала и не переваливает половины ни при каком значении
+	// UtilizationPct, сколько его ни поднимай.
+	EquityUSD decimal.Decimal
+	// InitialMarginPct — доля нотионала, которую биржа блокирует под висящим
+	// ордером, в процентах.
+	//
+	// Не плечо. Плечо, положенное в ордер, биржа для блокировки игнорирует
+	// полностью: проба 12 августа дала одинаковые 10.542% при запрошенных
+	// 4, 8 и 20 (PLAN.md §12.5). Доля берётся от цены ордера, линейна
+	// по размеру и считается по обеим сторонам без взаимозачёта.
+	InitialMarginPct float64
+	// UtilizationPct — какую долю капитала разрешено держать под маржой.
+	//
+	// Остаток нужен не про запас, а по необходимости: после залива закрывающий
+	// ордер требует маржи под позицию, и при полной утилизации он может
+	// не пройти.
 	UtilizationPct float64
 }
 
@@ -63,8 +75,9 @@ func Compute(in Inputs) (Plan, error) {
 	if !in.Mark.IsPositive() {
 		return Plan{}, fmt.Errorf("sizing: mark price must be positive, got %s", in.Mark)
 	}
-	if in.Budget.Leverage < 1 {
-		return Plan{}, fmt.Errorf("sizing: leverage must be at least 1, got %d", in.Budget.Leverage)
+	if in.Budget.InitialMarginPct <= 0 || in.Budget.InitialMarginPct > 100 {
+		return Plan{}, fmt.Errorf(
+			"sizing: initial margin must be within (0, 100]%%, got %.4f", in.Budget.InitialMarginPct)
 	}
 
 	capital, reason := usableCapital(in.Budget)
@@ -72,10 +85,11 @@ func Compute(in Inputs) (Plan, error) {
 		return Plan{}, fmt.Errorf("sizing: no usable capital: %s", reason)
 	}
 
-	// Обе стороны требуют маржи, поэтому капитал делится пополам.
-	notionalPerSide := capital.
-		Mul(decimal.NewFromInt(int64(in.Budget.Leverage))).
-		Div(decimal.NewFromInt(2))
+	// Бюджет — это маржа, а не нотионал: сколько капитала разрешено держать
+	// заблокированным. Нотионал получается делением на долю блокировки,
+	// и обе стороны требуют её независимо, без взаимозачёта, — отсюда пополам.
+	rate := decimal.NewFromFloat(in.Budget.InitialMarginPct / 100)
+	notionalPerSide := capital.Div(rate).Div(decimal.NewFromInt(2))
 
 	perSide, err := money.QtyForNotional(notionalPerSide, in.Mark)
 	if err != nil {
@@ -104,15 +118,15 @@ func Compute(in Inputs) (Plan, error) {
 	return Plan{Rungs: rungs, PerSide: total, Reason: reason}, nil
 }
 
-// usableCapital берёт меньшее из выделенного и фактически доступного.
+// usableCapital берёт меньшее из выделенного и разрешённой доли капитала.
 func usableCapital(b Budget) (decimal.Decimal, string) {
 	utilization := decimal.NewFromFloat(b.UtilizationPct / 100)
-	headroom := b.AvailableUSD.Mul(utilization)
+	headroom := b.EquityUSD.Mul(utilization)
 
 	if b.AllocationUSD.IsPositive() && b.AllocationUSD.LessThan(headroom) {
 		return b.AllocationUSD, "limited by the configured allocation"
 	}
-	return headroom, "limited by available margin"
+	return headroom, "limited by the margin budget"
 }
 
 // usefulCeiling возвращает размер стороны, сверх которого награда не растёт.

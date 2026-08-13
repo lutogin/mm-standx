@@ -68,7 +68,7 @@ func referenceEngine(t *testing.T) (*Engine, *recordingGateway, *testClock) {
 	e.refStaleAfter = 2 * time.Second
 	// Без баланса расчёт размера падает штатно и снимает всё подряд, а тест
 	// потерял бы предмет: проверяется реакция на цену, а не на пустой счёт.
-	e.available = decimal.NewFromInt(1000)
+	e.available, e.equity = decimal.NewFromInt(1000), decimal.NewFromInt(1000)
 
 	e.handle(context.Background(), events.ReferencePriceUpdated{
 		Reference: market.ReferencePrice{

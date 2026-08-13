@@ -33,7 +33,7 @@ var newsPolicy = calendar.Policy{
 func newsEngine(t *testing.T, release time.Time) (*Engine, *recordingGateway, *testClock) {
 	t.Helper()
 	e, gw, clk := dangerEngine(t)
-	e.available = decimal.NewFromInt(1000)
+	e.available, e.equity = decimal.NewFromInt(1000), decimal.NewFromInt(1000)
 	// Аллокация обязана быть связывающим ограничением, иначе её урезание
 	// в защитной позе ничего не меняет и тест проверяет пустоту.
 	e.cfg.AllocationUSD = 60
@@ -175,7 +175,7 @@ func TestPlannedBlackoutThatFitsTheBudgetChangesNothing(t *testing.T) {
 // в те редкие часы, когда публикацию перенесли ровно в окно недоступности.
 func TestUnavailableCalendarKeepsQuotingWhenFailOpen(t *testing.T) {
 	e, gw, clk := dangerEngine(t)
-	e.available = decimal.NewFromInt(1000)
+	e.available, e.equity = decimal.NewFromInt(1000), decimal.NewFromInt(1000)
 	e.newsGuard = NewsGuard{
 		Enabled: true, MaxAge: time.Hour, FailOpen: true,
 		DefensiveInsetBps: 1.5, DefensiveSizeMultiple: 0.5,
@@ -191,7 +191,7 @@ func TestUnavailableCalendarKeepsQuotingWhenFailOpen(t *testing.T) {
 // В режиме fail-closed нечитаемое расписание означает торговлю вслепую.
 func TestUnavailableCalendarStopsQuotingWhenFailClosed(t *testing.T) {
 	e, gw, clk := dangerEngine(t)
-	e.available = decimal.NewFromInt(1000)
+	e.available, e.equity = decimal.NewFromInt(1000), decimal.NewFromInt(1000)
 	e.newsGuard = NewsGuard{
 		Enabled: true, MaxAge: time.Hour, FailOpen: false,
 		DefensiveInsetBps: 1.5, DefensiveSizeMultiple: 0.5,

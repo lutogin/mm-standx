@@ -46,7 +46,7 @@ func TestHaltedActorKeepsExplainingItself(t *testing.T) {
 func TestClearedKillSwitchLetsTheActorQuoteAgain(t *testing.T) {
 	ctx := context.Background()
 	e, gw, clk := dangerEngine(t)
-	e.available = decimal.NewFromInt(1000)
+	e.available, e.equity = decimal.NewFromInt(1000), decimal.NewFromInt(1000)
 
 	e.handle(ctx, events.KillSwitchTripped{Reason: "daily loss", At: clk.now})
 	e.evaluate(ctx, true)
@@ -63,7 +63,7 @@ func TestClearedKillSwitchLetsTheActorQuoteAgain(t *testing.T) {
 func TestRiskPauseIsHonouredAndExpiresWithoutAnEvent(t *testing.T) {
 	ctx := context.Background()
 	e, gw, clk := dangerEngine(t)
-	e.available = decimal.NewFromInt(1000)
+	e.available, e.equity = decimal.NewFromInt(1000), decimal.NewFromInt(1000)
 
 	liveRung(e, market.Buy, "bid-1", "4273", clk.now)
 	liveRung(e, market.Sell, "ask-1", "4279", clk.now)
@@ -180,7 +180,7 @@ func TestProlongedSilenceEscalatesWithTheFullState(t *testing.T) {
 func TestResumedQuotingClearsTheStallCounter(t *testing.T) {
 	ctx := context.Background()
 	e, _, clk := dangerEngine(t)
-	e.available = decimal.NewFromInt(1000)
+	e.available, e.equity = decimal.NewFromInt(1000), decimal.NewFromInt(1000)
 
 	e.halted = true
 	e.evaluate(ctx, true)
@@ -201,7 +201,7 @@ func TestResumedQuotingClearsTheStallCounter(t *testing.T) {
 func TestEconomicGateStopsQuotingInsteadOfTheProcess(t *testing.T) {
 	ctx := context.Background()
 	e, gw, clk := dangerEngine(t)
-	e.available = decimal.NewFromInt(1000)
+	e.available, e.equity = decimal.NewFromInt(1000), decimal.NewFromInt(1000)
 	e.economics = economics.Gate{
 		BreakEvenUSDPerMakerHour:    22,
 		CalibrationMaxAllocationUSD: 60,

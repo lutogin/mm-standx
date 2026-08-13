@@ -306,6 +306,17 @@ func provideEngines(
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	// Плечо счёта приводится к настроенному до сборки акторов: расчёт размера
+	// исходит из него, а действует оно только будучи выставленным на счёте —
+	// поле leverage в ордере биржа игнорирует (PLAN.md §12.5).
+	if configurer, ok := reader.(ports.PositionConfigurer); ok && cfg.IsLive() {
+		wanted := make(map[market.Symbol]int, len(symbols))
+		for _, symbol := range symbols {
+			wanted[symbol] = cfg.Symbols[symbol.String()].SymbolRisk.Leverage
+		}
+		account.ApplyLeverage(ctx, configurer, wanted, log)
+	}
+
 	out := make([]ports.Runnable, 0, len(symbols))
 	for _, symbol := range symbols {
 		symCfg := cfg.Symbols[symbol.String()]

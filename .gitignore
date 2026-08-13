@@ -24,6 +24,5 @@ coverage.*
 /test/live/data/session.json
 
 logs/
-recordings-cpi/
-recordings-ref/
-recordings-smoke/
+# Записи рынка: гигабайты NDJSON, в историю им нельзя ни при каком имени.
+recordings-*/

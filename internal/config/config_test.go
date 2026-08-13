@@ -18,9 +18,9 @@ import (
 // minimalConfig — валидная основа, поверх которой тесты добавляют отклонения.
 const minimalConfig = `
 risk:
-  # 70k выделенных средств при плече 4 дают 280k нотионала — общий лимит
-  # обязан их вмещать, иначе конфигурация отвергается на старте.
-  maxNotionalUsd: 300000
+  # 70k выделенных средств при блокировке 10.542% несут 664k нотионала —
+  # общий лимит обязан их вмещать, иначе конфигурация отвергается на старте.
+  maxNotionalUsd: 700000
 symbols:
   XAG-USD:
     enabled: true
@@ -293,7 +293,10 @@ symbols:
     program: { unitSize: "2", perSideCap: "20", maxMakerHoursPerHour: 10 }
 `))
 	require.ErrorContains(t, err, "risk.maxNotionalUsd")
-	require.ErrorContains(t, err, "2000 USD of notional")
+	// 500 USD при блокировке 10.542% несут 4743 нотионала, а не 2000, которые
+	// давало прежнее умножение на плечо: предел считается от того, что биржа
+	// действительно резервирует.
+	require.ErrorContains(t, err, "4743 USD of notional")
 }
 
 // Without persisted state the daily loss counter resets on every restart, and
@@ -515,7 +518,7 @@ func TestRetiredEnvOverridesAreInertAndNamed(t *testing.T) {
 	t.Setenv("MMSTANDX_RISK_MAXDAILYLOSSUSD", "42")
 
 	body := strings.Replace(minimalConfig,
-		"maxNotionalUsd: 300000", "maxNotionalUsd: 300000\n  maxDailyLossUsd: 7", 1)
+		"maxNotionalUsd: 700000", "maxNotionalUsd: 700000\n  maxDailyLossUsd: 7", 1)
 	require.Contains(t, body, "maxDailyLossUsd", "the substitution must have taken")
 
 	cfg, err := Load(writeConfig(t, body))

@@ -35,10 +35,14 @@ func btcProgram() reward.Program {
 func inputs(allocation, available float64) Inputs {
 	return Inputs{
 		Budget: Budget{
-			AllocationUSD:  decimal.NewFromFloat(allocation),
-			AvailableUSD:   decimal.NewFromFloat(available),
-			Leverage:       4,
-			UtilizationPct: 70,
+			AllocationUSD: decimal.NewFromFloat(allocation),
+			EquityUSD:     decimal.NewFromFloat(available),
+			// 25% блокировки — это ровно прежнее плечо 4. Взято намеренно:
+			// тесты этого файла проверяют дробление по ступеням, потолки
+			// и минимумы, и переписывать их числа вслед за измеренной ставкой
+			// биржи значило бы менять предмет проверки.
+			InitialMarginPct: 25,
+			UtilizationPct:   70,
 		},
 		Spec:      btcSpec(),
 		Program:   btcProgram(),
@@ -148,12 +152,68 @@ func TestRejectsInvalidInputs(t *testing.T) {
 	_, err = Compute(noMark)
 	require.ErrorContains(t, err, "mark price")
 
-	noLeverage := inputs(0, 95)
-	noLeverage.Budget.Leverage = 0
-	_, err = Compute(noLeverage)
-	require.ErrorContains(t, err, "leverage")
+	noMargin := inputs(0, 95)
+	noMargin.Budget.InitialMarginPct = 0
+	_, err = Compute(noMargin)
+	require.ErrorContains(t, err, "initial margin")
 
 	broke := inputs(0, 0)
 	_, err = Compute(broke)
 	require.ErrorContains(t, err, "no usable capital")
+}
+
+// Бюджет считается от всего капитала, а не от свободного остатка.
+//
+// Свободный остаток уже уменьшен тем, что мы сами и заблокировали, поэтому
+// бюджет от него — петля: каждый выставленный доллар сокращает разрешённое.
+// Она сходится примерно на 40% капитала и не переваливает половины ни при
+// каком UtilizationPct, то есть больше половины счёта была структурно
+// недостижима (PLAN.md §12.5).
+func TestBudgetIsIndependentOfWhatIsAlreadyLocked(t *testing.T) {
+	// Один и тот же счёт: сначала пустой, потом с висящими ордерами, из-за
+	// которых свободного осталось вдвое меньше. Equity при этом не меняется —
+	// заблокированное никуда не делось, оно наше.
+	empty := inputs(0, 10_000)
+	working := inputs(0, 10_000)
+
+	first, err := Compute(empty)
+	require.NoError(t, err)
+	second, err := Compute(working)
+	require.NoError(t, err)
+
+	require.Equal(t, first.PerSide, second.PerSide,
+		"size must not shrink because of margin we ourselves locked")
+}
+
+// Утилизация означает ровно то, что написано: долю капитала под маржой.
+func TestUtilizationIsTheShareOfCapitalUnderMargin(t *testing.T) {
+	in := inputs(0, 10_000)
+	in.Budget.InitialMarginPct = 10
+	in.Budget.UtilizationPct = 70
+
+	plan, err := Compute(in)
+	require.NoError(t, err)
+
+	// 70% от 10 000 = 7 000 маржи; при доле 10% это 70 000 нотионала,
+	// поровну между сторонами — 35 000 на сторону.
+	notional := plan.PerSide.Decimal().Mul(in.Mark.Decimal())
+	require.InDelta(t, 35_000, notional.InexactFloat64(), 200)
+}
+
+// Размер определяется долей блокировки, а не плечом: плечо в ордере биржа
+// игнорирует, проба 12 августа дала одинаковые 10.542% при 4, 8 и 20.
+func TestHalvingTheLockedShareDoublesTheSize(t *testing.T) {
+	tight := inputs(0, 10_000)
+	tight.Budget.InitialMarginPct = 20
+
+	loose := inputs(0, 10_000)
+	loose.Budget.InitialMarginPct = 10
+
+	small, err := Compute(tight)
+	require.NoError(t, err)
+	big, err := Compute(loose)
+	require.NoError(t, err)
+
+	ratio := big.PerSide.Decimal().Div(small.PerSide.Decimal()).InexactFloat64()
+	require.InDelta(t, 2.0, ratio, 0.01)
 }

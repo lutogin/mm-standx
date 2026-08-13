@@ -195,10 +195,10 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 	}
 	plan, err := sizing.Compute(sizing.Inputs{
 		Budget: sizing.Budget{
-			AllocationUSD:  decimal.NewFromFloat(allocation),
-			AvailableUSD:   e.available,
-			Leverage:       e.cfg.SymbolRisk.Leverage,
-			UtilizationPct: utilizationPct,
+			AllocationUSD:    decimal.NewFromFloat(allocation),
+			EquityUSD:        e.equity,
+			InitialMarginPct: e.cfg.SymbolRisk.InitialMarginPct,
+			UtilizationPct:   utilizationPct,
 		},
 		Spec:      e.spec,
 		Program:   e.program,
@@ -961,6 +961,11 @@ func (e *Engine) reportStatus(
 		// понять, сколько депозита допустимо выделить, а с ними это видно
 		// за сутки наблюдения.
 		"available_usd", fmt.Sprintf("%.0f", available),
+		// Действующая доля блокировки: единственный способ увидеть, применилось
+		// ли плечо счёта. Ответ биржи на change_leverage означает приём запроса,
+		// а не применение настройки, и расхождение иначе проявилось бы только
+		// недобранным начислением.
+		"margin_rate", e.observedMarginRate(),
 		"per_side", e.perSide,
 		"size_limit", e.sizeLimit,
 		"rungs", e.rungs,
@@ -1158,6 +1163,31 @@ func (e *Engine) noteFastSignal(now time.Time) {
 		"symbol", e.symbol,
 		"age", now.Sub(since).Truncate(time.Millisecond).String(),
 		"stale_after", e.refStaleAfter)
+}
+
+// observedMarginRate — какую долю выставленного нотионала биржа держит
+// заблокированной прямо сейчас.
+//
+// Считается по факту, а не берётся из конфигурации: настроенное значение
+// говорит, во что мы верим, а это — что происходит. Расхождение означает, что
+// плечо счёта не то, которое мы просили, и размер посчитан не от той величины.
+//
+// Прочерк, пока в стакане пусто: делить на ноль нечего, а «0%» читалось бы
+// как «маржа не берётся».
+func (e *Engine) observedMarginRate() string {
+	notional := decimal.Zero
+	for _, ladder := range []*quotes.Ladder{e.bids, e.asks} {
+		for _, slot := range ladder.Slots {
+			if slot.Phase == quotes.Live {
+				notional = notional.Add(money.Notional(slot.Price, slot.Qty))
+			}
+		}
+	}
+	if !notional.IsPositive() || !e.locked.IsPositive() {
+		return "-"
+	}
+	rate, _ := e.locked.Div(notional).Float64()
+	return fmt.Sprintf("%.3f%%", rate*100)
 }
 
 // bookDepth возвращает нотионал в пределах полосы награды по каждой стороне.
