@@ -94,6 +94,20 @@ func (r Runtime) validate() []error {
 	if r.LogFormat != "json" && r.LogFormat != "text" {
 		errs = append(errs, fmt.Errorf("runtime.logFormat: want json or text, got %q", r.LogFormat))
 	}
+	// The bounds are only checked once a path exists: an unbounded log on a
+	// trading box fills the disk and kills the process that is holding orders
+	// in the market, so "write to a file" and "cap the file" are one decision.
+	if r.LogFile != "" {
+		if r.LogMaxSizeMB <= 0 {
+			errs = append(errs, fmt.Errorf(
+				"runtime.logMaxSizeMb (%d) must be positive when runtime.logFile is set",
+				r.LogMaxSizeMB))
+		}
+		if r.LogMaxFiles < 0 {
+			errs = append(errs, fmt.Errorf(
+				"runtime.logMaxFiles (%d) must not be negative", r.LogMaxFiles))
+		}
+	}
 	if r.StatsInterval <= 0 {
 		errs = append(errs, errors.New("runtime.statsInterval must be positive"))
 	}

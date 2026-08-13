@@ -167,9 +167,13 @@ curl -s localhost:9090/metrics | grep mm_risk_limit
 ```bash
 make image && make push                      # машина разработки
 
-mkdir -p data && chown 10001:10001 data      # сервер, один раз
+mkdir -p data logs && chown 10001:10001 data logs   # сервер, один раз
 docker compose pull && docker compose up -d
 ```
+
+`logs/` деплой создаёт и сам, но создать его до первого `up` всё равно нужно:
+отсутствующий источник bind-mount Docker заводит от root, и процесс под uid
+10001 в него не пишет. Отказ тихий — бот работает с одним stdout.
 
 Правка порога на сервере не требует сборки: файл смонтирован.
 
@@ -213,7 +217,7 @@ docker compose --project-directory /root/opt/mm-standx restart mmbot
 | Поза по календарю публикаций | `news` в строке `engine status`, `mm_withdrawals_total{cause="news_*"}` | — |
 | Прямо сейчас | `data/stats/current.json` — незавершённый час, обновляется раз в 10 мин | — |
 | История по часам | `data/stats/hourly-*.ndjson`, забирается `scp` | 110 КБ/сутки |
-| Разбор инцидента | логи процесса, причины съёма с измеренными величинами | ~20 МБ/сутки |
+| Разбор инцидента | `logs/mmbot.log` рядом с `docker-compose.yml`, забирается `scp`; то же самое в `docker logs mmbot` | ~20 МБ/сутки, на диске до 550 МБ |
 
 Почасовая свёртка пишется процессом сама: мгновенные величины сворачиваются
 в квантили, счётчики — в разность за час. Час выбран потому, что биржа считает

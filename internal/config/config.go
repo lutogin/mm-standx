@@ -76,9 +76,26 @@ type Runtime struct {
 	//
 	// Незаданная переменная означает dry_run: торговля включается осознанным
 	// действием, а не тем, что кто-то забыл что-то выставить.
-	Mode          Mode          `koanf:"-"`
-	LogLevel      string        `koanf:"logLevel"`
-	LogFormat     string        `koanf:"logFormat"` // json | text
+	Mode      Mode   `koanf:"-"`
+	LogLevel  string `koanf:"logLevel"`
+	LogFormat string `koanf:"logFormat"` // json | text
+	// LogFile — path to a bounded copy of the log on disk. Empty leaves stdout
+	// as the only sink.
+	//
+	// Stdout alone is what the container's json-file driver captures, and those
+	// files sit under /var/lib/docker owned by root, named after the container
+	// id. That is a poor place to be looking things up during an incident, and
+	// a `docker compose down` takes them with it. A path here puts the same
+	// stream next to the compose file, where scp reaches it.
+	LogFile string `koanf:"logFile"`
+	// LogMaxSizeMB bounds one log file, LogMaxFiles is how many rotated copies
+	// are kept besides the live one. The disk footprint is the product plus one.
+	//
+	// A trading box that fills its disk kills the process that is holding
+	// orders in the market, so the bound is not optional once the file exists.
+	LogMaxSizeMB int `koanf:"logMaxSizeMb"`
+	LogMaxFiles  int `koanf:"logMaxFiles"`
+
 	MetricsAddr   string        `koanf:"metricsAddr"`
 	HeartbeatPath string        `koanf:"heartbeatPath"`
 	RecordingDir  string        `koanf:"recordingDir"` // пусто — запись выключена

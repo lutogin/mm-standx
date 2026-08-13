@@ -27,6 +27,21 @@
 runtime:
   logLevel: info
   logFormat: json # json для разбора, text для чтения глазами
+  # A copy of the log on disk, next to this file. Stdout keeps working: this is
+  # an addition, not a move, and `docker logs` stays the quick answer.
+  #
+  # The container's own json-file driver writes under /var/lib/docker, owned by
+  # root and named after the container id — a bad place to be looking things up
+  # during an incident, and `docker compose down` takes it along. This path is
+  # mounted from the host, so scp reaches it and a recreated container does not
+  # lose the history.
+  #
+  # Bounded because a full disk kills the process while it is holding orders in
+  # the market: at most logMaxSizeMb * (logMaxFiles + 1) = 550 MB. Around 20 MB
+  # a day of process log, so roughly a month fits before the oldest is dropped.
+  logFile: logs/mmbot.log
+  logMaxSizeMb: 50
+  logMaxFiles: 10
   metricsAddr: ":9090"
   heartbeatPath: data/mmbot.hb
   # Запись сырого потока для повторного разбора. В бою выключена: даёт около

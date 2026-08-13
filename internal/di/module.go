@@ -8,6 +8,7 @@ package di
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/nd/mm-standx/internal/adapters/clock"
 	"github.com/nd/mm-standx/internal/adapters/dryrun"
+	"github.com/nd/mm-standx/internal/adapters/logfile"
 	"github.com/nd/mm-standx/internal/adapters/metrics"
 	"github.com/nd/mm-standx/internal/adapters/news"
 	"github.com/nd/mm-standx/internal/adapters/ratelimit"
@@ -96,12 +98,38 @@ func provideLogger(cfg *config.Config) *slog.Logger {
 		level = slog.LevelError
 	}
 
+	// Stdout stays a sink even when a file is configured, rather than being
+	// replaced by it. Docker's healthcheck, `docker logs` and every habit built
+	// around them keep working, and the file is an addition to the incident
+	// toolkit rather than a relocation of it.
+	//
+	// A file that cannot be opened is reported and then ignored. Refusing to
+	// start over a logging destination would trade a bot that trades with
+	// awkward logs for a bot that does not trade at all, and on a deploy that
+	// failure repeats on every restart until someone notices.
+	var sink io.Writer = os.Stdout
+	var logErr error
+	if path := cfg.Runtime.LogFile; path != "" {
+		file, err := logfile.New(path, cfg.Runtime.LogMaxSizeMB, cfg.Runtime.LogMaxFiles)
+		if err != nil {
+			logErr = err
+		} else {
+			sink = io.MultiWriter(os.Stdout, file)
+		}
+	}
+
 	opts := &slog.HandlerOptions{Level: level}
-	var handler slog.Handler = slog.NewTextHandler(os.Stdout, opts)
+	var handler slog.Handler = slog.NewTextHandler(sink, opts)
 	if cfg.Runtime.LogFormat == "json" {
-		handler = slog.NewJSONHandler(os.Stdout, opts)
+		handler = slog.NewJSONHandler(sink, opts)
 	}
 	log := slog.New(handler).With("mode", string(cfg.Runtime.Mode))
+
+	if logErr != nil {
+		log.Error("cannot open the log file, stdout is the only sink",
+			"path", cfg.Runtime.LogFile, "error", logErr,
+			"effect", "an incident will have to be read out of `docker logs`")
+	}
 
 	// Переменные от снятого слоя переопределений называются первой же строкой лога.
 	//

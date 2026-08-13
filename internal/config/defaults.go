@@ -14,9 +14,15 @@ import (
 func defaults() *Config {
 	return &Config{
 		Runtime: Runtime{
-			Mode:          ModeDryRun,
-			LogLevel:      "info",
-			LogFormat:     "text",
+			Mode:      ModeDryRun,
+			LogLevel:  "info",
+			LogFormat: "text",
+			// The file sink is off by default: a local run has a terminal, and
+			// writing to a path nobody asked for is how stray files appear in
+			// repositories. Deployment turns it on through config.yaml.
+			LogFile:       "",
+			LogMaxSizeMB:  50,
+			LogMaxFiles:   10,
 			MetricsAddr:   ":9090",
 			HeartbeatPath: "data/mmbot.hb",
 			RecordingDir:  "recordings",

@@ -23,6 +23,15 @@ services:
       # свёртка показателей. Каталог общий со сторожем — через него передаётся
       # файл биения.
       - ./data:/app/data
+      # The process log, kept on the host so that reading it needs neither root
+      # nor a container id, and so that recreating the container does not take
+      # the history of the run that made it necessary. The process bounds these
+      # files itself (runtime.logMaxSizeMb × logMaxFiles); the json-file driver
+      # below bounds the stdout copy separately.
+      #
+      # Like data/, this directory must belong to the container user:
+      #   mkdir -p logs && chown 10001:10001 logs
+      - ./logs:/app/logs
 
     # Порт только на петлю: наружу метрики отдавать незачем, снимаются они
     # через ssh-туннель.

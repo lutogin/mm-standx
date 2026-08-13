@@ -222,6 +222,15 @@ jobs:
           rm -rf "$root/config"
           mv "$root/config.incoming" "$root/config"
 
+          # Каталог лога создаётся здесь, а не руками при заведении сервера:
+          # отсутствующий источник bind-mount Docker создаёт сам и делает
+          # владельцем root, после чего процесс под uid 10001 писать в него
+          # не может. Отказ при этом тихий по замыслу — бот продолжает работать
+          # с одним stdout, — и обнаружился бы ровно тогда, когда за файлом
+          # придут: во время разбора происшествия.
+          mkdir -p "$root/logs"
+          chown 10001:10001 "$root/logs"
+
           previous_image="$(docker image inspect lutogin/mm-standx:latest \
             --format '{{.Id}}' 2>/dev/null || true)"
 
