@@ -1194,6 +1194,12 @@ func (e *Engine) noteFastSignal(now time.Time) {
 func (e *Engine) observedMarginRate() string {
 	rate, ok := e.measuredMarginRate()
 	if !ok {
+		// Прочерк только пока не измеряли ни разу. Прежде он стоял всякий раз,
+		// когда стакан пуст, и тогда по сводке нельзя было отличить «не знаем»
+		// от «знаем, но сейчас нечего мерить» — а размер в этих случаях разный.
+		if e.marginRateSeen > 0 {
+			return fmt.Sprintf("%.3f%% (last)", e.marginRateSeen)
+		}
 		return "-"
 	}
 	return fmt.Sprintf("%.3f%%", rate)
@@ -1232,9 +1238,21 @@ func (e *Engine) measuredMarginRate() (float64, bool) {
 // само плечо. Это и делает измерение безопасным: ошибиться вниз оно может
 // ровно до этой границы и ни на процент дальше.
 //
-// Пока измерять нечего — при старте, до первых живых ордеров — берётся
-// настроенное значение. Оно консервативнее измеренного, и это верный перекос
-// для величины, от которой зависит размер.
+// Последнее измерение переживает опустевший стакан.
+//
+// Мерить можно только по живым ордерам, а стакан пустеет постоянно: 14 августа
+// съём по устаревшему mark случался каждые 67 секунд. Откат к настроенному
+// значению на это время означал, что размер скачет вчетверо — 6.27 против 24.9
+// XAU на сторону — в зависимости от того, стояли ли ордера в момент пересчёта.
+// И скачет в худшую сторону: заново лесенка собирается именно тогда, когда
+// мерить нечем, то есть по заниженному размеру.
+//
+// Доля блокировки — свойство счёта и плеча. Она не меняется оттого, что мы сняли
+// котировки, и забывать её на каждый съём значит путать «величина не измерима
+// прямо сейчас» с «величина стала другой».
+//
+// Настроенное значение остаётся только на старте, до первого в жизни процесса
+// измерения. Там выбора нет, и консервативный перекос там уместен.
 func (e *Engine) marginRate() (float64, string) {
 	configured := e.cfg.SymbolRisk.InitialMarginPct
 
@@ -1244,13 +1262,18 @@ func (e *Engine) marginRate() (float64, string) {
 	}
 
 	measured, ok := e.measuredMarginRate()
-	if !ok {
+	switch {
+	case ok && measured < floor:
+		e.marginRateSeen = floor
+		return floor, "measured, clamped to the leverage floor"
+	case ok:
+		e.marginRateSeen = measured
+		return measured, "measured"
+	case e.marginRateSeen > 0:
+		return e.marginRateSeen, "last measured"
+	default:
 		return configured, "configured"
 	}
-	if measured < floor {
-		return floor, "measured, clamped to the leverage floor"
-	}
-	return measured, "measured"
 }
 
 // bookDepth возвращает нотионал в пределах полосы награды по каждой стороне.
