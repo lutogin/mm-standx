@@ -168,3 +168,35 @@ type PositionConfigurer interface {
 	PositionConfig(ctx context.Context, s market.Symbol) (trading.PositionConfig, error)
 	SetLeverage(ctx context.Context, s market.Symbol, leverage int) error
 }
+
+// Liveness — отметка о том, что актор инструмента прошёл очередной такт.
+//
+// Порт существует потому, что признак жизни процесса и признак жизни торговли —
+// разные вещи, а до сих пор различались только на словах. Файл биения писала
+// отдельная горутина по своему таймеру, ничего не знавшая об акторах, поэтому
+// заблокировавшийся актор при живом процессе выглядел здоровым и для сторожа,
+// и для /healthz. 13 августа так и вышло: контейнер отвечал healthy тридцать
+// пять минут, пока актор стоял мёртвым (PLAN.md §0, дефект 3).
+//
+// Реализация обязана быть неблокирующей и безопасной для конкурентного вызова:
+// отметка ставится из горячего пути актора, а читают её другие горутины.
+type Liveness interface {
+	Beat(s market.Symbol, at time.Time)
+}
+
+// LivenessSource отвечает, какой из ожидаемых акторов молчит дольше всех.
+//
+// Возвращает false, когда молчащих нет. Отсчёт для инструмента, не тикнувшего
+// ещё ни разу, идёт с момента запуска: «не ожил» и «умер» для наблюдателя —
+// одно и то же, и различать их значило бы дать процессу бессрочную фору
+// на старте.
+type LivenessSource interface {
+	Stalest(now time.Time) (symbol market.Symbol, silent time.Duration, stale bool)
+}
+
+// NopLiveness — отметка, которую никто не читает. Для тестов и утилит.
+type NopLiveness struct{}
+
+func (NopLiveness) Beat(market.Symbol, time.Time) {}
+
+var _ Liveness = NopLiveness{}

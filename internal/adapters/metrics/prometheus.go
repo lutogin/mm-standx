@@ -49,6 +49,8 @@ type Prometheus struct {
 	rateTokens   prometheus.Gauge
 	reconnects   *prometheus.CounterVec
 	withdrawals  *prometheus.CounterVec
+	inboxDepth    *prometheus.GaugeVec
+	eventsDropped *prometheus.CounterVec
 }
 
 // New собирает и регистрирует коллекторы.
@@ -121,6 +123,18 @@ func New() *Prometheus {
 	p.rateTokens = plain("rate_limit_tokens", "Request credits available in the shaper")
 	p.reconnects = counter("stream_reconnects_total", "Stream reconnections", "stream")
 	p.withdrawals = counter("withdrawals_total", "Emergency quote withdrawals", "symbol", "cause")
+	// The backlog that killed the 13 August run was unobservable: nothing
+	// published the queue at all, so the first symptom available to anyone was
+	// an actor that had already stopped. A backlog takes seconds to build and
+	// is trivial to see if something is publishing it.
+	//
+	// Reported as a share of capacity, because the capacity is a compile-time
+	// constant and an alert written against an absolute count quietly stops
+	// meaning anything the day that constant moves.
+	p.inboxDepth = gauge("engine_inbox_ratio",
+		"Symbol actor queue occupancy, 0..1 of capacity", "symbol")
+	p.eventsDropped = counter("engine_events_dropped_total",
+		"Events lost to a full actor queue, by class", "symbol", "kind")
 
 	p.registry.MustRegister(
 		p.uptime, p.makerHours, p.distance, p.liveQuotes, p.quoting,
@@ -128,6 +142,7 @@ func New() *Prometheus {
 		p.fills, p.shadowFills, p.flattenCost, p.realizedPnL, p.estimatedCost, p.fillsPerHour, p.killSwitch,
 		p.riskLimit,
 		p.ordersSent, p.ordersFailed, p.aloRejects, p.rateTokens, p.reconnects, p.withdrawals,
+		p.inboxDepth, p.eventsDropped,
 	)
 	return p
 }
@@ -227,6 +242,14 @@ func (p *Prometheus) StreamReconnect(stream string) {
 
 func (p *Prometheus) Withdrawal(s market.Symbol, cause ports.WithdrawCause) {
 	p.withdrawals.WithLabelValues(s.String(), string(cause)).Inc()
+}
+
+func (p *Prometheus) InboxDepth(s market.Symbol, ratio float64) {
+	p.inboxDepth.WithLabelValues(s.String()).Set(ratio)
+}
+
+func (p *Prometheus) EventDropped(s market.Symbol, kind ports.DropKind) {
+	p.eventsDropped.WithLabelValues(s.String(), string(kind)).Inc()
 }
 
 func boolValue(b bool) float64 {

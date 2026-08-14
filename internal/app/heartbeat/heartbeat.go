@@ -39,6 +39,15 @@ type Writer struct {
 	live     bool
 	clock    ports.Clock
 	log      *slog.Logger
+	// actors отвечает, тикают ли акторы.
+	//
+	// Без него запись означала только «горутина жива», а сторож принимал это
+	// за «торговля идёт». Разница стоила тридцати пяти минут простоя на живом
+	// счёте 13 августа при контейнере в состоянии healthy.
+	actors ports.LivenessSource
+	// stalled помнит, что запись уже остановлена: жалоба нужна одна на эпизод,
+	// а такт здесь секундный.
+	stalled bool
 
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -49,6 +58,7 @@ func New(
 	interval time.Duration,
 	symbols []market.Symbol,
 	live bool,
+	actors ports.LivenessSource,
 	clock ports.Clock,
 	log *slog.Logger,
 ) *Writer {
@@ -57,6 +67,7 @@ func New(
 		interval: interval,
 		symbols:  symbols,
 		live:     live,
+		actors:   actors,
 		clock:    clock,
 		log:      log.With("component", "heartbeat"),
 		done:     make(chan struct{}),
@@ -123,7 +134,34 @@ func (w *Writer) loop(ctx context.Context) {
 	}
 }
 
+// write обновляет файл, если акторы тикают.
+//
+// Молчащий актор останавливает запись, а не пишет «мне плохо»: сторож судит
+// по возрасту отметки, и любой формат жалобы, кроме её отсутствия, требовал бы
+// от него понимать новое поле. Замерший файл он трактует единственным нужным
+// способом — снимает котировки, которые больше некому вести.
+//
+// Признак жизни при этом умеет и восстанавливаться: актор, вернувшийся к работе
+// после паузы, снова двигает отметку, и запись возобновляется. Останавливающая
+// защёлка здесь была бы тем же дефектом, который эта серия правок и закрывает.
 func (w *Writer) write() error {
+	if w.actors != nil {
+		if symbol, silent, stale := w.actors.Stalest(w.clock.Now()); stale {
+			if !w.stalled {
+				w.stalled = true
+				w.log.Error("actor stopped ticking, heartbeat is frozen",
+					"symbol", symbol,
+					"silent", silent.Truncate(time.Millisecond).String(),
+					"effect", "the guardian will withdraw quotes once the file goes stale")
+			}
+			return nil
+		}
+		if w.stalled {
+			w.stalled = false
+			w.log.Warn("actors are ticking again, heartbeat resumed")
+		}
+	}
+
 	symbols := make([]string, 0, len(w.symbols))
 	for _, s := range w.symbols {
 		symbols = append(symbols, s.String())

@@ -20,6 +20,7 @@ import (
 	"github.com/nd/mm-standx/internal/app/account"
 	"github.com/nd/mm-standx/internal/app/engine"
 	"github.com/nd/mm-standx/internal/app/heartbeat"
+	"github.com/nd/mm-standx/internal/app/liveness"
 	"github.com/nd/mm-standx/internal/app/news"
 	"github.com/nd/mm-standx/internal/app/observer"
 	"github.com/nd/mm-standx/internal/app/risk"
@@ -53,6 +54,7 @@ var Runtime = fx.Module("runtime",
 		fx.Annotate(provideTelemetry, fx.As(new(ports.Runnable)), fx.ResultTags(`group:"runnables"`)),
 		fx.Annotate(provideStatsCollector, fx.As(new(ports.Runnable)), fx.ResultTags(`group:"runnables"`)),
 		fx.Annotate(provideAccountPoller, fx.As(new(ports.Runnable)), fx.ResultTags(`group:"runnables"`)),
+		provideBeacon,
 		fx.Annotate(provideHeartbeat, fx.As(new(ports.Runnable)), fx.ResultTags(`group:"runnables"`)),
 		fx.Annotate(provideEngines, fx.ResultTags(`group:"runnables,flatten"`)),
 	),
@@ -183,8 +185,14 @@ func provideWatchdog(cfg *config.Config, bus *events.Bus, clk ports.Clock, log *
 	return watchdog.New(sortedSymbols(cfg), cfg.Health.MarkStale, bus, clk, log)
 }
 
-func provideMetricsServer(cfg *config.Config, p *metrics.Prometheus, log *slog.Logger) *metrics.Server {
-	return metrics.NewServer(cfg.Runtime.MetricsAddr, p, log)
+func provideMetricsServer(
+	cfg *config.Config,
+	p *metrics.Prometheus,
+	beacon *liveness.Beacon,
+	clk ports.Clock,
+	log *slog.Logger,
+) *metrics.Server {
+	return metrics.NewServer(cfg.Runtime.MetricsAddr, p, beacon, clk, log)
 }
 
 // provideRiskGuard собирает защитный контур.
@@ -264,12 +272,50 @@ func provideAccountPoller(
 	return account.New(sortedSymbols(cfg), cfg.Health.ReconcileInterval, reader, bus, clk, log)
 }
 
-func provideHeartbeat(cfg *config.Config, clk ports.Clock, log *slog.Logger) *heartbeat.Writer {
+// provideBeacon заводит маяк живости акторов.
+func provideBeacon(cfg *config.Config, clk ports.Clock) *liveness.Beacon {
+	return liveness.New(sortedSymbols(cfg), actorStale(cfg.Exchange), clk.Now())
+}
+
+// actorStale — сколько молчания актора означает, что торговли больше нет.
+//
+// Соблазнительно взять величину порядка такта актора: тикает он раз в 250 мс,
+// и пять секунд выглядят как двадцать пропущенных тактов подряд, то есть как
+// очевидная смерть. Это неверно, и ошибка дорогая.
+//
+// Актор ходит в сеть синхронно, своей же горутиной (PLAN.md §0, дефект 5).
+// Один вызов шлюза по худшему пути стоит четырёх попыток по requestTimeout
+// каждая, плюс отступы 200/400/800 мс с джиттером, плюс ожидание кредита
+// у шейпера: при нынешних пяти секундах таймаута это **больше двадцати секунд
+// молчания у совершенно здорового актора**. Порог ниже объявил бы его мёртвым,
+// `/healthz` вернул бы 503, и Docker перезапустил бы работающего бота — а
+// перезапуск в середине часа стоит всего накопленного аптайма (domain/uptime:
+// дотиковое состояние не переживает старт намеренно).
+//
+// Отсюда шесть таймаутов запроса: покрывает худший путь с запасом и остаётся
+// в двух порядках от тридцати пяти минут, которые этот механизм и должен был
+// заметить 13 августа. Обнаружить за полминуты вместо мгновенного — приемлемо;
+// убить исправного — нет.
+func actorStale(e config.Exchange) time.Duration {
+	const cover = 6
+	if e.RequestTimeout <= 0 {
+		return 30 * time.Second
+	}
+	return max(cover*e.RequestTimeout, 30*time.Second)
+}
+
+func provideHeartbeat(
+	cfg *config.Config,
+	beacon *liveness.Beacon,
+	clk ports.Clock,
+	log *slog.Logger,
+) *heartbeat.Writer {
 	return heartbeat.New(
 		cfg.Runtime.HeartbeatPath,
 		cfg.Health.HeartbeatInterval,
 		sortedSymbols(cfg),
 		cfg.IsLive(),
+		beacon,
 		clk,
 		log,
 	)
@@ -296,6 +342,7 @@ func provideEngines(
 	bus *events.Bus,
 	clk ports.Clock,
 	m ports.Metrics,
+	beacon *liveness.Beacon,
 	log *slog.Logger,
 ) ([]ports.Runnable, error) {
 	symbols := sortedSymbols(cfg)
@@ -378,12 +425,13 @@ func provideEngines(
 				MaxNetPosition: maxPosition,
 			},
 			engine.Deps{
-				Gateway: gateway,
-				Reader:  reader,
-				Bus:     bus,
-				Clock:   clk,
-				Metrics: m,
-				Log:     log,
+				Gateway:  gateway,
+				Reader:   reader,
+				Bus:      bus,
+				Clock:    clk,
+				Metrics:  m,
+				Liveness: beacon,
+				Log:      log,
 			},
 		))
 	}

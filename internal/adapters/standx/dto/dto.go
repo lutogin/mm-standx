@@ -3,12 +3,47 @@
 // Числовые величины биржа передаёт строками, а целые — числами. Здесь всё
 // принимается как есть, без интерпретации: разбор и приведение к доменным типам
 // происходит в пакете mapper. Так ошибка формата отделена от ошибки смысла.
+//
+// The split above is a description of what the venue was observed doing, not a
+// guarantee it gave: query_position_config returns leverage quoted. Fields that
+// have been seen in both forms use Int, which accepts either.
 package dto
 
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 )
+
+// Int is an integer the venue may send as a JSON number or as a quoted string.
+//
+// The cost of assuming one form is not a parse error someone reads and fixes:
+// PositionConfig.Leverage was typed int, every read of the account leverage
+// failed, and ApplyLeverage is deliberately non-fatal — it logs once and leaves
+// the setting alone. The account therefore ran at the venue default of 9.49
+// while the configuration said forty, and the only visible symptom was an
+// accrual smaller than it should have been (PLAN.md §12.5).
+type Int int
+
+func (i *Int) UnmarshalJSON(raw []byte) error {
+	var number int
+	if err := json.Unmarshal(raw, &number); err == nil {
+		*i = Int(number)
+		return nil
+	}
+
+	var quoted string
+	if err := json.Unmarshal(raw, &quoted); err != nil {
+		return fmt.Errorf("value %s is neither a number nor a string", raw)
+	}
+	parsed, err := strconv.Atoi(strings.TrimSpace(quoted))
+	if err != nil {
+		return fmt.Errorf("quoted value %q is not an integer: %w", quoted, err)
+	}
+	*i = Int(parsed)
+	return nil
+}
 
 // Envelope — общий конверт ответа торговых эндпойнтов.
 //
@@ -248,8 +283,9 @@ type CancelOrdersRequest struct {
 // PositionConfig — ответ query_position_config: действующие настройки счёта
 // по инструменту.
 type PositionConfig struct {
-	Symbol     string `json:"symbol"`
-	Leverage   int    `json:"leverage"`
+	Symbol string `json:"symbol"`
+	// Leverage arrives quoted — "40", not 40 — which is why it is Int.
+	Leverage   Int    `json:"leverage"`
 	MarginMode string `json:"margin_mode"`
 }
 

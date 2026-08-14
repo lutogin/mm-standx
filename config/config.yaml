@@ -408,7 +408,7 @@ defaults:
     # to catch a socket that died quietly, not a calm market. Past one tick the
     # official price supersedes the estimate anyway. At two seconds this warned
     # about a perfectly healthy gold feed once every two minutes.
-    staleAfter: 2s
+    staleAfter: 3s
 
 # Параметры начисления публикуются StandX и меняются оперативной командой:
 # https://docs.standx.com/docs/standx-perps-solutions/community-maker-yield

@@ -38,7 +38,7 @@ func (c *Client) PositionConfig(ctx context.Context, s market.Symbol) (trading.P
 	}
 	return trading.PositionConfig{
 		Symbol:     s,
-		Leverage:   out.Leverage,
+		Leverage:   int(out.Leverage),
 		MarginMode: trading.MarginMode(out.MarginMode),
 	}, nil
 }

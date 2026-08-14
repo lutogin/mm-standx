@@ -12,6 +12,7 @@ import (
 
 	"github.com/nd/mm-standx/internal/domain/economics"
 	"github.com/nd/mm-standx/internal/domain/market"
+	"github.com/nd/mm-standx/internal/domain/money"
 	"github.com/nd/mm-standx/internal/domain/trading"
 	"github.com/nd/mm-standx/internal/events"
 )
@@ -218,4 +219,132 @@ func TestEconomicGateStopsQuotingInsteadOfTheProcess(t *testing.T) {
 	require.Contains(t, gw.cancelled, trading.ClOrdID("bid-1"))
 	require.Contains(t, buf.String(), "engine status")
 	require.Contains(t, buf.String(), "calibration cap")
+}
+
+// fillInbox leaves the actor's queue with no room, so the next enqueue drops.
+func fillInbox(e *Engine) {
+	for len(e.inbox) < cap(e.inbox) {
+		e.inbox <- events.MarkPriceStale{Symbol: e.symbol}
+	}
+}
+
+// Переполнение очереди — транзиентное условие, и ответ на него обязан быть
+// транзиентным (PLAN.md §14).
+//
+// Прежний ответ был противоположным: `halted = true` без причины, а снять этот
+// флаг умеет только KillSwitchCleared от защитного контура. Переполнение его
+// вердикта не меняет, поэтому событие не приходило никогда. 13 августа актор
+// простоял мёртвым до перезапуска — тот же дефект, что уже разбирался на
+// счётчике заливов (§13).
+func TestInboxOverflowPausesTheActorInsteadOfWedgingIt(t *testing.T) {
+	ctx := context.Background()
+	e, gw, clk := dangerEngine(t)
+	e.available, e.equity = decimal.NewFromInt(1000), decimal.NewFromInt(1000)
+	e.markAt = clk.now
+
+	var buf bytes.Buffer
+	e.deps.Log = slog.New(slog.NewTextHandler(&buf, nil))
+
+	liveRung(e, market.Buy, "bid-1", "4273", clk.now)
+	liveRung(e, market.Sell, "ask-1", "4279", clk.now)
+
+	fillInbox(e)
+	e.enqueue(events.OrderUpdated{Order: trading.Order{ClOrdID: "bid-1"}})
+	e.onTick(ctx)
+
+	require.False(t, e.halted, "a full queue is not a reason to stop for the rest of the run")
+	require.True(t, clk.now.Before(e.resyncUntil), "the answer is a deadline")
+	require.Contains(t, buf.String(), "engine inbox overflow")
+
+	e.evaluate(ctx, true)
+	require.ElementsMatch(t, []trading.ClOrdID{"bid-1", "ask-1"}, gw.cancelled,
+		"quotes come off while our own book is known to be stale")
+	require.Contains(t, buf.String(), "inbox overflow dropped 1 events")
+
+	gw.placed = nil
+	clk.now = e.resyncUntil.Add(time.Second)
+	primeVolatility(t, e, clk)
+	e.evaluate(ctx, true)
+	require.NotEmpty(t, gw.placed, "the deadline has to release the actor on its own")
+}
+
+// Причина обязана быть непустой. Пустая давала строку `halted: `, оборванную
+// на двоеточии, и не сужала поиск ни на один путь: в проде это полчаса разбора.
+func TestInboxOverflowNamesItselfInTheStatusLog(t *testing.T) {
+	ctx := context.Background()
+	e, _, clk := dangerEngine(t)
+	e.markAt = clk.now
+
+	var buf bytes.Buffer
+	e.deps.Log = slog.New(slog.NewTextHandler(&buf, nil))
+
+	fillInbox(e)
+	e.enqueue(events.PositionUpdated{})
+	e.onTick(ctx)
+	e.evaluate(ctx, true)
+
+	require.Contains(t, buf.String(), "engine status")
+	require.Contains(t, buf.String(), "the picture of our own orders is stale")
+	require.NotContains(t, buf.String(), `reason="halted: "`,
+		"an empty basis is the thing this test exists to prevent")
+}
+
+// Разговорчивая площадка не должна снимать котировки: без внешнего ориентира
+// мы возвращаемся ровно к той картине, по которой работали до его появления.
+func TestAChattyVenueOverflowingTheQueueChangesNothing(t *testing.T) {
+	ctx := context.Background()
+	e, _, clk := dangerEngine(t)
+	subscribed(t, e)
+	e.markAt = clk.now
+
+	// Через шину, а не через enqueue: прод этим путём больше не ходит, и тест,
+	// гоняющий события мимо подписки, остался бы зелёным при сломанной ячейке.
+	fillInbox(e)
+	for range 500 {
+		events.Publish(e.deps.Bus, ctx, events.BookUpdated{
+			Book: snapshot(e.symbol, "4275", "4277", clk.now),
+		})
+		events.Publish(e.deps.Bus, ctx, events.ReferencePriceUpdated{
+			Reference: market.ReferencePrice{
+				Symbol: e.symbol, Price: money.MustParsePrice("4276"), Received: clk.now,
+			},
+		})
+	}
+	e.onTick(ctx)
+
+	require.False(t, e.halted)
+	require.True(t, e.resyncUntil.IsZero(),
+		"a regenerable snapshot is worth losing, not pausing over")
+}
+
+// Пока поток продолжает ронять события, пауза обязана отодвигаться.
+//
+// Иначе расхождение переживало бы её: срок, назначенный по первой потере,
+// истёк бы, пока сверка ещё не догнала поток, который всё это время терял
+// новые события. Возврат к котированию тогда происходил бы поверх картины,
+// про которую уже известно, что она неполна.
+func TestOngoingOverflowKeepsPushingTheDeadlineOut(t *testing.T) {
+	ctx := context.Background()
+	e, _, clk := dangerEngine(t)
+	e.markAt = clk.now
+
+	overflow := func() {
+		fillInbox(e)
+		e.enqueue(events.OrderUpdated{Order: trading.Order{ClOrdID: "bid-1"}})
+		e.onTick(ctx)
+	}
+
+	overflow()
+	first := e.resyncUntil
+	require.True(t, first.After(clk.now))
+
+	// Проходит часть паузы, и поток роняет события снова.
+	clk.advance(10 * time.Second)
+	e.markAt = clk.now
+	overflow()
+
+	require.True(t, e.resyncUntil.After(first),
+		"a stream that is still dropping events must not be released on the original deadline")
+	require.Equal(t, clk.now.Add(e.resyncFor()), e.resyncUntil,
+		"the deadline is measured from the latest loss, not the first")
 }

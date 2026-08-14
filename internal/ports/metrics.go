@@ -105,7 +105,40 @@ type Metrics interface {
 	StreamReconnect(stream string)
 	// Withdrawal — аварийный съём котировок.
 	Withdrawal(s market.Symbol, cause WithdrawCause)
+
+	// InboxDepth — how full the symbol actor's queue is, as a share of capacity.
+	//
+	// Published because its absence is what turned a solvable slowdown into an
+	// outage. On 13 August the queue filled, the actor stopped for the rest of
+	// the run, and nothing anywhere reported that a queue existed at all: the
+	// first and only observable was the actor already dead. A backlog builds
+	// over seconds and is trivially visible if anyone is looking, which is the
+	// entire argument for looking.
+	//
+	// A share rather than a count: the capacity is a compile-time constant, and
+	// an alert written against an absolute number silently stops meaning
+	// anything the day that constant changes.
+	InboxDepth(s market.Symbol, ratio float64)
+	// EventDropped — an event the actor's queue had no room for.
+	//
+	// Non-zero means decisions are being made on an incomplete picture. Market
+	// snapshots are regenerable and their loss is survivable; anything else is
+	// not, which is why the cause is a label rather than one undifferentiated
+	// counter.
+	EventDropped(s market.Symbol, kind DropKind)
 }
+
+// DropKind — what class of event was lost to a full queue.
+type DropKind string
+
+const (
+	// DropMarket — стакан или внешний ориентир: следующее сообщение приносит
+	// ту же величину заново, потеря переживается.
+	DropMarket DropKind = "market"
+	// DropAccount — ордер, исполнение, позиция. Восстанавливается только
+	// сверкой, и до неё картина собственного стакана неверна.
+	DropAccount DropKind = "account"
+)
 
 // WithdrawCause — причина съёма котировок, приведённая к замкнутому множеству.
 //
@@ -161,6 +194,11 @@ const (
 	// CauseRiskPause — частота заливов за скользящий час достигла предела.
 	// Отличается от CauseKillSwitch тем, что снимается сама по истечении срока.
 	CauseRiskPause WithdrawCause = "risk_pause"
+	// CauseInboxOverflow — очередь актора переполнялась, и события об ордерах
+	// или позиции потеряны. Отличается от прочих причин тем, что говорит
+	// не о рынке, а о нас: котировать нельзя не потому, что невыгодно, а
+	// потому, что собственный стакан известен неточно.
+	CauseInboxOverflow WithdrawCause = "inbox_overflow"
 	// CausePostFill — идёт пауза после залива.
 	CausePostFill WithdrawCause = "post_fill"
 	// CauseWarmup — mark price ещё не получен.
@@ -200,6 +238,8 @@ func (NopMetrics) ALOReject(market.Symbol)                           {}
 func (NopMetrics) RateLimitTokens(float64)                           {}
 func (NopMetrics) StreamReconnect(string)                            {}
 func (NopMetrics) Withdrawal(market.Symbol, WithdrawCause)           {}
+func (NopMetrics) InboxDepth(market.Symbol, float64)                 {}
+func (NopMetrics) EventDropped(market.Symbol, DropKind)              {}
 
 var _ Metrics = NopMetrics{}
 

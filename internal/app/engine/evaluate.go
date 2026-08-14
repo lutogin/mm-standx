@@ -59,6 +59,18 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 		return
 	}
 
+	// Очередь переполнялась: часть событий об ордерах и позиции до актора
+	// не дошла, и его представление о собственном стакане неполно. Котировать
+	// поверх такой картины — выставлять вторую котировку при живой первой.
+	//
+	// Проверка стоит выше паузы защитного контура намеренно: та говорит, что
+	// котировать невыгодно, эта — что нечем.
+	if now.Before(e.resyncUntil) {
+		blocked(e.resyncReason)
+		e.withdraw(ctx, ports.CauseInboxOverflow, e.resyncReason)
+		return
+	}
+
 	// Пауза защитного контура держится сроком, а не флагом: сообщение о снятии
 	// может не прийти, и тогда актор молчал бы до конца запуска.
 	if now.Before(e.riskPauseUntil) {
@@ -1031,6 +1043,7 @@ func (e *Engine) noteStall(now time.Time, quoting bool, reason string) {
 		"halted", e.halted,
 		"halt_reason", e.haltReason,
 		"risk_pause_until", stamp(e.riskPauseUntil),
+		"resync_until", stamp(e.resyncUntil),
 		"cooldown_until", stamp(e.cooldownUntil),
 		"fill_burst_until", stamp(e.fillBurstUntil),
 		"flatten_retry_at", stamp(e.flattenRetryAt),

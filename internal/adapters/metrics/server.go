@@ -22,17 +22,23 @@ import (
 type Server struct {
 	addr    string
 	handler http.Handler
-	log     *slog.Logger
+	// actors отвечает, тикают ли акторы. Пусто — проба говорит только
+	// о способности процесса принимать соединения.
+	actors ports.LivenessSource
+	clock  ports.Clock
+	log    *slog.Logger
 
 	srv      *http.Server
 	listener net.Listener
 }
 
 // NewServer создаёт сервер метрик. Пустой адрес отключает его.
-func NewServer(addr string, p *Prometheus, log *slog.Logger) *Server {
+func NewServer(addr string, p *Prometheus, actors ports.LivenessSource, clk ports.Clock, log *slog.Logger) *Server {
 	return &Server{
 		addr:    addr,
 		handler: promhttp.HandlerFor(p.Registry(), promhttp.HandlerOpts{}),
+		actors:  actors,
+		clock:   clk,
 		log:     log.With("component", "metrics"),
 	}
 }
@@ -53,10 +59,27 @@ func (s *Server) Start(context.Context) error {
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", s.handler)
-	// Проба живости для супервизора: отвечает, пока процесс способен принимать
-	// соединения. О состоянии торговли она не говорит ничего — это работа
-	// метрик и сторожа, а не HTTP-обработчика.
+	// Проба живости для супервизора.
+	//
+	// Прежде она отвечала только за способность процесса принимать соединения
+	// и о торговле не говорила ничего — намеренно, потому что для торговли есть
+	// сторож. Но сторожа нет в Docker (AGENTS.md: его заменяют restart плюс
+	// сверка при старте), а значит в боевой поставке признак жизни торговли
+	// не читал никто. 13 августа очередь актора переполнилась, торговля встала,
+	// и контейнер отвечал healthy тридцать пять минут подряд.
+	//
+	// Теперь проба говорит о том, ради чего процесс запущен. Замерший актор
+	// делает контейнер unhealthy, а перезапуск проходит штатным путём: съём
+	// котировок и закрытие позиции укладываются в stop_grace_period.
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		if s.actors != nil {
+			if symbol, silent, stale := s.actors.Stalest(s.clock.Now()); stale {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = fmt.Fprintf(w, "actor %s has not ticked for %s\n",
+					symbol, silent.Truncate(time.Millisecond))
+				return
+			}
+		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
 	})

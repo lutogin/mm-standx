@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -56,7 +57,13 @@ type Deps struct {
 	Bus     *events.Bus
 	Clock   ports.Clock
 	Metrics ports.Metrics
-	Log     *slog.Logger
+	// Liveness принимает отметку о такте актора.
+	//
+	// Признак жизни производится здесь и только здесь. Прежде его писала
+	// отдельная горутина по своему таймеру, и заблокировавшийся актор
+	// при живом процессе выглядел здоровым — см. ports.Liveness.
+	Liveness ports.Liveness
+	Log      *slog.Logger
 }
 
 // Params — всё, что актор знает о своём инструменте на момент сборки.
@@ -187,6 +194,40 @@ type Engine struct {
 	riskPauseUntil  time.Time
 	riskPauseReason string
 
+	// dropped — сколько событий не поместилось в очередь.
+	//
+	// Атомарный, потому что растёт на горутинах публикующих (шина синхронна),
+	// а читает его владелец состояния. Все остальные поля здесь принадлежат
+	// одной горутине и синхронизации не требуют — см. noteDroppedEvents.
+	dropped atomic.Int64
+
+	// Быстрые потоки не занимают очередь актора.
+	//
+	// Стакан и внешний ориентир приходят в разы чаще всего остального, а несут
+	// величину, которую следующее сообщение приносит заново: устаревший снимок
+	// не нужен никому. Очередь же хранит его наравне с исполнением ордера,
+	// и 13 августа именно эта равноправность убила прогон — быстрый поток
+	// заполнил 1024 слота, после чего первое же событие о собственном ордере
+	// не поместилось.
+	//
+	// Здесь они лежат в ячейке на одно значение: писатель кладёт последнее,
+	// актор забирает на ближайшем пробуждении. Копиться нечему по устройству,
+	// а не по расчёту на то, что актор успеет.
+	bookIn      atomic.Pointer[market.Book]
+	referenceIn atomic.Pointer[market.ReferencePrice]
+	// wake — сигнал «в ячейках что-то новое», ёмкостью один.
+	//
+	// Именно сигнал, а не данные: несколько обновлений подряд схлопываются
+	// в одно пробуждение, потому что забирать всё равно будут только последнее.
+	// Задержка реакции при этом не растёт — пробуждение приходит с тем же
+	// сообщением, что и раньше, а не по таймеру (PLAN.md §13: аварийный съём
+	// не имеет права ждать такта).
+	wake chan struct{}
+	// resyncUntil — срок, до которого картина собственных ордеров считается
+	// разошедшейся с биржевой после потери событий.
+	resyncUntil  time.Time
+	resyncReason string
+
 	cooldownUntil time.Time
 	pendingFill   money.Qty
 	fillDeadline  time.Time
@@ -281,6 +322,9 @@ func New(p Params, deps Deps) *Engine {
 	if deps.Metrics == nil {
 		deps.Metrics = ports.NopMetrics{}
 	}
+	if deps.Liveness == nil {
+		deps.Liveness = ports.NopLiveness{}
+	}
 
 	return &Engine{
 		symbol:         p.Symbol,
@@ -317,6 +361,7 @@ func New(p Params, deps Deps) *Engine {
 		flattenOrders: make(map[trading.ClOrdID]time.Time),
 		deps:          deps,
 		inbox:         make(chan events.Event, inboxSize),
+		wake:          make(chan struct{}, 1),
 		done:          make(chan struct{}),
 	}
 }
@@ -363,7 +408,13 @@ func (e *Engine) Stop(ctx context.Context) error {
 	for _, unsub := range e.unsubscribe {
 		unsub()
 	}
-	e.halted = true
+	// Причина задаётся вместе с флагом, а не по желанию.
+	//
+	// `halted` печатается в сводке как "halted: " + haltReason, и оставленная
+	// пустой причина даёт строку, обрывающуюся на двоеточии. 13 августа она
+	// стоила получаса на выяснение того, что вообще остановило актор: пустое
+	// основание не сужает поиск ни на один путь.
+	e.halted, e.haltReason = true, "process is stopping"
 
 	e.withdraw(ctx, ports.CauseShutdown, "process is stopping")
 	e.clearRemaining(ctx)
@@ -481,15 +532,38 @@ func (e *Engine) subscribe() {
 				e.enqueue(ev)
 			}
 		}),
+		// Стакан и ориентир идут мимо очереди, в ячейку на одно значение:
+		// см. поля bookIn/referenceIn. Снимок стакана после NewBook только
+		// читается, поэтому передавать его указателем между горутинами
+		// безопасно — все методы Book имеют получатель по значению.
+		// Негодный снимок отсеивается здесь, а не только при разборе.
+		//
+		// Ячейка одна, поэтому запись затирает то, что актор ещё не прочитал.
+		// Биржа периодически присылает стакан без одной из сторон, и такой
+		// снимок, положенный в ячейку, уничтожал бы предыдущий — хороший и,
+		// возможно, показывающий как раз движение. Очередь этого не допускала:
+		// в ней лежали оба, и годный применялся. Проверка при разборе остаётся
+		// второй линией.
 		events.Subscribe(e.deps.Bus, e.Name(), func(_ context.Context, ev events.BookUpdated) {
-			if ev.Book.Symbol == e.symbol {
-				e.enqueue(ev)
+			if ev.Book.Symbol != e.symbol || !twoSided(ev.Book) {
+				return
 			}
+			// Непрочитанное значение в ячейке — потерянный снимок. Считается
+			// здесь, потому что это единственное место, где потеря видна,
+			// и лучшая мера того, насколько актор отстал.
+			if e.bookIn.Swap(&ev.Book) != nil {
+				e.deps.Metrics.EventDropped(e.symbol, ports.DropMarket)
+			}
+			e.notify()
 		}),
 		events.Subscribe(e.deps.Bus, e.Name(), func(_ context.Context, ev events.ReferencePriceUpdated) {
-			if ev.Reference.Symbol == e.symbol {
-				e.enqueue(ev)
+			if ev.Reference.Symbol != e.symbol || !ev.Reference.Price.IsPositive() {
+				return
 			}
+			if e.referenceIn.Swap(&ev.Reference) != nil {
+				e.deps.Metrics.EventDropped(e.symbol, ports.DropMarket)
+			}
+			e.notify()
 		}),
 		events.Subscribe(e.deps.Bus, e.Name(), func(_ context.Context, ev events.NewsCalendarUpdated) {
 			e.enqueue(ev)
@@ -539,6 +613,17 @@ func (e *Engine) subscribe() {
 }
 
 func (e *Engine) enqueue(ev events.Event) {
+	// Глубина публикуется отсюда, а не только с такта актора.
+	//
+	// С такта её видно ровно до того момента, когда она перестаёт быть нулевой:
+	// заблокированный на шлюзе актор не тикает, onTick не выполняется, и
+	// показатель замирает на последнем низком значении. Прометей рисует ровную
+	// линию, часовая свёртка берёт то же число, и очередь выглядит здоровой
+	// весь затык — то есть показатель отсутствует именно тогда, ради чего
+	// заведён. Здесь код идёт на горутине публикующего и растёт вместе с
+	// очередью.
+	e.deps.Metrics.InboxDepth(e.symbol, float64(len(e.inbox))/float64(cap(e.inbox)))
+
 	select {
 	case e.inbox <- ev:
 	default:
@@ -549,11 +634,73 @@ func (e *Engine) enqueue(ev events.Event) {
 		// чужая площадка разговорилась, было бы прямо противоположно смыслу.
 		switch ev.(type) {
 		case events.BookUpdated, events.ReferencePriceUpdated:
+			e.deps.Metrics.EventDropped(e.symbol, ports.DropMarket)
 			return
 		}
-		e.deps.Log.Error("engine inbox overflow, halting", "symbol", e.symbol)
-		e.halted = true
+		e.deps.Metrics.EventDropped(e.symbol, ports.DropAccount)
+		// Потеря считается, а не обрабатывается здесь.
+		//
+		// Шина синхронна, поэтому enqueue выполняется на горутине публикующего:
+		// потоков данных, опроса счёта, торгового канала. Запись отсюда в поля
+		// актора — гонка с его собственным циклом, и прежняя строка `e.halted =
+		// true` ею и была. Счётчик атомарный, ответ принимает владелец
+		// состояния на ближайшем такте.
+		e.dropped.Add(1)
 	}
+}
+
+// noteDroppedEvents превращает переполнение очереди в срочную паузу.
+//
+// Переполнение означает, что часть событий об ордерах, исполнениях и позиции
+// до актора не дошла, то есть его картина собственного стакана разошлась
+// с биржевой. Котировать в этом состоянии нельзя.
+//
+// Но и останавливаться навсегда нельзя, а прежний ответ был именно таким:
+// `halted` снимается только событием KillSwitchCleared, которое публикует
+// защитный контур, когда его вердикт перестаёт быть остановкой. Переполнение
+// вердикта не меняет, поэтому событие не приходило никогда — 13 августа актор
+// простоял мёртвым до перезапуска, с пустым основанием в логе. Это тот же
+// дефект, что уже разбирался дважды (PLAN.md §13, §14): транзиентное условие
+// обязано получать транзиентный ответ.
+//
+// Ответ здесь — срок, а не флаг, по той же причине, по какой сроком выражена
+// пауза защитного контура: расхождение чинит сверка, её снимок приходит извне,
+// и ждать его молча значило бы снова зависеть от события, которое может
+// не прийти.
+func (e *Engine) noteDroppedEvents(now time.Time) {
+	dropped := e.dropped.Swap(0)
+	if dropped == 0 {
+		return
+	}
+
+	until := now.Add(e.resyncFor())
+	// Продлевается, а не переустанавливается: поток, роняющий события second
+	// раз подряд, не заслуживает более раннего возврата.
+	if until.After(e.resyncUntil) {
+		e.resyncUntil = until
+	}
+	e.resyncReason = fmt.Sprintf(
+		"inbox overflow dropped %d events, the picture of our own orders is stale until %s",
+		dropped, e.resyncUntil.UTC().Format(time.RFC3339))
+
+	e.deps.Log.Error("engine inbox overflow, quotes withdrawn until reconciliation catches up",
+		"symbol", e.symbol,
+		"dropped", dropped,
+		"inbox_size", inboxSize,
+		"until", e.resyncUntil.UTC().Format(time.RFC3339))
+}
+
+// resyncFor — сколько держать паузу после потери событий.
+//
+// Отмеряется сверкой, а не круглым числом: расхождение чинит именно она, и
+// пауза обязана вмещать её полный цикл целиком, включая тот, что шёл в момент
+// переполнения. Три интервала дают запас на один пропущенный ответ.
+func (e *Engine) resyncFor() time.Duration {
+	const cycles = 3
+	if e.health.ReconcileInterval <= 0 {
+		return cycles * 5 * time.Second
+	}
+	return cycles * e.health.ReconcileInterval
 }
 
 func (e *Engine) loop(ctx context.Context) {
@@ -561,11 +708,32 @@ func (e *Engine) loop(ctx context.Context) {
 	defer ticker.Stop()
 
 	for {
+		// Ячейки разбираются перед каждой веткой, а не отдельным случаем выбора.
+		//
+		// Равноправная ветка была ошибкой: Go выбирает среди готовых случаев
+		// равновероятно, поэтому такт mark мог обработаться, пока свежий стакан
+		// лежал непрочитанным. А onMarkPrice ставит обе опорные точки сноса
+		// из полей актора (bookMidAtMark, referenceAtMark), и якорь от
+		// устаревшего стакана даёт завышенный снос: аварийный съём по движению,
+		// которого не было. Каналы price и depth_book идут по одному соединению
+		// (di/runtime.go), и до разделения входа очередь давала этот порядок
+		// даром.
+		//
+		// Задержкой это не лечится: таймер перед разбором воспроизвёл бы
+		// PLAN.md §13 дословно — кулдаун перестановки, ослепивший опасный путь
+		// при стакане раз в 300 мс.
+		if ctx.Err() != nil {
+			return
+		}
+		e.onMarket(ctx)
+
 		select {
 		case <-ctx.Done():
 			return
 		case ev := <-e.inbox:
 			e.handle(ctx, ev)
+		case <-e.wake:
+			// Работу делает разбор в начале следующего витка.
 		case <-ticker.C():
 			e.onTick(ctx)
 		}
@@ -576,6 +744,10 @@ func (e *Engine) handle(ctx context.Context, ev events.Event) {
 	switch v := ev.(type) {
 	case events.MarkPriceUpdated:
 		e.onMarkPrice(ctx, v)
+	// Эти две ветки прод больше не проходит: подписчики кладут стакан и ориентир
+	// в ячейку, а не в очередь (см. subscribe). Оставлены ради фикстур, гоняющих
+	// актор через handle: удаление превратило бы их из падающих на компиляции
+	// в молча ничего не делающие.
 	case events.BookUpdated:
 		e.onBook(ctx, v)
 	case events.ReferencePriceUpdated:
@@ -685,22 +857,70 @@ const referenceReactionFloor = 25 * time.Millisecond
 // снимать (PLAN.md §4.8). Право снимать и есть весь смысл фида: движение
 // на быстрой площадке случается раньше, чем арбитражёр успевает прийти
 // с ним к нашей котировке.
-func (e *Engine) onReference(ctx context.Context, ev events.ReferencePriceUpdated) {
-	if !ev.Reference.Price.IsPositive() {
-		return
+// notify будит актора, не блокируясь и не накапливая.
+//
+// Вызывается с горутин публикующих. Полный канал означает, что пробуждение уже
+// назначено и второе ничего не добавит: забирать всё равно будут содержимое
+// ячейки, а оно к тому моменту будет свежайшим.
+func (e *Engine) notify() {
+	select {
+	case e.wake <- struct{}{}:
+	default:
 	}
-	e.reference = ev.Reference.Price
-	e.referenceAt = ev.Reference.Received
+}
+
+// onMarket забирает накопленное в ячейках быстрых потоков.
+//
+// Порядок внутри одного пробуждения — ориентир, затем стакан — повторяет
+// порядок, в котором эти события обрабатывались очередью: ориентир только
+// обновляет состояние, стакан вдобавок считает теневые касания и заставляет
+// пересчёт. Собранные вместе, они дают один пересчёт вместо двух.
+func (e *Engine) onMarket(ctx context.Context) {
+	requote := false
+
+	if ref := e.referenceIn.Swap(nil); ref != nil && e.applyReference(*ref) {
+		// Состояние обновляется всегда, пересчёт — не всегда: пропущенный такт
+		// не теряется, ближайший пересчёт из любого источника увидит уже свежую
+		// цену.
+		now := e.deps.Clock.Now()
+		if now.Sub(e.lastReferenceEval) >= referenceReactionFloor {
+			e.lastReferenceEval = now
+			requote = true
+		}
+	}
+
+	if book := e.bookIn.Swap(nil); book != nil && e.applyBook(*book) {
+		// Учёт теневых заливов идёт до пересчёта: evaluate может снять ступень,
+		// и тогда касание, ради наблюдения которого прогон и делается, пропало бы.
+		e.countShadowFills(e.deps.Clock.Now())
+		requote = true
+	}
+
+	if requote {
+		e.evaluate(ctx, false)
+	}
+}
+
+// applyReference принимает цену внешней площадки. false — сообщение отброшено.
+func (e *Engine) applyReference(ref market.ReferencePrice) bool {
+	if !ref.Price.IsPositive() {
+		return false
+	}
+	e.reference = ref.Price
+	e.referenceAt = ref.Received
 	// Первая цена после старта или после разрыва становится опорной сама:
 	// без этого смещение считалось бы от нуля, а такт mark мог не наступить
 	// ещё три секунды.
 	if !e.referenceAtMark.IsPositive() {
 		e.referenceAtMark = e.reference
 	}
+	return true
+}
 
-	// Состояние обновляется всегда, пересчёт — не всегда: пропущенный такт
-	// не теряется, ближайший пересчёт из любого источника увидит уже свежую
-	// цену.
+func (e *Engine) onReference(ctx context.Context, ev events.ReferencePriceUpdated) {
+	if !e.applyReference(ev.Reference) {
+		return
+	}
 	now := e.deps.Clock.Now()
 	if now.Sub(e.lastReferenceEval) < referenceReactionFloor {
 		return
@@ -714,17 +934,35 @@ func (e *Engine) onReference(ctx context.Context, ev events.ReferencePriceUpdate
 // Стакан приходит чаще такта и не несёт официальной цены, поэтому по нему
 // разрешено только снимать котировки, но не выставлять: размещение по оценке
 // дало бы ордер вне полосы награды (PLAN.md §4.8).
+// twoSided сообщает, есть ли в снимке обе стороны.
+//
+// Биржа иногда присылает стакан без одной из них. Затирать рабочий таким
+// нельзя: halfSpread станет нечитаемым, и актор перестанет котировать
+// до следующего полного снимка.
+func twoSided(book market.Book) bool {
+	if _, ok := book.BestBid(); !ok {
+		return false
+	}
+	_, ok := book.BestAsk()
+	return ok
+}
+
+// applyBook принимает снимок стакана. false — снимок отброшен.
+//
+// Вторая линия: писатель уже отсеял односторонние, но проверка здесь дешева,
+// а цена пропуска — неработающий актор до следующего полного снимка.
+func (e *Engine) applyBook(book market.Book) bool {
+	if !twoSided(book) {
+		return false
+	}
+	e.book = book
+	return true
+}
+
 func (e *Engine) onBook(ctx context.Context, ev events.BookUpdated) {
-	// Биржа иногда присылает снимок без одной из сторон. Затирать рабочий
-	// стакан таким сообщением нельзя: halfSpread станет нечитаемым, и актор
-	// перестанет котировать до следующего полного снимка.
-	if _, ok := ev.Book.BestBid(); !ok {
+	if !e.applyBook(ev.Book) {
 		return
 	}
-	if _, ok := ev.Book.BestAsk(); !ok {
-		return
-	}
-	e.book = ev.Book
 	// Учёт теневых заливов идёт до пересчёта: evaluate может снять ступень,
 	// и тогда касание, ради наблюдения которого прогон и делается, пропало бы.
 	e.countShadowFills(e.deps.Clock.Now())
@@ -845,6 +1083,23 @@ func (e *Engine) forget(id trading.ClOrdID) {
 
 func (e *Engine) onTick(ctx context.Context) {
 	now := e.deps.Clock.Now()
+
+	// Спад показателя виден только отсюда: enqueue поднимает его при наполнении,
+	// а вернуть к нулю после разбора некому, кроме такта.
+	e.deps.Metrics.InboxDepth(e.symbol, float64(len(e.inbox))/float64(cap(e.inbox)))
+
+	// Признак жизни ставится тактом актора, а не таймером наблюдателя.
+	//
+	// Отметка стоит первой строкой и безусловно: она утверждает «горутина дошла
+	// до сюда», а не «всё в порядке». Условная отметка означала бы, что молчащий
+	// по делу актор — вне часов базового рынка, на паузе защитного контура —
+	// объявляется мёртвым, и сторож снимает котировки, которых нет.
+	e.deps.Liveness.Beat(e.symbol, now)
+
+	// Раньше всего: потерянные события обесценивают всё, что решается ниже
+	// по этой функции, и решать по ним значило бы действовать по картине,
+	// про которую уже известно, что она неполная.
+	e.noteDroppedEvents(now)
 
 	// Устаревшая справочная цена означает торговлю вслепую.
 	if e.mark.IsPositive() {
