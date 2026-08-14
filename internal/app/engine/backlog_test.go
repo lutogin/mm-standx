@@ -165,7 +165,8 @@ func TestALateMarkDoesNotEraseTheFastSignal(t *testing.T) {
 	e.refStaleAfter = 3 * time.Second
 
 	tick := clk.now
-	// Предыдущий такт уже поставил опору на цену того момента.
+	// Предыдущий такт: он задаёт интервал, с которым сравнивается опоздание.
+	e.markAt = tick.Add(-1700 * time.Millisecond)
 	e.referenceAtMark = money.MustParsePrice("4276")
 
 	// Актор отстал на две секунды, рынок за это время ушёл на 25 bps вверх.
@@ -201,4 +202,34 @@ func TestAPromptMarkReanchorsAsBefore(t *testing.T) {
 
 	require.Equal(t, "4280", e.referenceAtMark.String(),
 		"a tick that arrived after the reference anchors on it, as it always did")
+}
+
+// Обычный джиттер разбора очереди не имеет права удерживать прежнюю опору.
+//
+// Первая версия сторожа сравнивала отметки напрямую и срабатывала на любом
+// опережении: на проде это дало 12% тактов с лагами 0–100 мс, кратными
+// интервалу между сообщениями Binance. В этом режиме удержание хуже якорения
+// в семнадцать раз — ошибка от лага в 0.1 с против ошибки за целый такт
+// в 1.7 с, — то есть сторож систематически завышал снос и толкал в лишние
+// аварийные съёмы.
+func TestOrdinaryJitterStillReanchors(t *testing.T) {
+	ctx := context.Background()
+	e, _, clk := dangerEngine(t)
+	e.refStaleAfter = 3 * time.Second
+
+	tick := clk.now
+	e.markAt = tick.Add(-1700 * time.Millisecond)
+	e.referenceAtMark = money.MustParsePrice("4276")
+
+	// Ориентир опередил такт на сотню миллисекунд — джиттер, а не затык.
+	clk.advance(100 * time.Millisecond)
+	e.reference = money.MustParsePrice("4276.5")
+	e.referenceAt = clk.now
+
+	e.onMarkPrice(ctx, events.MarkPriceUpdated{
+		Mark: market.MarkPrice{Symbol: e.symbol, Price: money.MustParsePrice("4276"), Received: tick},
+	})
+
+	require.Equal(t, "4276.5", e.referenceAtMark.String(),
+		"a lag far shorter than the tick must re-anchor, not hold a whole tick of stale drift")
 }

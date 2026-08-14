@@ -838,6 +838,12 @@ func (e *Engine) handle(ctx context.Context, ev events.Event) {
 
 // onMarkPrice — основной такт стратегии.
 func (e *Engine) onMarkPrice(ctx context.Context, ev events.MarkPriceUpdated) {
+	// Интервал между тактами снимается до перезаписи markAt: ниже он служит
+	// границей, за которой удерживать прежнюю опору выгоднее, чем якорить.
+	// Первый такт даёт огромный интервал и якорит безусловно — это верно,
+	// удерживать там нечего.
+	interval := ev.Mark.Received.Sub(e.markAt)
+
 	e.mark = ev.Mark.Price
 	e.markAt = ev.Mark.Received
 	e.vol.Observe(e.mark, e.markAt)
@@ -858,25 +864,42 @@ func (e *Engine) onMarkPrice(ctx context.Context, ev events.MarkPriceUpdated) {
 	// бесследно, и котировка, которую рынок уже прошёл, проходит как безопасная.
 	// Это не потеря точности, а потерянный аварийный съём, то есть залив.
 	//
-	// Поэтому опора обновляется только данными не новее самого такта. Не сошлось
-	// — остаётся прежняя: снос от неё завышен, а завышенный снос уводит в съём,
-	// цена которого ограничена сверху простоем. Цена исполнения не ограничена
-	// ничем (PLAN.md §14).
-	if !e.book.Received.After(ev.Mark.Received) {
+	// Прежняя опора удерживается не при любом опережении, а только при большом.
+	//
+	// Первая версия сравнивала отметки напрямую: опора новее такта хоть
+	// на наносекунду — не якорим. На проде это дало срабатывание на 12% тактов
+	// с лагами 0–100 мс, кратными интервалу между сообщениями Binance, то есть
+	// на обычном джиттере разбора очереди.
+	//
+	// Размен считается так. Заякорить данными, опередившими такт на L, — значит
+	// потерять из сноса движение за L. Оставить прежнюю опору — значит мерить
+	// снос от предыдущего такта, то есть завысить его на движение за целый
+	// интервал между тактами. При L в сотню миллисекунд и такте в 1.7 секунды
+	// удержание хуже в семнадцать раз, и все эти 12% уходили в завышенный снос,
+	// то есть в лишние аварийные съёмы.
+	//
+	// Поэтому граница — сам интервал между тактами: ровно там две ошибки
+	// сравниваются. Он измеряется, а не задаётся: канал price уже менял частоту
+	// (PLAN.md §13, такт «ровно 3000 мс» превратился в 1.7 с), и константа
+	// устарела бы молча.
+	lag := e.referenceAt.Sub(ev.Mark.Received)
+
+	if e.book.Received.Sub(ev.Mark.Received) <= interval {
 		if mid, ok := e.bookMid(); ok {
 			e.bookMidAtMark = mid
 		}
 	}
-	if !e.referenceAt.After(ev.Mark.Received) {
+	if lag <= interval {
 		e.referenceAtMark = e.reference
 	} else {
 		// Отставание актора наблюдаемо только отсюда: очередь к этому моменту
 		// уже разобрана, метрика глубины вернулась к нулю, и в логе не осталось
-		// бы ничего. Такт приходит раз в три секунды, поэтому строка редкая
-		// даже в затяжном эпизоде.
-		e.deps.Log.Warn("mark tick handled late, keeping the previous drift anchor",
+		// бы ничего. После сужения порога строка означает отставание длиннее
+		// такта — то есть настоящий затык, а не джиттер.
+		e.deps.Log.Warn("mark tick handled more than a tick late, keeping the previous drift anchor",
 			"symbol", e.symbol,
-			"lag", e.referenceAt.Sub(ev.Mark.Received).Truncate(time.Millisecond).String(),
+			"lag", lag.Truncate(time.Millisecond).String(),
+			"tick", interval.Truncate(time.Millisecond).String(),
 			"effect", "drift is measured from an earlier tick and reads high, never low")
 	}
 	e.evaluate(ctx, true)
