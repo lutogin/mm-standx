@@ -115,7 +115,7 @@ risk:
   # Практически размер упирается не сюда, а в маржинальный бюджет
   # equity × utilizationPct: при нынешнем счёте это около 757 USD маржи,
   # то есть примерно 28000 нотионала на обе стороны.
-  maxNotionalUsd: 40000
+  maxNotionalUsd: 340000
   # Не денежный лимит, а детектор рассогласования модели с рынком: стратегия
   # построена на том, что исполнения редки.
   #
@@ -204,7 +204,7 @@ defaults:
     # DEPRICATED
     rewardRateLowerBoundUsdPerMakerHour: 0
     breakEvenUsdPerMakerHour: 22
-    calibrationMaxAllocationUsd: 1000
+    calibrationMaxAllocationUsd: 8000
   quote:
     ladderLayers: 3 # лесенка компенсирует отсутствие amend в API
     # The reward band is only 10 bps wide and ends abruptly, so the width of
@@ -433,7 +433,7 @@ symbols:
     # Рабочий размер. Поднимается вместе с calibrationMaxAllocationUsd в блоке
     # defaults: экономический контроль сверяет аллокацию именно с ним и не даст
     # поднять её в одиночку.
-    allocationUsd: 1000
+    allocationUsd: 8000
     program:
       unitSize: "30"
       perSideCap: "60"
