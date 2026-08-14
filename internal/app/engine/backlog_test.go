@@ -148,3 +148,56 @@ func TestOneSidedSnapshotStillDoesNotOverwriteTheBook(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, before.String(), after.String(), "a half snapshot is discarded, not applied")
 }
+
+// Опоздавший такт mark не имеет права стереть быстрый сигнал.
+//
+// Отставший актор сперва применяет свежайший ориентир из ячейки и лишь потом
+// достаёт из очереди такт, снятый секунду назад. Заякорить такт на текущем
+// значении — значит объявить снос нулевым: оценка схлопывается к самому mark,
+// движение за время отставания исчезает, и котировка, которую рынок уже прошёл,
+// проходит как безопасная. До разделения входа это было невозможно — очередь
+// была общей, и к моменту такта в полях лежало последнее, что пришло до него.
+func TestALateMarkDoesNotEraseTheFastSignal(t *testing.T) {
+	ctx := context.Background()
+	e, _, clk := dangerEngine(t)
+
+	e.refStaleAfter = 3 * time.Second
+
+	tick := clk.now
+	// Предыдущий такт уже поставил опору на цену того момента.
+	e.referenceAtMark = money.MustParsePrice("4276")
+
+	// Актор отстал на две секунды, рынок за это время ушёл на 25 bps вверх.
+	clk.advance(2 * time.Second)
+	e.reference = money.MustParsePrice("4286.69")
+	e.referenceAt = clk.now
+
+	// И только теперь из очереди достаётся такт двухсекундной давности.
+	e.onMarkPrice(ctx, events.MarkPriceUpdated{
+		Mark: market.MarkPrice{Symbol: e.symbol, Price: money.MustParsePrice("4276"), Received: tick},
+	})
+
+	drift, ok := e.referenceDrift()
+	require.True(t, ok, "the reference is fresh, so drift must be available")
+	require.Greater(t, float64(drift), 20.0,
+		"the 25 bps the market moved while we were behind must survive the late tick")
+
+	require.NotEqual(t, "4286.69", e.referenceAtMark.String(),
+		"anchoring on data newer than the tick is what erases the signal")
+}
+
+// В обычном случае — актор не отстаёт — опора обновляется как прежде.
+func TestAPromptMarkReanchorsAsBefore(t *testing.T) {
+	ctx := context.Background()
+	e, _, clk := dangerEngine(t)
+
+	e.reference = money.MustParsePrice("4280")
+	e.referenceAt = clk.now.Add(-5 * time.Millisecond)
+
+	e.onMarkPrice(ctx, events.MarkPriceUpdated{
+		Mark: market.MarkPrice{Symbol: e.symbol, Price: money.MustParsePrice("4276"), Received: clk.now},
+	})
+
+	require.Equal(t, "4280", e.referenceAtMark.String(),
+		"a tick that arrived after the reference anchors on it, as it always did")
+}
