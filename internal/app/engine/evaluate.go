@@ -370,7 +370,7 @@ func (e *Engine) positionCause() ports.WithdrawCause {
 //
 // Остаток нужен не про запас: висящие ордера блокируют маржу, и при полной
 // утилизации закрывающий ордер после залива может не пройти.
-const utilizationPct = 70
+const utilizationPct = 95
 
 // classifier строит правило оценки ступени для стороны.
 //
