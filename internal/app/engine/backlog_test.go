@@ -91,7 +91,8 @@ func TestBookFloodIsHarmlessWhileTheQueueIsFull(t *testing.T) {
 	e.markAt = clk.now
 	e.onTick(ctx)
 
-	require.Zero(t, e.dropped.Load(), "market data never reaches the queue, so it never drops")
+	require.Zero(t, e.dropped.Load(),
+		"market data never reaches the queue, so no own-account event is ever lost to it")
 	require.True(t, e.resyncUntil.IsZero(), "and therefore never pauses quoting")
 	require.False(t, e.halted, "and never halts the actor")
 }

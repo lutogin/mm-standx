@@ -205,11 +205,14 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 	if news.defensive {
 		allocation *= e.newsGuard.DefensiveSizeMultiple
 	}
+	marginRate, marginSource := e.marginRate()
+	e.marginSource = marginSource
+
 	plan, err := sizing.Compute(sizing.Inputs{
 		Budget: sizing.Budget{
 			AllocationUSD:    decimal.NewFromFloat(allocation),
 			EquityUSD:        e.equity,
-			InitialMarginPct: e.cfg.SymbolRisk.InitialMarginPct,
+			InitialMarginPct: marginRate,
 			UtilizationPct:   utilizationPct,
 		},
 		Spec:      e.spec,
@@ -978,6 +981,7 @@ func (e *Engine) reportStatus(
 		// а не применение настройки, и расхождение иначе проявилось бы только
 		// недобранным начислением.
 		"margin_rate", e.observedMarginRate(),
+		"margin_source", e.marginSource,
 		"per_side", e.perSide,
 		"size_limit", e.sizeLimit,
 		"rungs", e.rungs,
@@ -1188,6 +1192,16 @@ func (e *Engine) noteFastSignal(now time.Time) {
 // Прочерк, пока в стакане пусто: делить на ноль нечего, а «0%» читалось бы
 // как «маржа не берётся».
 func (e *Engine) observedMarginRate() string {
+	rate, ok := e.measuredMarginRate()
+	if !ok {
+		return "-"
+	}
+	return fmt.Sprintf("%.3f%%", rate)
+}
+
+// measuredMarginRate — какую долю выставленного нотионала биржа держит
+// заблокированной прямо сейчас, в процентах. false, пока мерить нечего.
+func (e *Engine) measuredMarginRate() (float64, bool) {
 	notional := decimal.Zero
 	for _, ladder := range []*quotes.Ladder{e.bids, e.asks} {
 		for _, slot := range ladder.Slots {
@@ -1197,10 +1211,46 @@ func (e *Engine) observedMarginRate() string {
 		}
 	}
 	if !notional.IsPositive() || !e.locked.IsPositive() {
-		return "-"
+		return 0, false
 	}
+	// Позиция тоже держит маржу, и во время залива отношение уезжает вверх.
+	// Это безопасная сторона: завышенная доля даёт меньший размер.
 	rate, _ := e.locked.Div(notional).Float64()
-	return fmt.Sprintf("%.3f%%", rate*100)
+	return rate * 100, true
+}
+
+// marginRate — действующая доля блокировки, которой считается размер.
+//
+// Измеряется, а не задаётся. Настроенное число говорит, во что мы верим,
+// и стареет молча: 10.542% сняты 12 августа при плече 9.49, а после того как
+// плечо стало 40, биржа держит втрое с лишним меньше. Размер, посчитанный
+// по старому числу, вчетверо ниже того, что позволяет капитал, и увидеть это
+// можно было только по расхождению в сводке.
+//
+// Пол — физический: initial margin не может быть ниже 1/плечо, поэтому
+// испорченное измерение не способно раздуть размер сильнее, чем разрешает
+// само плечо. Это и делает измерение безопасным: ошибиться вниз оно может
+// ровно до этой границы и ни на процент дальше.
+//
+// Пока измерять нечего — при старте, до первых живых ордеров — берётся
+// настроенное значение. Оно консервативнее измеренного, и это верный перекос
+// для величины, от которой зависит размер.
+func (e *Engine) marginRate() (float64, string) {
+	configured := e.cfg.SymbolRisk.InitialMarginPct
+
+	floor := configured
+	if lev := e.cfg.SymbolRisk.Leverage; lev >= 1 {
+		floor = 100 / float64(lev)
+	}
+
+	measured, ok := e.measuredMarginRate()
+	if !ok {
+		return configured, "configured"
+	}
+	if measured < floor {
+		return floor, "measured, clamped to the leverage floor"
+	}
+	return measured, "measured"
 }
 
 // bookDepth возвращает нотионал в пределах полосы награды по каждой стороне.

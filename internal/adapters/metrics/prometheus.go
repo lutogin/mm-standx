@@ -51,6 +51,7 @@ type Prometheus struct {
 	withdrawals   *prometheus.CounterVec
 	inboxDepth    *prometheus.GaugeVec
 	eventsDropped *prometheus.CounterVec
+	coalesced     *prometheus.CounterVec
 }
 
 // New собирает и регистрирует коллекторы.
@@ -134,7 +135,10 @@ func New() *Prometheus {
 	p.inboxDepth = gauge("engine_inbox_ratio",
 		"Symbol actor queue occupancy, 0..1 of capacity", "symbol")
 	p.eventsDropped = counter("engine_events_dropped_total",
-		"Events lost to a full actor queue, by class", "symbol", "kind")
+		"Own-account events lost to a full actor queue; every increment is a defect", "symbol")
+	p.coalesced = counter("engine_market_coalesced_total",
+		"Market snapshots superseded before the actor read them; expected, measures actor lag",
+		"symbol")
 
 	p.registry.MustRegister(
 		p.uptime, p.makerHours, p.distance, p.liveQuotes, p.quoting,
@@ -142,7 +146,7 @@ func New() *Prometheus {
 		p.fills, p.shadowFills, p.flattenCost, p.realizedPnL, p.estimatedCost, p.fillsPerHour, p.killSwitch,
 		p.riskLimit,
 		p.ordersSent, p.ordersFailed, p.aloRejects, p.rateTokens, p.reconnects, p.withdrawals,
-		p.inboxDepth, p.eventsDropped,
+		p.inboxDepth, p.eventsDropped, p.coalesced,
 	)
 	return p
 }
@@ -248,8 +252,12 @@ func (p *Prometheus) InboxDepth(s market.Symbol, ratio float64) {
 	p.inboxDepth.WithLabelValues(s.String()).Set(ratio)
 }
 
-func (p *Prometheus) EventDropped(s market.Symbol, kind ports.DropKind) {
-	p.eventsDropped.WithLabelValues(s.String(), string(kind)).Inc()
+func (p *Prometheus) EventDropped(s market.Symbol) {
+	p.eventsDropped.WithLabelValues(s.String()).Inc()
+}
+
+func (p *Prometheus) MarketCoalesced(s market.Symbol) {
+	p.coalesced.WithLabelValues(s.String()).Inc()
 }
 
 func boolValue(b bool) float64 {

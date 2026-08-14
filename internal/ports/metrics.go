@@ -119,26 +119,27 @@ type Metrics interface {
 	// an alert written against an absolute number silently stops meaning
 	// anything the day that constant changes.
 	InboxDepth(s market.Symbol, ratio float64)
-	// EventDropped — an event the actor's queue had no room for.
+	// EventDropped — an own-account event the actor's queue had no room for.
 	//
-	// Non-zero means decisions are being made on an incomplete picture. Market
-	// snapshots are regenerable and their loss is survivable; anything else is
-	// not, which is why the cause is a label rather than one undifferentiated
-	// counter.
-	EventDropped(s market.Symbol, kind DropKind)
+	// Non-zero means decisions are being made on an incomplete picture: an
+	// order update, a fill or a position change never reached the actor, and
+	// only reconciliation can repair that. There is no benign reading of this
+	// counter, which is exactly why superseded market snapshots are NOT counted
+	// here — see MarketCoalesced.
+	EventDropped(s market.Symbol)
+	// MarketCoalesced — a book or reference snapshot superseded before the
+	// actor read it.
+	//
+	// Designed behaviour, not loss: the newer message carries the same quantity
+	// and the older one is worth nothing once it exists. Counted because the
+	// rate is the sharpest available measure of how far behind the actor runs —
+	// it climbs long before the queue does.
+	//
+	// Deliberately a separate series from EventDropped. Folding the two would
+	// put millions of healthy coalescing events next to a counter whose every
+	// increment is a defect, and a dashboard cannot tell them apart afterwards.
+	MarketCoalesced(s market.Symbol)
 }
-
-// DropKind — what class of event was lost to a full queue.
-type DropKind string
-
-const (
-	// DropMarket — стакан или внешний ориентир: следующее сообщение приносит
-	// ту же величину заново, потеря переживается.
-	DropMarket DropKind = "market"
-	// DropAccount — ордер, исполнение, позиция. Восстанавливается только
-	// сверкой, и до неё картина собственного стакана неверна.
-	DropAccount DropKind = "account"
-)
 
 // WithdrawCause — причина съёма котировок, приведённая к замкнутому множеству.
 //
@@ -239,7 +240,8 @@ func (NopMetrics) RateLimitTokens(float64)                           {}
 func (NopMetrics) StreamReconnect(string)                            {}
 func (NopMetrics) Withdrawal(market.Symbol, WithdrawCause)           {}
 func (NopMetrics) InboxDepth(market.Symbol, float64)                 {}
-func (NopMetrics) EventDropped(market.Symbol, DropKind)              {}
+func (NopMetrics) EventDropped(market.Symbol)                        {}
+func (NopMetrics) MarketCoalesced(market.Symbol)                     {}
 
 var _ Metrics = NopMetrics{}
 

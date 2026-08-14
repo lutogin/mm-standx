@@ -249,6 +249,11 @@ type Engine struct {
 	// и вывести его нельзя — только измерить.
 	sizeLimit string
 	perSide   money.Qty
+	// marginSource — чем получена доля блокировки, по которой посчитан размер:
+	// измерением или конфигурацией. Держится ради сводки: размер вчетверо
+	// меньше возможного выглядит совершенно нормально, если не видно, от какого
+	// числа он посчитан.
+	marginSource string
 	// rungs — сколько ступеней помещается в полосу прямо сейчас. Держится
 	// ради сводки: сужение лесенки меняет и геометрию, и размер, и по логу
 	// это должно быть видно без вывода из соседних чисел.
@@ -552,7 +557,7 @@ func (e *Engine) subscribe() {
 			// здесь, потому что это единственное место, где потеря видна,
 			// и лучшая мера того, насколько актор отстал.
 			if e.bookIn.Swap(&ev.Book) != nil {
-				e.deps.Metrics.EventDropped(e.symbol, ports.DropMarket)
+				e.deps.Metrics.MarketCoalesced(e.symbol)
 			}
 			e.notify()
 		}),
@@ -561,7 +566,7 @@ func (e *Engine) subscribe() {
 				return
 			}
 			if e.referenceIn.Swap(&ev.Reference) != nil {
-				e.deps.Metrics.EventDropped(e.symbol, ports.DropMarket)
+				e.deps.Metrics.MarketCoalesced(e.symbol)
 			}
 			e.notify()
 		}),
@@ -634,10 +639,10 @@ func (e *Engine) enqueue(ev events.Event) {
 		// чужая площадка разговорилась, было бы прямо противоположно смыслу.
 		switch ev.(type) {
 		case events.BookUpdated, events.ReferencePriceUpdated:
-			e.deps.Metrics.EventDropped(e.symbol, ports.DropMarket)
+			e.deps.Metrics.MarketCoalesced(e.symbol)
 			return
 		}
-		e.deps.Metrics.EventDropped(e.symbol, ports.DropAccount)
+		e.deps.Metrics.EventDropped(e.symbol)
 		// Потеря считается, а не обрабатывается здесь.
 		//
 		// Шина синхронна, поэтому enqueue выполняется на горутине публикующего:

@@ -65,16 +65,28 @@ func (c *Config) validateExposure() []error {
 		if !sym.Enabled {
 			continue
 		}
-		// Нотионал ограничен долей блокировки, а не плечом: плечо в ордере
-		// на неё не влияет (PLAN.md §12.5).
-		if rate := sym.SymbolRisk.InitialMarginPct; rate > 0 {
+		// Считается по худшему случаю, то есть по плечу счёта.
+		//
+		// Прежде здесь стоял initialMarginPct, и предел получался не тот:
+		// доля блокировки теперь измеряется у биржи, а не берётся из файла,
+		// и настроенное значение — лишь запасное на время до первых ордеров.
+		// Проверять предел по запасному значению значит проверять величину,
+		// которой торговля не пользуется. Ниже 1/плечо биржа не опустится
+		// физически, поэтому allocation × leverage — настоящий потолок того,
+		// что может оказаться в рынке.
+		rate := sym.SymbolRisk.InitialMarginPct
+		if lev := sym.SymbolRisk.Leverage; lev >= 1 && 100/float64(lev) < rate {
+			rate = 100 / float64(lev)
+		}
+		if rate > 0 {
 			total += sym.AllocationUSD / (rate / 100)
 		}
 	}
 	if c.Risk.MaxNotionalUSD > 0 && total > c.Risk.MaxNotionalUSD {
 		return []error{fmt.Errorf(
-			"enabled symbols allow up to %.0f USD of notional (allocation ÷ initialMarginPct) "+
-				"but risk.maxNotionalUsd is %.0f", total, c.Risk.MaxNotionalUSD)}
+			"enabled symbols allow up to %.0f USD of notional (allocation × leverage, "+
+				"the floor the exchange cannot go below) but risk.maxNotionalUsd is %.0f",
+			total, c.Risk.MaxNotionalUSD)}
 	}
 	return nil
 }
