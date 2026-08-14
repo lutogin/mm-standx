@@ -43,12 +43,12 @@ type Prometheus struct {
 	killSwitch    prometheus.Gauge
 	riskLimit     *prometheus.GaugeVec
 
-	ordersSent   *prometheus.CounterVec
-	ordersFailed *prometheus.CounterVec
-	aloRejects   *prometheus.CounterVec
-	rateTokens   prometheus.Gauge
-	reconnects   *prometheus.CounterVec
-	withdrawals  *prometheus.CounterVec
+	ordersSent    *prometheus.CounterVec
+	ordersFailed  *prometheus.CounterVec
+	aloRejects    *prometheus.CounterVec
+	rateTokens    prometheus.Gauge
+	reconnects    *prometheus.CounterVec
+	withdrawals   *prometheus.CounterVec
 	inboxDepth    *prometheus.GaugeVec
 	eventsDropped *prometheus.CounterVec
 }
