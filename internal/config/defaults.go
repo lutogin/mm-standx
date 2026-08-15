@@ -68,8 +68,12 @@ func defaults() *Config {
 			},
 		},
 		Risk: Risk{
-			MaxDailyLossUSD:      10,
-			MaxFillsPerHour:      6,
+			MaxDailyLossUSD: 10,
+			// Консервативнее боевого значения намеренно, как и остальной блок:
+			// умолчания не должны быть агрессивнее того, что явно прописано
+			// в файле.
+			UtilizationPct:  70,
+			MaxFillsPerHour: 6,
 			MarginMode:           trading.Isolated,
 			FlattenPolicy:        "immediate_market",
 			FlattenDebounce:      0,

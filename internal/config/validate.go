@@ -195,6 +195,13 @@ func (r Risk) validate() []error {
 	if r.MaxDailyLossUSD <= 0 {
 		errs = append(errs, errors.New("risk.maxDailyLossUsd must be positive"))
 	}
+	// 100 не запрещается на бумаге, но означает отсутствие резерва под
+	// закрывающий ордер после залива — оставлено как жёсткий верхний потолок,
+	// а не как рекомендация.
+	if r.UtilizationPct <= 0 || r.UtilizationPct > 100 {
+		errs = append(errs, fmt.Errorf(
+			"risk.utilizationPct (%.1f) must be within (0, 100]", r.UtilizationPct))
+	}
 	if r.MaxFillsPerHour <= 0 {
 		errs = append(errs, errors.New("risk.maxFillsPerHour must be positive"))
 	}

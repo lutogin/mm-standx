@@ -166,7 +166,16 @@ type UptimeTier struct {
 
 // Risk — общие для всех инструментов ограничения риска.
 type Risk struct {
-	MaxDailyLossUSD      float64            `koanf:"maxDailyLossUsd"`
+	MaxDailyLossUSD float64 `koanf:"maxDailyLossUsd"`
+	// UtilizationPct — доля equity, которую разрешено держать заблокированной
+	// под котировками.
+	//
+	// Остаток нужен не про запас: висящие ордера уже блокируют маржу, и при
+	// полной утилизации закрывающий ордер после залива может не пройти
+	// по нехватке средств. Прежде жило константой в коде актора — предел риска,
+	// который нельзя было ни увидеть в работающем процессе, ни поправить
+	// без пересборки образа, в отличие от каждого соседнего предела здесь.
+	UtilizationPct       float64            `koanf:"utilizationPct"`
 	MaxFillsPerHour      int                `koanf:"maxFillsPerHour"`
 	MarginMode           trading.MarginMode `koanf:"marginMode"`
 	FlattenPolicy        string             `koanf:"flattenPolicy"`

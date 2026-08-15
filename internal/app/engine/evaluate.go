@@ -203,7 +203,7 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 	// пропорциональны.
 	// Урезание выражено долей капитала, а не суммой: настроенной суммы больше
 	// нет, бюджет считается от баланса счёта (sizing.Budget).
-	utilization := float64(utilizationPct)
+	utilization := e.risk.UtilizationPct
 	if news.defensive {
 		utilization *= e.newsGuard.DefensiveSizeMultiple
 	}
@@ -366,12 +366,6 @@ func (e *Engine) positionCause() ports.WithdrawCause {
 	}
 	return ports.CausePositionOpen
 }
-
-// utilizationPct — доля свободных средств, которую разрешено занимать.
-//
-// Остаток нужен не про запас: висящие ордера блокируют маржу, и при полной
-// утилизации закрывающий ордер после залива может не пройти.
-const utilizationPct = 95
 
 // classifier строит правило оценки ступени для стороны.
 //

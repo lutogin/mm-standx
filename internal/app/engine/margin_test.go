@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"testing"
 
 	"github.com/shopspring/decimal"
@@ -176,4 +177,31 @@ func TestAnOpenPositionBlocksRemembering(t *testing.T) {
 	_, source := e.marginRate()
 	require.Equal(t, "measured, not yet clean", source,
 		"it is used for this pass and deliberately not carried forward")
+}
+
+// utilizationPct больше не константа кода, а поле конфига (internal/config.Risk):
+// прежде значение (менявшееся от 70 к 95 и затем к 85 без единого коммита,
+// отслеживаемого правкой файла) нельзя было ни увидеть в работающем процессе,
+// ни поправить без пересборки образа — в отличие от каждого соседнего предела
+// риска. Тест проверяет сквозной путь: смена risk.UtilizationPct меняет
+// действительно котируемый размер.
+func TestUtilizationFromConfigScalesTheQuotedSize(t *testing.T) {
+	ctx := context.Background()
+	e, gw, clk := dangerEngine(t)
+	e.handle(ctx, balanceEvent("10000", "10000", "0"))
+
+	e.risk.UtilizationPct = 50
+	e.evaluate(ctx, true)
+	require.NotEmpty(t, gw.placed)
+	half := gw.placed[0].Qty
+
+	gw.placed = nil
+	e.risk.UtilizationPct = 100
+	clk.advance(e.cfg.Quote.RequoteCooldown + e.cfg.Quote.MinRest)
+	primeVolatility(t, e, clk)
+	e.evaluate(ctx, true)
+	require.NotEmpty(t, gw.placed)
+
+	require.True(t, gw.placed[0].Qty.Gt(half),
+		"doubling the configured utilization must double the usable margin budget")
 }

@@ -59,6 +59,10 @@ func dangerEngine(t *testing.T) (*Engine, *recordingGateway, *testClock) {
 				OffHoursMultiplier:   1,
 			},
 			Health: config.Health{AckTimeout: 2 * time.Second},
+			// UtilizationPct переехала из константы в коде актора в конфиг
+			// риска: без явного значения здесь она была бы нулём, и бюджет
+			// маржи обнулялся бы для каждого теста пакета.
+			Risk: config.Risk{UtilizationPct: 70},
 			Config: config.Symbol{
 				SymbolRisk: config.SymbolRisk{Leverage: 4, InitialMarginPct: 25},
 				Quote: config.Quote{
