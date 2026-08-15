@@ -18,9 +18,16 @@ import (
 )
 
 // Budget — доступный инструменту капитал.
+//
+// Единственный источник — состояние счёта. Настроенной аллокации здесь больше
+// нет намеренно: счёт целиком отдан этой стратегии, и число в файле, которое
+// обязано следовать за балансом, всегда от него отстаёт. 15 августа так и было
+// — 5800 при балансе 11091, то есть половина денег простаивала, и увидеть это
+// можно было только по строке size_limit в сводке.
+//
+// Если инструментов когда-нибудь станет больше одного, аллокация вернётся —
+// но уже как доля, а не как сумма в долларах.
 type Budget struct {
-	// AllocationUSD — сколько средств выделено этому инструменту конфигурацией.
-	AllocationUSD decimal.Decimal
 	// EquityUSD — весь капитал счёта, включая уже заблокированное.
 	//
 	// Именно equity, а не available. Свободный остаток уже уменьшен тем, что
@@ -118,15 +125,10 @@ func Compute(in Inputs) (Plan, error) {
 	return Plan{Rungs: rungs, PerSide: total, Reason: reason}, nil
 }
 
-// usableCapital берёт меньшее из выделенного и разрешённой доли капитала.
+// usableCapital — разрешённая к блокировке доля капитала счёта.
 func usableCapital(b Budget) (decimal.Decimal, string) {
 	utilization := decimal.NewFromFloat(b.UtilizationPct / 100)
-	headroom := b.EquityUSD.Mul(utilization)
-
-	if b.AllocationUSD.IsPositive() && b.AllocationUSD.LessThan(headroom) {
-		return b.AllocationUSD, "limited by the configured allocation"
-	}
-	return headroom, "limited by the margin budget"
+	return b.EquityUSD.Mul(utilization), "limited by the margin budget"
 }
 
 // usefulCeiling возвращает размер стороны, сверх которого награда не растёт.

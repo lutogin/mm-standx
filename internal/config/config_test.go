@@ -18,17 +18,13 @@ import (
 // minimalConfig — валидная основа, поверх которой тесты добавляют отклонения.
 const minimalConfig = `
 risk:
-  # 70k выделенных средств при блокировке 10.542% несут 664k нотионала —
-  # общий лимит обязан их вмещать, иначе конфигурация отвергается на старте.
-  maxNotionalUsd: 700000
+  maxFillsPerHour: 6
 symbols:
   XAG-USD:
     enabled: true
-    allocationUsd: 40000
     program: { unitSize: "1500", perSideCap: "3000", maxMakerHoursPerHour: 2 }
   BTC-USD:
     enabled: true
-    allocationUsd: 30000
     program: { unitSize: "2", perSideCap: "20", maxMakerHoursPerHour: 10 }
     appetite:
       jumpMultiple: 3.0
@@ -49,7 +45,6 @@ func TestLoadAppliesDefaultsToSymbols(t *testing.T) {
 	silver := cfg.Symbols["XAG-USD"]
 	require.Equal(t, defaults().Defaults.Appetite.JumpMultiple, silver.Appetite.JumpMultiple)
 	require.Equal(t, defaults().Defaults.Quote.LadderLayers, silver.Quote.LadderLayers)
-	require.Equal(t, 40000.0, silver.AllocationUSD)
 
 	// Переопределение затрагивает только указанное поле, остальные наследуются.
 	btc := cfg.Symbols["BTC-USD"]
@@ -68,13 +63,12 @@ func TestOnlyImplementedFlattenPolicyIsAccepted(t *testing.T) {
 	require.ErrorContains(t, cfg.Validate(), "only \"immediate_market\" is implemented")
 }
 
-func liveEconomicConfig(allocation, rewardLowerBound float64) *Config {
+func liveEconomicConfig(rewardLowerBound float64) *Config {
 	cfg := defaults()
 	cfg.Runtime.Mode = ModeLive
 	cfg.Exchange.WalletPrivateKey = secret.New("test-only-key")
 	symbol := cfg.Defaults
 	symbol.Enabled = true
-	symbol.AllocationUSD = allocation
 	symbol.Economics.RewardRateLowerBoundUSDPerMakerHour = rewardLowerBound
 	symbol.Program = Program{UnitSize: "30", PerSideCap: "60", MaxMakerHoursPerHour: 2, OffHoursMultiplier: 1}
 	cfg.Symbols = map[string]Symbol{"XAU-USD": symbol}
@@ -94,30 +88,31 @@ func liveEconomicConfig(allocation, rewardLowerBound float64) *Config {
 // и в метриках. Проверяется в TestEconomicGateStopsQuotingInsteadOfTheProcess.
 func TestEconomicsDoesNotBlockStartup(t *testing.T) {
 	for _, rewardLowerBound := range []float64{0, 20, 30} {
-		cfg := liveEconomicConfig(1_000, rewardLowerBound)
+		cfg := liveEconomicConfig(rewardLowerBound)
 		require.NoError(t, cfg.Validate(),
 			"reward lower bound %.0f must not keep the process from starting", rewardLowerBound)
 	}
 }
 
-// Сами ворота при этом обязаны выносить прежний вердикт.
-func TestEconomicGateStillRejectsUnprovenScaling(t *testing.T) {
-	gate := func(allocation, rewardLowerBound float64) economics.Decision {
-		cfg := liveEconomicConfig(allocation, rewardLowerBound).Symbols["XAU-USD"]
+// Сами ворота при этом обязаны выносить вердикт по ставке, а не по размеру.
+func TestEconomicGateJudgesTheRateNotTheSize(t *testing.T) {
+	gate := func(rewardLowerBound, marketMultiplier float64) economics.Decision {
+		cfg := liveEconomicConfig(rewardLowerBound).Symbols["XAU-USD"]
 		return economics.Gate{
 			RewardRateLowerBoundUSDPerMakerHour: cfg.Economics.RewardRateLowerBoundUSDPerMakerHour,
 			BreakEvenUSDPerMakerHour:            cfg.Economics.BreakEvenUSDPerMakerHour,
-			CalibrationMaxAllocationUSD:         cfg.Economics.CalibrationMaxAllocationUSD,
-		}.Evaluate(cfg.AllocationUSD, 1, 1)
+		}.Evaluate(1, marketMultiplier)
 	}
 
-	require.Contains(t, gate(1_000, 0).Reason, "exceeds the 60.00 USD calibration cap")
-	require.False(t, gate(1_000, 0).Allowed)
+	// Ставка не измерена: полный час разрешён, урезанный — нет.
+	require.True(t, gate(0, 1).Allowed)
+	require.False(t, gate(0, 0.1).Allowed)
+	require.Contains(t, gate(0, 0.1).Reason, "reward rate is unknown")
 
-	require.Contains(t, gate(1_000, 20).Reason, "below the 22.00 USD/MH break-even")
-	require.False(t, gate(1_000, 20).Allowed)
+	require.Contains(t, gate(20, 1).Reason, "below the 22.00 USD/MH break-even")
+	require.False(t, gate(20, 1).Allowed)
 
-	require.True(t, gate(1_000, 30).Allowed)
+	require.True(t, gate(30, 1).Allowed)
 }
 
 func TestEnabledSymbols(t *testing.T) {
@@ -140,7 +135,6 @@ func TestUnknownKeyIsRejected(t *testing.T) {
 	_, err := Load(writeConfig(t, minimalConfig+`
   ETH-USD:
     enabled: true
-    allocationUsd: 1000
     quote:
       targetBpsTypo: 7.0
 `))
@@ -175,7 +169,6 @@ func TestLiveModeRequiresWalletKey(t *testing.T) {
 symbols:
   BTC-USD:
     enabled: true
-    allocationUsd: 1000
 `))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "STANDX_WALLET_PK")
@@ -187,7 +180,6 @@ func TestValidationRejectsMisorderedBounds(t *testing.T) {
 symbols:
   BTC-USD:
     enabled: true
-    allocationUsd: 1000
     program: { unitSize: "2", perSideCap: "20", maxMakerHoursPerHour: 10 }
     appetite:
       minBps: 9.0
@@ -204,7 +196,6 @@ func TestEnabledSymbolRequiresProgrammeParameters(t *testing.T) {
 symbols:
   BTC-USD:
     enabled: true
-    allocationUsd: 1000
 `))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "unitSize")
@@ -215,7 +206,6 @@ func TestValidationRejectsQuotesOutsideRewardBand(t *testing.T) {
 symbols:
   BTC-USD:
     enabled: true
-    allocationUsd: 1000
     program: { unitSize: "2", perSideCap: "20", maxMakerHoursPerHour: 10 }
     appetite:
       maxBps: 12.0
@@ -238,13 +228,16 @@ defaults:
 }
 
 func TestValidationRejectsEnabledSymbolWithoutAllocation(t *testing.T) {
-	_, err := Load(writeConfig(t, `
+	// Включённому символу больше не нужна аллокация: размер берётся из баланса
+	// счёта, а не из файла. Раньше её отсутствие роняло загрузку.
+	cfg, err := Load(writeConfig(t, `
 symbols:
   BTC-USD:
     enabled: true
+    program: { unitSize: "2", perSideCap: "20", maxMakerHoursPerHour: 10 }
 `))
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "allocationUsd")
+	require.NoError(t, err)
+	require.True(t, cfg.Symbols["BTC-USD"].Enabled)
 }
 
 func TestValidationRejectsRateLimitAboveExchangeCeiling(t *testing.T) {
@@ -269,7 +262,7 @@ symbols:
     enabled: true
 `))
 	require.Error(t, err)
-	for _, want := range []string{"logLevel", "logFormat", "sustainedRps", "allocationUsd"} {
+	for _, want := range []string{"logLevel", "logFormat", "sustainedRps"} {
 		require.Contains(t, err.Error(), want)
 	}
 }
@@ -279,24 +272,22 @@ func TestMissingFileIsReported(t *testing.T) {
 	require.Error(t, err)
 }
 
-// The aggregate notional limit is a config-time invariant, not a runtime one:
-// allocations are static, so the ceiling is known before the first order. There
-// is no point discovering a known-in-advance mistake once money is in the market.
-func TestAggregateNotionalMustFitTheRiskLimit(t *testing.T) {
-	_, err := Load(writeConfig(t, `
-risk:
-  maxNotionalUsd: 1000
+// Экспозиция больше не выводится из конфигурации.
+//
+// Прежде здесь стояла стартовая проверка суммы allocationUsd × leverage против
+// risk.maxNotionalUsd. Обе величины сняты: размер считается от equity счёта,
+// то есть экспозиция ограничена самим балансом и потолком программы наград —
+// величинами рантайма, которых в файле нет. Проверять их на старте нечем,
+// и притворяться, что можно, значит держать защиту, которая ничего не защищает.
+func TestEnabledSymbolNeedsNoConfiguredExposure(t *testing.T) {
+	cfg, err := Load(writeConfig(t, `
 symbols:
   BTC-USD:
     enabled: true
-    allocationUsd: 500
     program: { unitSize: "2", perSideCap: "20", maxMakerHoursPerHour: 10 }
 `))
-	require.ErrorContains(t, err, "risk.maxNotionalUsd")
-	// 500 USD при блокировке 10.542% несут 4743 нотионала, а не 2000, которые
-	// давало прежнее умножение на плечо: предел считается от того, что биржа
-	// действительно резервирует.
-	require.ErrorContains(t, err, "4743 USD of notional")
+	require.NoError(t, err)
+	require.True(t, cfg.Symbols["BTC-USD"].Enabled)
 }
 
 // Without persisted state the daily loss counter resets on every restart, and
@@ -312,7 +303,6 @@ runtime:
 symbols:
   BTC-USD:
     enabled: true
-    allocationUsd: 60
     program: { unitSize: "2", perSideCap: "20", maxMakerHoursPerHour: 10 }
 `
 	_, err := Load(writeConfig(t, body))
@@ -518,7 +508,7 @@ func TestRetiredEnvOverridesAreInertAndNamed(t *testing.T) {
 	t.Setenv("MMSTANDX_RISK_MAXDAILYLOSSUSD", "42")
 
 	body := strings.Replace(minimalConfig,
-		"maxNotionalUsd: 700000", "maxNotionalUsd: 700000\n  maxDailyLossUsd: 7", 1)
+		"maxFillsPerHour: 6", "maxFillsPerHour: 6\n  maxDailyLossUsd: 7", 1)
 	require.Contains(t, body, "maxDailyLossUsd", "the substitution must have taken")
 
 	cfg, err := Load(writeConfig(t, body))
@@ -534,7 +524,6 @@ func TestUnknownFileKeyIsFatal(t *testing.T) {
 	_, err := Load(writeConfig(t, minimalConfig+`
   ETH-USD:
     enabled: true
-    allocationUsd: 1000
     appetite:
       minBpsTypo: 7.0
 `))

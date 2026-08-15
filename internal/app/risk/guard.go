@@ -27,10 +27,6 @@ const stateName = "risk-ledger"
 // Guard ведёт учёт и останавливает торговлю при достижении лимита.
 type Guard struct {
 	limits domain.Limits
-	// notionalLimit is checked at startup rather than continuously, so the
-	// ledger has no use for it. It is carried here to be reported: a limit
-	// nobody can read off the running process is a limit nobody can trust.
-	notionalLimit     float64
 	fillBurstLimit    int
 	fillBurstWindow   time.Duration
 	fillBurstCooldown time.Duration
@@ -84,7 +80,6 @@ func New(
 	}
 	return &Guard{
 		limits:            limits,
-		notionalLimit:     cfg.MaxNotionalUSD,
 		fillBurstLimit:    cfg.FillBurstLimit,
 		fillBurstWindow:   cfg.FillBurstWindow,
 		fillBurstCooldown: cfg.FillBurstCooldown,
@@ -111,7 +106,6 @@ func (g *Guard) Start(context.Context) error {
 	g.log.Info("risk limits in force",
 		"max_daily_loss_usd", g.limits.MaxDailyLossUSD,
 		"max_fills_per_hour", g.limits.MaxFillsPerHour,
-		"max_notional_usd", g.notionalLimit,
 		"fill_burst_limit", g.fillBurstLimit,
 		"fill_burst_window", g.fillBurstWindow,
 		"fill_burst_cooldown", g.fillBurstCooldown,
@@ -124,7 +118,6 @@ func (g *Guard) Start(context.Context) error {
 	// available from the running process, not reconstructed from the image.
 	g.metrics.RiskLimit("max_daily_loss_usd", g.limits.MaxDailyLossUSD)
 	g.metrics.RiskLimit("max_fills_per_hour", float64(g.limits.MaxFillsPerHour))
-	g.metrics.RiskLimit("max_notional_usd", g.notionalLimit)
 	g.metrics.RiskLimit("fill_burst_limit", float64(g.fillBurstLimit))
 	g.metrics.RiskLimit("fill_burst_window_seconds", g.fillBurstWindow.Seconds())
 	g.metrics.RiskLimit("fill_burst_cooldown_seconds", g.fillBurstCooldown.Seconds())

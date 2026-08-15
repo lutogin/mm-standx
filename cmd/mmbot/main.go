@@ -53,13 +53,13 @@ func main() {
 // быть видна и когда логи в JSON, и когда их перехватывает docker, и когда
 // человек запускает бот вручную и смотрит в терминал.
 func announce(cfg *config.Config) {
+	// Размера здесь больше нет и быть не может: он считается от баланса счёта,
+	// а баланс на момент печати ещё не запрошен. Показываем плечо — оно и
+	// задаёт, во сколько раз баланс превратится в нотионал.
 	symbols := make([]string, 0, len(cfg.Symbols))
-	total := 0.0
 	for name, sym := range cfg.Symbols {
 		if sym.Enabled {
-			symbols = append(symbols, fmt.Sprintf("%s (%.0f USD × %d)",
-				name, sym.AllocationUSD, sym.SymbolRisk.Leverage))
-			total += sym.AllocationUSD * float64(sym.SymbolRisk.Leverage)
+			symbols = append(symbols, fmt.Sprintf("%s (×%d)", name, sym.SymbolRisk.Leverage))
 		}
 	}
 	sort.Strings(symbols)
@@ -73,11 +73,11 @@ func announce(cfg *config.Config) {
 ┌─────────────────────────────────────────────────────────────
 │ %s
 │ symbols:      %s
-│ notional:     up to %.0f USD
+│ sizing:       from account equity, no configured allocation
 │ risk limits:  halt at %.0f USD daily loss, %d fills per hour
 └─────────────────────────────────────────────────────────────
 
-`, banner, strings.Join(symbols, ", "), total,
+`, banner, strings.Join(symbols, ", "),
 		cfg.Risk.MaxDailyLossUSD, cfg.Risk.MaxFillsPerHour)
 }
 

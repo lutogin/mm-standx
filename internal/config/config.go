@@ -167,7 +167,6 @@ type UptimeTier struct {
 // Risk — общие для всех инструментов ограничения риска.
 type Risk struct {
 	MaxDailyLossUSD      float64            `koanf:"maxDailyLossUsd"`
-	MaxNotionalUSD       float64            `koanf:"maxNotionalUsd"`
 	MaxFillsPerHour      int                `koanf:"maxFillsPerHour"`
 	MarginMode           trading.MarginMode `koanf:"marginMode"`
 	FlattenPolicy        string             `koanf:"flattenPolicy"`
@@ -266,7 +265,6 @@ type News struct {
 // Symbol — настройки котирования одного инструмента.
 type Symbol struct {
 	Enabled       bool       `koanf:"enabled"`
-	AllocationUSD float64    `koanf:"allocationUsd"`
 	Economics     Economics  `koanf:"economics"`
 	Quote         Quote      `koanf:"quote"`
 	Appetite      Appetite   `koanf:"appetite"`
@@ -335,7 +333,6 @@ func ReferenceProviders() []string {
 type Economics struct {
 	RewardRateLowerBoundUSDPerMakerHour float64 `koanf:"rewardRateLowerBoundUsdPerMakerHour"`
 	BreakEvenUSDPerMakerHour            float64 `koanf:"breakEvenUsdPerMakerHour"`
-	CalibrationMaxAllocationUSD         float64 `koanf:"calibrationMaxAllocationUsd"`
 }
 
 // Quote — геометрия лесенки и темп перестановки.

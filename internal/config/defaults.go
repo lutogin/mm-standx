@@ -69,7 +69,6 @@ func defaults() *Config {
 		},
 		Risk: Risk{
 			MaxDailyLossUSD:      10,
-			MaxNotionalUSD:       120_000,
 			MaxFillsPerHour:      6,
 			MarginMode:           trading.Isolated,
 			FlattenPolicy:        "immediate_market",
@@ -134,11 +133,9 @@ func defaults() *Config {
 		},
 		Defaults: Symbol{
 			Enabled:       false,
-			AllocationUSD: 0,
 			Economics: Economics{
 				RewardRateLowerBoundUSDPerMakerHour: 0,
 				BreakEvenUSDPerMakerHour:            22,
-				CalibrationMaxAllocationUSD:         60,
 			},
 			Quote: Quote{
 				LadderLayers:    3,

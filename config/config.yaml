@@ -107,27 +107,17 @@ risk:
   # волатильности значит потерять сутки начисления вместо того, чтобы
   # предотвратить убыток.
   maxDailyLossUsd: 60
-  # Проверяется на старте: сумма allocationUsd × leverage по включённым
-  # инструментам не должна превышать этот потолок.
+  # Потолка нотионала здесь больше нет, и это не упущение.
   #
-  # Держится вплотную к действующему размеру, а не с запасом на вырост: потолок
-  # в 120000 при аллокации 1000 не отвергал вообще ничего и проверял только то,
-  # что число положительное.
+  # Он проверялся на старте как allocationUsd × leverage, то есть выводился
+  # из настроенной суммы. Суммы больше нет: бюджет считается от equity счёта
+  # (sizing.Budget), а значит экспозиция ограничена самим балансом и потолком
+  # программы наград (perSideCap) — обе величины известны в рантайме и ни одна
+  # не задаётся здесь. Статическая проверка от снятого числа проверяла бы
+  # величину, которой торговля не пользуется.
   #
-  # 340000 = allocationUsd 8000 × leverage 40 с небольшим запасом, то есть
-  # ровно тот нотионал, который счёт способен вынести физически. Прежние 10000
-  # соответствовали доле блокировки 10.542% — числу, снятому при плече 9.49
-  # и переставшему быть верным в тот момент, когда плечо стало 40. Доля теперь
-  # измеряется у биржи (2.667% на живом счёте), и предел обязан считаться
-  # по тому, ниже чего биржа опуститься не может, а не по стареющей записи
-  # в файле.
-  #
-  # Практически размер упирается не сюда и даже не в аллокацию, а в маржинальный
-  # бюджет equity × utilizationPct: при счёте 11091 и utilizationPct 70 это
-  # 7764 USD маржи, то есть около 291000 нотионала на обе стороны и 33 XAU
-  # на сторону. Аллокация 8000 стоит чуть выше этого бюджета намеренно —
-  # так размер следует за балансом, а не за числом в файле.
-  maxNotionalUsd: 340000
+  # Ограничением на деньги остаётся maxDailyLossUsd выше: он меряет результат,
+  # а не размер, и потому не устаревает при смене баланса.
   # Не денежный лимит, а детектор рассогласования модели с рынком: стратегия
   # построена на том, что исполнения редки.
   #
@@ -208,15 +198,27 @@ news:
 
 defaults:
   enabled: false
-  allocationUsd: 0
   economics:
-    # Until the daily pool is observed, only the small calibration allocation
-    # may go live. After enough days, set the conservative lower bound here;
-    # scaling is blocked unless it covers the measured 22 USD/MH fill cost.
-    # DEPRICATED
+    # Не устарело, вопреки прежней пометке: этими двумя числами шлюз решает,
+    # окупается ли присутствие вообще, и они единственное, что осталось
+    # от контроля размера.
+    #
+    # Ноль означает «ставка пула ещё не измерена». В этом режиме шлюз не режет
+    # размер — награда и стоимость залива линейны по нотионалу, поэтому их
+    # отношение от размера не зависит и резать нечего. Он запрещает другое:
+    # котировать в часы с пониженным множителем, где начисление режется,
+    # а риск исполнения остаётся прежним.
+    #
+    # Поставить сюда измеренную консервативную нижнюю границу — значит выйти
+    # из этого режима и разрешить работу в неполные тиры. Измерения на 14
+    # августа: ставка около 0.86 USD за Maker Hour при стоимости 0.21.
     rewardRateLowerBoundUsdPerMakerHour: 0
+    # 22 — модельная оценка стоимости Maker Hour, полученная до боевых прогонов
+    # в предположении, что заливают ступень целиком. Наблюдения этого не
+    # подтверждают: 14 августа Maker Hour обошёлся в 0.21 USD. Число оставлено
+    # как есть намеренно — менять порог окупаемости по одному дню наблюдений
+    # значит заменить одну неизмеренную величину другой.
     breakEvenUsdPerMakerHour: 22
-    calibrationMaxAllocationUsd: 5800
   quote:
     ladderLayers: 3 # лесенка компенсирует отсутствие amend в API
     # The reward band is only 10 bps wide and ends abruptly, so the width of
@@ -442,25 +444,34 @@ symbols:
   # с 31 USD за Maker Hour. См. docs/ab-appetite-2026-08-05.md.
   XAU-USD:
     enabled: true
-    # Рабочий размер. Поднимается вместе с calibrationMaxAllocationUsd в блоке
-    # defaults: экономический контроль сверяет аллокацию именно с ним и не даст
-    # поднять её в одиночку.
-    allocationUsd: 5800
     program:
       unitSize: "30"
       perSideCap: "60"
       maxMakerHoursPerHour: 2
       # The reference market is shut over the weekend: the exchange scales
       # the hour's accrual by 0.1 while the fill risk is unchanged, so the
-      # break-even price of a Maker Hour rises tenfold. The window is
-      # deliberately wider than the venue's real hours (COMEX closes Fri
-      # 21:00 UTC and reopens Sun 22:00): erring towards "closed" costs idle
-      # time, erring the other way costs money. Narrow it once the first
-      # actual accrual has been reconciled.
+      # break-even price of a Maker Hour rises tenfold.
+      #
+      # Narrowed 15 August to the venue's published session, as the comment that
+      # stood here instructed once accrual had been reconciled. StandX states it
+      # as "Sunday to Friday, 18:00 to 17:00 next day" in US Eastern; August is
+      # UTC-4, so the session runs Sun 22:00 UTC to Fri 21:00 UTC. The previous
+      # window gave away an hour every Friday and two every Sunday — three hours
+      # a week of full-rate session, about 1.9 Maker Hours at the rate measured
+      # on 14 August.
+      #
+      # Times are UTC and evaluated as UTC whatever the host clock says
+      # (reward.weekMinuteOf converts explicitly); the server runs Etc/UTC.
+      #
+      # NOT COVERED HERE: the venue also halts daily from 17:00 to 18:00 ET,
+      # that is 21:00-22:00 UTC, Monday through Thursday. reward.Schedule holds
+      # one weekly window and cannot express it, so for four hours a week the
+      # bot still quotes at full fill risk while the hour accrues at a tenth.
+      # Closing that needs a code change, not a value here.
       offHoursMultiplier: 0.1
       offHours:
-        from: "Fri 20:00"
-        to: "Mon 00:00"
+        from: "Fri 21:00"
+        to: "Sun 22:00"
         # The exchange publishes no machine-readable holiday calendar, so this
         # list is maintained by hand. Empty is not a claim that there are none.
         holidays: []
@@ -482,7 +493,6 @@ symbols:
   # награды съедена волатильностью — проигрывает при любом $/MH.
   BTC-USD:
     enabled: false
-    allocationUsd: 60
     program: { unitSize: "2", perSideCap: "20", maxMakerHoursPerHour: 10 }
     reference: { enabled: true, provider: binance_futures, symbol: BTCUSDT }
 
@@ -519,8 +529,8 @@ symbols:
       # actual accrual has been reconciled.
       offHoursMultiplier: 0.1
       offHours:
-        from: "Fri 20:00"
-        to: "Mon 00:00"
+        from: "Fri 21:00"
+        to: "Sun 22:00"
         # The exchange publishes no machine-readable holiday calendar, so this
         # list is maintained by hand. Empty is not a claim that there are none.
         holidays: []
@@ -540,8 +550,8 @@ symbols:
       # actual accrual has been reconciled.
       offHoursMultiplier: 0.1
       offHours:
-        from: "Fri 20:00"
-        to: "Mon 00:00"
+        from: "Fri 21:00"
+        to: "Sun 22:00"
         # The exchange publishes no machine-readable holiday calendar, so this
         # list is maintained by hand. Empty is not a claim that there are none.
         holidays: []
@@ -567,9 +577,16 @@ symbols:
       # time, erring the other way costs money. Narrow it once the first
       # actual accrual has been reconciled.
       offHoursMultiplier: 0.1
+      # ВНИМАНИЕ: окно ниже описывает сессию металлов, а не биржевых акций.
+      # StandX объявляет для этого инструмента "US equity session" — 09:30-16:00
+      # ET, то есть 13:30-20:00 UTC по будням. Недельное окно такого не
+      # выражает: reward.Schedule хранит один интервал в неделю. Включить
+      # инструмент с этим окном значит котировать около семнадцати часов
+      # в сутки при начислении в одну десятую и полном риске залива.
+      # Перед включением нужна суточная сессия в Schedule.
       offHours:
-        from: "Fri 20:00"
-        to: "Mon 00:00"
+        from: "Fri 21:00"
+        to: "Sun 22:00"
         # The exchange publishes no machine-readable holiday calendar, so this
         # list is maintained by hand. Empty is not a claim that there are none.
         holidays: []
@@ -587,9 +604,16 @@ symbols:
       # time, erring the other way costs money. Narrow it once the first
       # actual accrual has been reconciled.
       offHoursMultiplier: 0.1
+      # ВНИМАНИЕ: окно ниже описывает сессию металлов, а не биржевых акций.
+      # StandX объявляет для этого инструмента "US equity session" — 09:30-16:00
+      # ET, то есть 13:30-20:00 UTC по будням. Недельное окно такого не
+      # выражает: reward.Schedule хранит один интервал в неделю. Включить
+      # инструмент с этим окном значит котировать около семнадцати часов
+      # в сутки при начислении в одну десятую и полном риске залива.
+      # Перед включением нужна суточная сессия в Schedule.
       offHours:
-        from: "Fri 20:00"
-        to: "Mon 00:00"
+        from: "Fri 21:00"
+        to: "Sun 22:00"
         # The exchange publishes no machine-readable holiday calendar, so this
         # list is maintained by hand. Empty is not a claim that there are none.
         holidays: []
@@ -607,9 +631,16 @@ symbols:
       # time, erring the other way costs money. Narrow it once the first
       # actual accrual has been reconciled.
       offHoursMultiplier: 0.1
+      # ВНИМАНИЕ: окно ниже описывает сессию металлов, а не биржевых акций.
+      # StandX объявляет для этого инструмента "US equity session" — 09:30-16:00
+      # ET, то есть 13:30-20:00 UTC по будням. Недельное окно такого не
+      # выражает: reward.Schedule хранит один интервал в неделю. Включить
+      # инструмент с этим окном значит котировать около семнадцати часов
+      # в сутки при начислении в одну десятую и полном риске залива.
+      # Перед включением нужна суточная сессия в Schedule.
       offHours:
-        from: "Fri 20:00"
-        to: "Mon 00:00"
+        from: "Fri 21:00"
+        to: "Sun 22:00"
         # The exchange publishes no machine-readable holiday calendar, so this
         # list is maintained by hand. Empty is not a claim that there are none.
         holidays: []

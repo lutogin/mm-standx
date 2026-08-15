@@ -34,9 +34,6 @@ func newsEngine(t *testing.T, release time.Time) (*Engine, *recordingGateway, *t
 	t.Helper()
 	e, gw, clk := dangerEngine(t)
 	e.available, e.equity = decimal.NewFromInt(1000), decimal.NewFromInt(1000)
-	// Аллокация обязана быть связывающим ограничением, иначе её урезание
-	// в защитной позе ничего не меняет и тест проверяет пустоту.
-	e.cfg.AllocationUSD = 60
 	// Настоящая политика присутствия вместо нулевой: с порогами по умолчанию
 	// час немедленно оказывается «взятым», и путь бюджета простоя недостижим.
 	e.hour = uptime.New(e.program, uptime.Policy{

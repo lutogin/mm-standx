@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/nd/mm-standx/internal/domain/market"
+	"github.com/nd/mm-standx/internal/domain/money"
 	"github.com/nd/mm-standx/internal/domain/quotes"
 )
 
@@ -123,4 +124,56 @@ func TestBeforeTheFirstMeasurementTheConfiguredValueIsUsed(t *testing.T) {
 	rate, source := e.marginRate()
 	require.Equal(t, 10.542, rate)
 	require.Equal(t, "configured", source)
+}
+
+// Измерение в середине съёма запоминать нельзя.
+//
+// 15 августа уход на выходные снял котировки, и последнее измерение снялось
+// ровно тогда, когда ордера уже отменялись, а locked ещё держался: 9.572%
+// вместо 2.667%. С этим числом бот встретил бы понедельник и выставил бы втрое
+// меньше нужного, выправившись только со второго цикла.
+func TestAMeasurementTakenMidWithdrawalIsNotRemembered(t *testing.T) {
+	e, _, clk := dangerEngine(t)
+	e.cfg.SymbolRisk.Leverage = 40
+	e.cfg.SymbolRisk.InitialMarginPct = 10.542
+
+	// Сперва чистая картина: обе стороны стоят, позиция плоская.
+	liveRung(e, market.Buy, "bid-1", "4000", clk.now)
+	liveRung(e, market.Sell, "ask-1", "4000", clk.now)
+	e.locked = decimal.NewFromFloat(1.7069)
+
+	rate, _ := e.marginRate()
+	require.InDelta(t, 2.667, rate, 0.01)
+
+	// Теперь съём: одна сторона уже снимается, locked ещё прежний.
+	for i := range e.asks.Slots {
+		if e.asks.Slots[i].Phase == quotes.Live {
+			e.asks.Slots[i].Phase = quotes.Cancelling
+		}
+	}
+
+	require.False(t, e.cleanMeasurement(), "a side in flight is not a measurable picture")
+
+	rate, source := e.marginRate()
+	require.InDelta(t, 2.667, rate, 0.01,
+		"the remembered clean rate must survive the withdrawal, not be replaced by it")
+	require.Equal(t, "measured", source)
+}
+
+// Открытая позиция тоже держит маржу и попадает в locked мимо лесенки.
+func TestAnOpenPositionBlocksRemembering(t *testing.T) {
+	e, _, clk := dangerEngine(t)
+	e.cfg.SymbolRisk.Leverage = 40
+	e.cfg.SymbolRisk.InitialMarginPct = 10.542
+
+	liveRung(e, market.Buy, "bid-1", "4000", clk.now)
+	liveRung(e, market.Sell, "ask-1", "4000", clk.now)
+	e.locked = decimal.NewFromFloat(1.7069)
+	e.position = money.MustParseQty("0.5")
+
+	require.False(t, e.cleanMeasurement())
+
+	_, source := e.marginRate()
+	require.Equal(t, "measured, not yet clean", source,
+		"it is used for this pass and deliberately not carried forward")
 }

@@ -147,7 +147,7 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 	}
 
 	if e.live && e.economics.BreakEvenUSDPerMakerHour > 0 {
-		decision := e.economics.Evaluate(e.cfg.AllocationUSD, hour.TierMultiplier, hour.Multiplier)
+		decision := e.economics.Evaluate(hour.TierMultiplier, hour.Multiplier)
 		if !decision.Allowed {
 			e.reportBlocked(now, conditions, estimate, decision.Reason, e.geometry(appetite, conditions))
 			e.withdraw(ctx, ports.CauseEconomics, decision.Reason)
@@ -201,19 +201,20 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 	// замеры попадают только в верхний перцентиль, который защитная поза
 	// и так отдала, уйдя к краю полосы. Потери же от исполнения размеру прямо
 	// пропорциональны.
-	allocation := e.cfg.AllocationUSD
+	// Урезание выражено долей капитала, а не суммой: настроенной суммы больше
+	// нет, бюджет считается от баланса счёта (sizing.Budget).
+	utilization := float64(utilizationPct)
 	if news.defensive {
-		allocation *= e.newsGuard.DefensiveSizeMultiple
+		utilization *= e.newsGuard.DefensiveSizeMultiple
 	}
 	marginRate, marginSource := e.marginRate()
 	e.marginSource = marginSource
 
 	plan, err := sizing.Compute(sizing.Inputs{
 		Budget: sizing.Budget{
-			AllocationUSD:    decimal.NewFromFloat(allocation),
 			EquityUSD:        e.equity,
 			InitialMarginPct: marginRate,
-			UtilizationPct:   utilizationPct,
+			UtilizationPct:   utilization,
 		},
 		Spec:      e.spec,
 		Program:   e.program,
@@ -1207,6 +1208,9 @@ func (e *Engine) observedMarginRate() string {
 
 // measuredMarginRate — какую долю выставленного нотионала биржа держит
 // заблокированной прямо сейчас, в процентах. false, пока мерить нечего.
+//
+// Второй результат отвечает «есть ли что показать», а не «можно ли этому
+// верить». Пригодность к запоминанию решает cleanMeasurement.
 func (e *Engine) measuredMarginRate() (float64, bool) {
 	notional := decimal.Zero
 	for _, ladder := range []*quotes.Ladder{e.bids, e.asks} {
@@ -1219,10 +1223,49 @@ func (e *Engine) measuredMarginRate() (float64, bool) {
 	if !notional.IsPositive() || !e.locked.IsPositive() {
 		return 0, false
 	}
-	// Позиция тоже держит маржу, и во время залива отношение уезжает вверх.
-	// Это безопасная сторона: завышенная доля даёт меньший размер.
 	rate, _ := e.locked.Div(notional).Float64()
 	return rate * 100, true
+}
+
+// cleanMeasurement сообщает, что отношение locked к нотионалу сейчас означает
+// именно долю блокировки, а не переходное состояние.
+//
+// Числитель и знаменатель приходят из разных мест: locked — от биржи, нотионал —
+// из нашей лесенки. Совпадают они не всегда, и каждое расхождение искажает
+// отношение:
+//
+//   - ступень в полёте (Placing, Cancelling) — биржа маржу уже держит или ещё
+//     держит, а мы её нотионал не считаем: доля завышается;
+//   - открытая позиция — под неё тоже держится маржа, и она попадает в locked
+//     мимо всякой лесенки: доля завышается;
+//   - неотправленные снятия — ордера считаются нашими, но уже обречены.
+//
+// Мгновенное значение от этого страдает несильно и всегда в безопасную сторону.
+// Опасно другое: запомнить такое значение и считать по нему размер потом, когда
+// картина уже чистая. 15 августа так и вышло — уход на выходные снял котировки,
+// последнее измерение снялось в середине съёма и дало 9.572% вместо 2.667%,
+// и с ним бот встретил бы понедельник, выставив втрое меньше нужного.
+func (e *Engine) cleanMeasurement() bool {
+	if !e.position.IsZero() || len(e.pendingWithdraw) > 0 {
+		return false
+	}
+	for _, ladder := range []*quotes.Ladder{e.bids, e.asks} {
+		live := false
+		for _, slot := range ladder.Slots {
+			if slot.Phase.InFlight() {
+				return false
+			}
+			if slot.Phase == quotes.Live {
+				live = true
+			}
+		}
+		// Обе стороны обязаны стоять: односторонняя лесенка означает, что мы
+		// в середине перестановки, и знаменатель неполон.
+		if !live {
+			return false
+		}
+	}
+	return true
 }
 
 // marginRate — действующая доля блокировки, которой считается размер.
@@ -1262,15 +1305,30 @@ func (e *Engine) marginRate() (float64, string) {
 	}
 
 	measured, ok := e.measuredMarginRate()
+	if ok && e.cleanMeasurement() {
+		e.marginRateSeen, e.marginClamped = max(measured, floor), measured < floor
+	}
+
+	// Зажим называется всегда, даже когда значение уже запомнено: он означает,
+	// что биржа сообщила долю ниже физически возможной, и молча продолжать
+	// считать по ней размер — ровно тот молчаливый отказ, который эта серия
+	// правок и разбирает.
+	clamped := ""
+	if e.marginClamped {
+		clamped = ", clamped to the leverage floor"
+	}
+
 	switch {
+	case e.marginRateSeen > 0 && ok:
+		return e.marginRateSeen, "measured" + clamped
+	case e.marginRateSeen > 0:
+		return e.marginRateSeen, "last measured" + clamped
 	case ok && measured < floor:
-		e.marginRateSeen = floor
 		return floor, "measured, clamped to the leverage floor"
 	case ok:
-		e.marginRateSeen = measured
-		return measured, "measured"
-	case e.marginRateSeen > 0:
-		return e.marginRateSeen, "last measured"
+		// Есть что показать, но картина переходная: считаем по этому значению,
+		// запоминать не станем. Ошибка здесь всегда в сторону меньшего размера.
+		return measured, "measured, not yet clean"
 	default:
 		return configured, "configured"
 	}

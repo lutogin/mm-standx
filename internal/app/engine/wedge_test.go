@@ -199,15 +199,19 @@ func TestResumedQuotingClearsTheStallCounter(t *testing.T) {
 // откатывался на предыдущий образ, и прод двое суток крутил старый код при
 // внешне исправном контуре. Отказ, выглядящий как работающая система, — худший
 // из возможных, и место такому запрету там, где его видно: в сводке и метриках.
+//
+// Запрет теперь про час, а не про размер: пока ставка пула не измерена,
+// котировать в часы с урезанным начислением нельзя — риск залива там прежний.
 func TestEconomicGateStopsQuotingInsteadOfTheProcess(t *testing.T) {
 	ctx := context.Background()
 	e, gw, clk := dangerEngine(t)
 	e.available, e.equity = decimal.NewFromInt(1000), decimal.NewFromInt(1000)
+	// Измеренная нижняя граница ниже порога окупаемости: присутствие стоит
+	// дороже, чем приносит, при любом размере.
 	e.economics = economics.Gate{
-		BreakEvenUSDPerMakerHour:    22,
-		CalibrationMaxAllocationUSD: 60,
+		RewardRateLowerBoundUSDPerMakerHour: 10,
+		BreakEvenUSDPerMakerHour:            22,
 	}
-	e.cfg.AllocationUSD = 1000
 
 	var buf bytes.Buffer
 	e.deps.Log = slog.New(slog.NewTextHandler(&buf, nil))
@@ -215,10 +219,10 @@ func TestEconomicGateStopsQuotingInsteadOfTheProcess(t *testing.T) {
 	liveRung(e, market.Buy, "bid-1", "4273", clk.now)
 	e.evaluate(ctx, true)
 
-	require.Empty(t, gw.placed, "an allocation past the calibration cap must not be quoted")
+	require.Empty(t, gw.placed, "quoting below break-even must not be placed")
 	require.Contains(t, gw.cancelled, trading.ClOrdID("bid-1"))
 	require.Contains(t, buf.String(), "engine status")
-	require.Contains(t, buf.String(), "calibration cap")
+	require.Contains(t, buf.String(), "below the 22.00 USD/MH break-even")
 }
 
 // fillInbox leaves the actor's queue with no room, so the next enqueue drops.

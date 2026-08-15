@@ -41,7 +41,6 @@ func (c *Config) Validate() error {
 	if enabled == 0 && c.IsLive() {
 		errs = append(errs, errors.New("runtime.mode=live but no symbol is enabled"))
 	}
-	errs = append(errs, c.validateExposure()...)
 
 	if c.IsLive() && c.Runtime.StateDir == "" {
 		errs = append(errs, errors.New(
@@ -50,45 +49,6 @@ func (c *Config) Validate() error {
 	}
 
 	return errors.Join(errs...)
-}
-
-// validateExposure сверяет суммарную аллокацию с общим лимитом нотионала.
-//
-// Проверка живёт на старте, а не в горячем пути, потому что аллокация статична:
-// каждый актор ограничен своим allocationUsd, поэтому потолок суммы определяется
-// конфигурацией целиком и известен до первого ордера. Ловить превышение
-// во время торговли значило бы обнаруживать заведомо известную ошибку тогда,
-// когда деньги уже в рынке.
-func (c *Config) validateExposure() []error {
-	total := 0.0
-	for _, sym := range c.Symbols {
-		if !sym.Enabled {
-			continue
-		}
-		// Считается по худшему случаю, то есть по плечу счёта.
-		//
-		// Прежде здесь стоял initialMarginPct, и предел получался не тот:
-		// доля блокировки теперь измеряется у биржи, а не берётся из файла,
-		// и настроенное значение — лишь запасное на время до первых ордеров.
-		// Проверять предел по запасному значению значит проверять величину,
-		// которой торговля не пользуется. Ниже 1/плечо биржа не опустится
-		// физически, поэтому allocation × leverage — настоящий потолок того,
-		// что может оказаться в рынке.
-		rate := sym.SymbolRisk.InitialMarginPct
-		if lev := sym.SymbolRisk.Leverage; lev >= 1 && 100/float64(lev) < rate {
-			rate = 100 / float64(lev)
-		}
-		if rate > 0 {
-			total += sym.AllocationUSD / (rate / 100)
-		}
-	}
-	if c.Risk.MaxNotionalUSD > 0 && total > c.Risk.MaxNotionalUSD {
-		return []error{fmt.Errorf(
-			"enabled symbols allow up to %.0f USD of notional (allocation × leverage, "+
-				"the floor the exchange cannot go below) but risk.maxNotionalUsd is %.0f",
-			total, c.Risk.MaxNotionalUSD)}
-	}
-	return nil
 }
 
 func (r Runtime) validate() []error {
@@ -235,9 +195,6 @@ func (r Risk) validate() []error {
 	if r.MaxDailyLossUSD <= 0 {
 		errs = append(errs, errors.New("risk.maxDailyLossUsd must be positive"))
 	}
-	if r.MaxNotionalUSD <= 0 {
-		errs = append(errs, errors.New("risk.maxNotionalUsd must be positive"))
-	}
 	if r.MaxFillsPerHour <= 0 {
 		errs = append(errs, errors.New("risk.maxFillsPerHour must be positive"))
 	}
@@ -293,9 +250,6 @@ func (s Symbol) validate(name string, band money.Bps, tiers []UptimeTier, live b
 	var errs []error
 	prefix := "symbols." + name
 
-	if s.Enabled && s.AllocationUSD <= 0 {
-		errs = append(errs, fmt.Errorf("%s.allocationUsd must be positive for an enabled symbol", prefix))
-	}
 	errs = append(errs, s.Economics.validate(prefix+".economics")...)
 	errs = append(errs, s.Quote.validate(prefix+".quote")...)
 	errs = append(errs, s.Appetite.validate(prefix+".appetite", band)...)
@@ -353,9 +307,6 @@ func (e Economics) validate(prefix string) []error {
 	}
 	if e.BreakEvenUSDPerMakerHour <= 0 {
 		errs = append(errs, fmt.Errorf("%s.breakEvenUsdPerMakerHour must be positive", prefix))
-	}
-	if e.CalibrationMaxAllocationUSD <= 0 {
-		errs = append(errs, fmt.Errorf("%s.calibrationMaxAllocationUsd must be positive", prefix))
 	}
 	return errs
 }

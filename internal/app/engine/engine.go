@@ -254,6 +254,14 @@ type Engine struct {
 	// меньше возможного выглядит совершенно нормально, если не видно, от какого
 	// числа он посчитан.
 	marginSource string
+	// orphanSeen — ордера, не опознанные лесенкой в прошлом снимке сверки.
+	//
+	// Сирота объявляется только со второго снимка подряд: см. reconcile.
+	// Множество заменяется целиком на каждой сверке, поэтому не растёт.
+	orphanSeen map[trading.ClOrdID]bool
+	// marginClamped — запомненная доля упёрлась в физический пол 1/плечо.
+	// Означает, что биржа сообщила невозможное, и это обязано быть видно.
+	marginClamped bool
 	// marginRateSeen — последняя измеренная доля блокировки, в процентах.
 	//
 	// Переживает опустевший стакан: мерить можно только по живым ордерам, а
@@ -386,15 +394,11 @@ func (e *Engine) Start(context.Context) error {
 		e.deps.Log.Info("economic gate in force",
 			"symbol", e.symbol,
 			"reward_rate_lower_bound_usd_per_maker_hour", e.economics.RewardRateLowerBoundUSDPerMakerHour,
-			"break_even_usd_per_maker_hour", e.economics.BreakEvenUSDPerMakerHour,
-			"calibration_max_allocation_usd", e.economics.CalibrationMaxAllocationUSD,
-			"allocation_usd", e.cfg.AllocationUSD)
+			"break_even_usd_per_maker_hour", e.economics.BreakEvenUSDPerMakerHour)
 		e.deps.Metrics.RiskLimit(prefix+"reward_rate_lower_bound_usd_per_maker_hour",
 			e.economics.RewardRateLowerBoundUSDPerMakerHour)
 		e.deps.Metrics.RiskLimit(prefix+"break_even_usd_per_maker_hour",
 			e.economics.BreakEvenUSDPerMakerHour)
-		e.deps.Metrics.RiskLimit(prefix+"calibration_max_allocation_usd",
-			e.economics.CalibrationMaxAllocationUSD)
 	}
 	e.subscribe()
 

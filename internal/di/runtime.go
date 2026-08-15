@@ -409,7 +409,6 @@ func provideEngines(
 				Economics: economics.Gate{
 					RewardRateLowerBoundUSDPerMakerHour: symCfg.Economics.RewardRateLowerBoundUSDPerMakerHour,
 					BreakEvenUSDPerMakerHour:            symCfg.Economics.BreakEvenUSDPerMakerHour,
-					CalibrationMaxAllocationUSD:         symCfg.Economics.CalibrationMaxAllocationUSD,
 				},
 				// Ноль, когда ориентир для инструмента не поднят: путь быстрого
 				// сигнала тогда не задействуется вовсе, а это отличается
