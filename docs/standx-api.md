@@ -67,7 +67,7 @@ JSON нужно один раз и использовать один и тот �
 | `order_type` | enum | `limit` \| `market` |
 | `qty` | decimal-**строка** | |
 | `time_in_force` | enum | `gtc` \| `ioc` \| `alo` |
-| `reduce_only` | bool | |
+| `reduce_only` | bool | максимальный `qty` = размер позиции минус сумма ещё висящих `reduce_only` (включая TP/SL) |
 | `price` | decimal-строка | обязательно для `limit` |
 | `cl_ord_id` | string | наш ULID; если не задан — генерирует биржа |
 | `margin_mode` | enum | `cross` \| `isolated`, должен совпадать с позицией |
@@ -92,6 +92,50 @@ JSON нужно один раз и использовать один и тот �
 `{symbol, leverage}` / `{symbol, margin_mode}` / `{symbol, amount_in}`.
 
 **Amend/modify отсутствует.** Перекотировка — это всегда cancel + new.
+
+## Маржа и плечо
+
+Из [Margin & Leverage](https://docs.standx.com/docs/stand-x-perps-solutions/margin-leverage)
+и [Liquidation](https://docs.standx.com/docs/stand-x-perps-solutions/liquidation), проверено
+15 августа — раньше в этой выжимке не было.
+
+- **`leverage` в `new_order` не влияет на блокировку маржи.** Документация говорит
+  об этом прямо: «Must match position» — поле обязано совпадать с плечом счёта,
+  но само маржу не считает. Действует только плечо, выставленное через
+  `change_leverage`. Подтверждает пробу PLAN.md §12.5.5 (плечи 4/8/20 в ордере
+  дали одинаковую долю блокировки).
+- **Initial margin ≈ 1 / leverage**, из примера в документации: «2% initial margin
+  enables 50x leverage». Для нашего плеча 40 это даёт ~2.5% — почти точно
+  совпадает с измеренными на живом счёте 2.667% (PLAN.md §12.5.5a). Первое
+  официальное подтверждение цифры, которая раньше была только результатом пробы.
+- **Официальная таблица тиров** (`Position Notional`, USDT):
+
+  | Tier | Notional | Max Leverage | Maintenance Margin Ratio |
+  | --- | --- | --- | --- |
+  | 1 | 0 – 1 000 000 | 40x | 1.25% |
+  | 2 | 1 000 000 – 10 000 000 | 20x | 2.50% |
+  | 3 | 10 000 000 – 100 000 000 | 10x | 5.00% |
+  | 4 | 100 000 000 – 500 000 000 | 5x | 10.00% |
+
+  XAU-USD max leverage 40x подтверждён и в [Contract Specifications](https://docs.standx.com/docs/stand-x-perps-solutions/contract-specifications)
+  отдельной таблицей — совпадает с `config/config.yaml`.
+- **Критическое плечо переводит закрытие в режим `reduce_only`-only**: «When your
+  leverage reaches the critical threshold, you can only adjust your position
+  using "Reduce Only". Orders to close a position without selecting "Reduce Only"
+  will be rejected by the system.» Порог критического плеча не назван числом.
+- **Ликвидация** — IOC по цене банкротства для мелких позиций (tier 1 и ниже);
+  для крупных — по траншам, с проверкой margin после каждого. Комиссия
+  ликвидации: `Notional × 1.25%`, не берётся при нулевой/отрицательной марже.
+
+**Открытый вопрос, не покрытый документацией: блокирует ли `reduce_only`-ордер
+дополнительную маржу или освобождает её при закрытии позиции.** Проверены
+Margin & Leverage, Liquidation, TP/SL, Execution Panel, Contract Specifications
+и спецификация `new_order` — везде описан только объёмный лимит `reduce_only`
+(см. выше), про маржу нигде ни слова. Косвенно: на боевом счёте `available_usd`
+после каждого из 6 заливов 14 августа рос, а не падал — согласуется с тем, что
+`reduce_only` маржу освобождает, а не требует новой, но это не официальное
+подтверждение. Уточнить у поддержки StandX или дождаться внятного ответа
+в документации.
 
 ## Чтение состояния (JWT, без подписи тела)
 
