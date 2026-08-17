@@ -26,7 +26,7 @@ const stateName = "risk-ledger"
 
 // Guard ведёт учёт и останавливает торговлю при достижении лимита.
 type Guard struct {
-	limits domain.Limits
+	limits            domain.Limits
 	fillBurstLimit    int
 	fillBurstWindow   time.Duration
 	fillBurstCooldown time.Duration

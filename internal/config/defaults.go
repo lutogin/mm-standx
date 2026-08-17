@@ -72,8 +72,8 @@ func defaults() *Config {
 			// Консервативнее боевого значения намеренно, как и остальной блок:
 			// умолчания не должны быть агрессивнее того, что явно прописано
 			// в файле.
-			UtilizationPct:  70,
-			MaxFillsPerHour: 6,
+			UtilizationPct:       70,
+			MaxFillsPerHour:      6,
 			MarginMode:           trading.Isolated,
 			FlattenPolicy:        "immediate_market",
 			FlattenDebounce:      0,
@@ -136,7 +136,7 @@ func defaults() *Config {
 			HeartbeatInterval: time.Second,
 		},
 		Defaults: Symbol{
-			Enabled:       false,
+			Enabled: false,
 			Economics: Economics{
 				RewardRateLowerBoundUSDPerMakerHour: 0,
 				BreakEvenUSDPerMakerHour:            22,

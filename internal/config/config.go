@@ -273,15 +273,15 @@ type News struct {
 
 // Symbol — настройки котирования одного инструмента.
 type Symbol struct {
-	Enabled       bool       `koanf:"enabled"`
-	Economics     Economics  `koanf:"economics"`
-	Quote         Quote      `koanf:"quote"`
-	Appetite      Appetite   `koanf:"appetite"`
-	Volatility    Volatility `koanf:"volatility"`
-	Program       Program    `koanf:"program"`
-	Uptime        Uptime     `koanf:"uptime"`
-	SymbolRisk    SymbolRisk `koanf:"risk"`
-	Reference     Reference  `koanf:"reference"`
+	Enabled    bool       `koanf:"enabled"`
+	Economics  Economics  `koanf:"economics"`
+	Quote      Quote      `koanf:"quote"`
+	Appetite   Appetite   `koanf:"appetite"`
+	Volatility Volatility `koanf:"volatility"`
+	Program    Program    `koanf:"program"`
+	Uptime     Uptime     `koanf:"uptime"`
+	SymbolRisk SymbolRisk `koanf:"risk"`
+	Reference  Reference  `koanf:"reference"`
 }
 
 // Reference identifies the external venue whose price leads this instrument.
