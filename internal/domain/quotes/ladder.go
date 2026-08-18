@@ -55,6 +55,30 @@ type Slot struct {
 	// Since — момент входа в текущую фазу. Нужен и для таймаутов подтверждения,
 	// и для правила минимального времени жизни ордера.
 	Since time.Time
+	// RefillNotBefore — самый ранний момент, когда опустевшую ступень
+	// разрешено занять снова.
+	//
+	// СТУПЕНЬ ПУСТА НЕ ПРОСТО ТАК. Ветка Empty в planOne десять месяцев
+	// заполняла её безусловно, потому что «пусто» выглядит как состояние,
+	// а не как событие: у Live есть MinRest, у Empty не было ничего. Разница
+	// между «ступень свободна» и «мы с этой ступени только что убежали»
+	// в фазе не выражена, и заполнение возвращало ордер точно туда, откуда
+	// его секунду назад сняли по опасности — по цене, посчитанной от такта
+	// mark, который движение уже обогнало.
+	//
+	// Замер 18 августа 2026, 13:30 UTC. Danger снял все три бидовые ступени
+	// в 13:30:17.250 с причиной "price approaching". planOne вернул их
+	// в 13:30:19.201, 19.799 и 21.319 с причиной "filling an empty rung",
+	// все три — по одной цене 4390.5 после зажима post-only буфером. В
+	// 13:30:22.486-24.307 их снесло целиком: шесть исполнений за 1.8 секунды,
+	// 5.51 USD убытка и обвал присутствия, стоивший часу 1.18 Maker Hour
+	// (StandX заплатил 0.82 вместо достижимых 2.00).
+	//
+	// Поле ставится только там, где ступень освободила защита, и переживает
+	// переход в Empty: сброс структуры слота в OnOrderUpdate сохраняет его
+	// намеренно, иначе подтверждение отмены стирало бы ровно тот запрет,
+	// ради которого он и ставился.
+	RefillNotBefore time.Time
 }
 
 // ActionKind — что делать со ступенью.
@@ -137,16 +161,34 @@ type Rules struct {
 	MinRest time.Duration
 	// AckTimeout — сколько ждать подтверждения, прежде чем считать команду потерянной.
 	AckTimeout time.Duration
+	// RefillLockout — сколько ступень остаётся пустой после того, как её
+	// освободила защита. См. Slot.RefillNotBefore.
+	//
+	// Цена запрета считается, а не назначается. Защитных снятий 18 августа
+	// было 1098 ("price approaching" 1084, "inside pull threshold" 14), каждое
+	// запирает ОДНУ ступень: 1098 x запрет ступенно-секунд против 6 ступеней
+	// x 54000 секунд работы, то есть при трёх секундах теряется 1% времени
+	// ступени. Против 1.18 Maker Hour, которые один незапертый возврат стоил
+	// в тот же день.
+	//
+	// Ноль возвращает прежнее безусловное заполнение.
+	RefillLockout time.Duration
 }
 
 // PullAll возвращает команды на снятие всей стороны.
 //
 // Аварийный путь обходит и очередь round-robin, и минимальное время жизни:
 // когда рынок подошёл вплотную, присутствие в стакане перестаёт быть ценностью.
-func (l *Ladder) PullAll(reason string) []Action {
+//
+// Запрет на возврат ставится здесь, а не в момент подтверждения отмены, потому
+// что решение об опасности принято именно здесь и только здесь известно. Ставится
+// он и на ступени в фазе Placing: команда размещения в полёте — это ордер,
+// который вот-вот окажется в стакане по цене, посчитанной до опасности.
+func (l *Ladder) PullAll(now time.Time, lockout time.Duration, reason string) []Action {
 	var out []Action
 	for i := range l.Slots {
 		if l.Slots[i].Phase == Live || l.Slots[i].Phase == Placing {
+			l.holdRefill(i, now, lockout)
 			out = append(out, Action{
 				Kind:    Cancel,
 				Slot:    i,
@@ -157,6 +199,19 @@ func (l *Ladder) PullAll(reason string) []Action {
 		}
 	}
 	return out
+}
+
+// holdRefill запирает ступень от повторного заполнения.
+//
+// Запрет только продлевается: два защитных снятия подряд не имеют права
+// сократить срок, назначенный первым.
+func (l *Ladder) holdRefill(slot int, now time.Time, lockout time.Duration) {
+	if lockout <= 0 {
+		return
+	}
+	if until := now.Add(lockout); until.After(l.Slots[slot].RefillNotBefore) {
+		l.Slots[slot].RefillNotBefore = until
+	}
 }
 
 // Classifier выносит решение по живой ступени.
@@ -179,7 +234,7 @@ type Classifier func(Slot) policy.Decision
 // optimization, but once the market is within one measured jump of any rung,
 // the remaining rungs are exposed to the same move. Waiting for the pull
 // threshold means waiting until the market has already reached the quote.
-func (l *Ladder) Danger(classify Classifier) []Action {
+func (l *Ladder) Danger(now time.Time, classify Classifier, lockout time.Duration) []Action {
 	for i := range l.Slots {
 		if l.Slots[i].Phase != Live {
 			continue
@@ -188,7 +243,7 @@ func (l *Ladder) Danger(classify Classifier) []Action {
 		if d.Action != policy.Hold &&
 			d.Urgency == policy.UrgencySafety &&
 			d.Sequence == policy.CancelFirst {
-			return l.PullAll(d.Reason)
+			return l.PullAll(now, lockout, d.Reason)
 		}
 	}
 	return nil
@@ -204,7 +259,7 @@ func (l *Ladder) Plan(
 	classify Classifier,
 	rules Rules,
 ) []Action {
-	if danger := l.Danger(classify); len(danger) > 0 {
+	if danger := l.Danger(now, classify, rules.RefillLockout); len(danger) > 0 {
 		return danger
 	}
 
@@ -259,6 +314,14 @@ func (l *Ladder) planOne(
 
 		switch slot.Phase {
 		case Empty:
+			// Ступень освободила защита, и срок запрета ещё не вышел.
+			// Курсор не двигаем: очередь round-robin принадлежит сделанному
+			// действию, а запрет — это отказ действовать. Следующая ступень
+			// в том же проходе рассматривается как обычно, поэтому запрет
+			// на одну ступень не останавливает сторону целиком.
+			if now.Before(slot.RefillNotBefore) {
+				continue
+			}
 			l.cursor = (i + 1) % n
 			return []Action{{
 				Kind:     Place,
@@ -282,6 +345,14 @@ func (l *Ladder) planOne(
 
 			l.cursor = (i + 1) % n
 			if decision.Sequence == policy.CancelFirst {
+				// CancelFirst выбирается только когда рынок идёт на нас
+				// (policy.Thresholds.Classify), то есть это то же событие,
+				// что и в PullAll, только по одной ступени. Запрет обязан
+				// стоять здесь тоже, иначе round-robin вернёт ордер туда же
+				// на следующем проходе.
+				if decision.Urgency == policy.UrgencySafety {
+					l.holdRefill(i, now, rules.RefillLockout)
+				}
 				return []Action{{
 					Kind:    Cancel,
 					Slot:    i,
@@ -356,7 +427,22 @@ func (l *Ladder) OnOrderUpdate(o trading.Order, now time.Time) (slot int, matche
 
 		switch {
 		case o.Status.IsTerminal():
-			l.Slots[i] = Slot{Index: i, Phase: Empty, Since: now}
+			// Запрет переживает сброс слота намеренно. Он ставится в момент
+			// решения об опасности, а подтверждение отмены приходит после —
+			// и, обнуляя структуру целиком, стирало бы ровно тот запрет,
+			// ради которого решение принималось.
+			//
+			// Своего запрета этот путь не назначает, и для исполнения тоже:
+			// после залива сторона снимается целиком до закрытия позиции
+			// (PLAN.md §4.9, инвариант 4), а идёт это снятие через PullAll,
+			// который запрет уже поставил. Назначать здесь второй значило бы
+			// продлевать его на срок, никем не решённый.
+			//
+			// Отмена и отказ биржи запрет тем более не назначают: рядовая
+			// перестановка по награде и отказ «balance not enough» опасностью
+			// не являются, и платить за них присутствием не за что.
+			hold := l.Slots[i].RefillNotBefore
+			l.Slots[i] = Slot{Index: i, Phase: Empty, Since: now, RefillNotBefore: hold}
 		case o.Status == trading.StatusOpen && l.Slots[i].Phase == Placing:
 			l.Slots[i].Phase = Live
 			l.Slots[i].Since = now

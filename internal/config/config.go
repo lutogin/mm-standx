@@ -209,7 +209,22 @@ type Fees struct {
 // за 22.6 часа стоили 11 минут присутствия, то есть 0.8%. Отсрочка выкупала бы
 // эту долю ценой секунд слепоты с живыми ордерами — обмен невыгодный.
 type Health struct {
-	MarkStale         time.Duration `koanf:"markStale"`
+	MarkStale 		time.Duration `koanf:"markStale"`
+	// MarkStaleHoldBps — насколько ориентиру позволено разойтись с последним
+	// тактом mark, чтобы уже стоящие котировки не снимались.
+	//
+	// Молчащий канал mark и движущийся рынок — разные события, и общего ответа
+	// у них быть не должно. Пока внешняя площадка свежа и показывает цену там
+	// же, где она была на последнем такте, геометрия висящих ордеров остаётся
+	// той самой, что для них считалась, и снимать их значит платить
+	// присутствием за чужой график публикаций. Замер 18 августа 2026:
+	// 1514 съёмов за сутки, час 06:00 UTC закрылся нулём Maker Hours при
+	// открытом и спокойном рынке.
+	//
+	// Ноль возвращает прежнее поведение — безусловный съём. Порог не отменяет
+	// запрет выставлять по устаревшей цене: удерживаются только те ордера,
+	// что уже стоят. См. Engine.onStaleMark.
+	MarkStaleHoldBps  money.Bps     `koanf:"markStaleHoldBps"`
 	ReconcileInterval time.Duration `koanf:"reconcileInterval"`
 	AckTimeout        time.Duration `koanf:"ackTimeout"`
 	HeartbeatInterval time.Duration `koanf:"heartbeatInterval"`
@@ -353,6 +368,11 @@ type Quote struct {
 	LadderSpreadBps money.Bps     `koanf:"ladderSpreadBps"`
 	MinRest         time.Duration `koanf:"minRest"`
 	RequoteCooldown time.Duration `koanf:"requoteCooldown"`
+
+	// RefillLockout — сколько ступень остаётся пустой после того, как её
+	// освободила защита. Ноль возвращает безусловное заполнение.
+	// См. quotes.Rules.RefillLockout и quotes.Slot.RefillNotBefore.
+	RefillLockout time.Duration `koanf:"refillLockout"`
 
 	// PostOnlyBufferTicks — на сколько тиков цена отодвигается от противоположной
 	// вершины стакана перед отправкой.

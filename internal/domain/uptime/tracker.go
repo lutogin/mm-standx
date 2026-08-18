@@ -199,28 +199,54 @@ func (t *Tracker) Assess(now time.Time) Snapshot {
 // target. If the preferred reserve is no longer reachable, the programme
 // threshold remains the last-resort target rather than abandoning a payable
 // hour early.
+//
+// ELIGIBILITY IS DECIDED BY THE PROGRAMME THRESHOLD AND BY NOTHING ELSE.
+// Every configured number above that threshold — TargetPct, HardFloorPct,
+// ReservePct — is a preference about how much cushion to aim for, and a
+// preference that vetoes a payable hour is not a cushion, it is a loss.
+//
+// This was a live defect, not a hypothetical. HardFloorPct stood in as the
+// eligibility floor for the top tier, so the reachable band between the
+// programme's 70% and the configured 72% was discarded. Measured consequence
+// on 18 August 2026, hour 13:00 UTC: at 13:45:33 the actor held 47.8% banked
+// with 24.1% of the hour left, i.e. a best possible 71.9%. The 70% tier was
+// still winnable and the actor declared "no economically eligible uptime tier
+// remains", stopped quoting for the remaining fourteen minutes and made its
+// own forecast come true. StandX paid 0.82 Maker Hours for that hour through
+// the 0.5x tier where a full 2.00 was still reachable — the single most
+// expensive decision of the day, roughly seven times the cost of the fill
+// that started it.
+//
+// The cushions survive as a descending ladder of targets: aim for the most
+// comfortable one still reachable, and never let any of them decide whether
+// the hour is worth playing at all.
 func (t *Tracker) bestTier(bestPossible float64) (reward.Tier, float64, bool) {
 	for i, tier := range t.program.Tiers {
 		if tier.Multiplier+1e-12 < t.policy.MinTierMultiplier {
 			continue
 		}
-
-		desired := tier.ThresholdPct + t.policy.ReservePct
-		floor := tier.ThresholdPct
-		if i == 0 {
-			desired = t.policy.TargetPct
-			floor = t.policy.HardFloorPct
-		}
-		if desired > 100 {
-			desired = 100
-		}
-		if bestPossible < floor {
+		if bestPossible+1e-12 < tier.ThresholdPct {
 			continue
 		}
-		if bestPossible < desired {
-			desired = floor
+
+		// Ordered from the most comfortable target to the programme threshold
+		// itself; the first one still reachable is what the hour aims at.
+		targets := []float64{tier.ThresholdPct + t.policy.ReservePct, tier.ThresholdPct}
+		if i == 0 {
+			targets = []float64{t.policy.TargetPct, t.policy.HardFloorPct, tier.ThresholdPct}
 		}
-		return tier, desired, true
+
+		target := tier.ThresholdPct
+		for _, candidate := range targets {
+			if candidate > 100 {
+				candidate = 100
+			}
+			if bestPossible+1e-12 >= candidate {
+				target = candidate
+				break
+			}
+		}
+		return tier, target, true
 	}
 	return reward.Tier{}, 0, false
 }

@@ -28,7 +28,7 @@ func (c *Config) Validate() error {
 	errs = append(errs, c.RateLimit.validate()...)
 	errs = append(errs, c.Reward.validate()...)
 	errs = append(errs, c.Risk.validate()...)
-	errs = append(errs, c.Health.validate()...)
+	errs = append(errs, c.Health.validate(c.Reward.BandBps)...)
 	errs = append(errs, c.News.validate()...)
 
 	enabled := 0
@@ -238,7 +238,7 @@ func (r Risk) validate() []error {
 	return errs
 }
 
-func (h Health) validate() []error {
+func (h Health) validate(band money.Bps) []error {
 	var errs []error
 	for name, d := range map[string]int64{
 		"health.markStale":         int64(h.MarkStale),
@@ -249,6 +249,19 @@ func (h Health) validate() []error {
 		if d <= 0 {
 			errs = append(errs, fmt.Errorf("%s must be positive", name))
 		}
+	}
+	// Ноль разрешён: он возвращает безусловный съём по устаревшему mark.
+	// Отрицательное значение — опечатка, которая молча делала бы то же самое.
+	if h.MarkStaleHoldBps < 0 {
+		errs = append(errs, fmt.Errorf("health.markStaleHoldBps must not be negative"))
+	}
+	// Порог за краем полосы награды не удерживал бы ничего полезного: ступень,
+	// от которой ориентир ушёл на всю полосу, уже вне зачёта, а риск исполнения
+	// несёт прежний.
+	if band > 0 && h.MarkStaleHoldBps > band {
+		errs = append(errs, fmt.Errorf(
+			"health.markStaleHoldBps (%s) must not exceed the reward band (%s)",
+			h.MarkStaleHoldBps, band))
 	}
 	return errs
 }
@@ -329,6 +342,9 @@ func (q Quote) validate(prefix string) []error {
 	}
 	if q.MinRest < 0 || q.RequoteCooldown < 0 {
 		errs = append(errs, fmt.Errorf("%s: minRest and requoteCooldown must not be negative", prefix))
+	}
+	if q.RefillLockout < 0 {
+		errs = append(errs, fmt.Errorf("%s.refillLockout must not be negative", prefix))
 	}
 	if q.PostOnlyBufferTicks < 0 {
 		errs = append(errs, fmt.Errorf("%s.postOnlyBufferTicks must not be negative", prefix))

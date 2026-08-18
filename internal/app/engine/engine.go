@@ -147,6 +147,11 @@ type Engine struct {
 	// referenceWaitSince — с какого момента актор ждёт первую цену ориентира.
 	// Нужен, чтобы возраст в метрике оставался конечным до её прихода.
 	referenceWaitSince time.Time
+	// staleMarkHeld — стоит ли актор на удержании из-за молчащего канала mark.
+	// Хранится только ради того, чтобы переход печатался один раз: канал
+	// замолкает десятками раз за сутки, и строка на каждом такте утопила бы
+	// лог. См. onStaleMark.
+	staleMarkHeld bool
 
 	// Календарь публикаций и момент, когда его последний раз удалось прочитать.
 	//
@@ -360,8 +365,9 @@ func New(p Params, deps Deps) *Engine {
 		newsGuard:      p.News,
 		ladder:         policy.Ladder{Layers: layers, SpreadBps: p.Config.Quote.LadderSpreadBps},
 		rules: quotes.Rules{
-			MinRest:    p.Config.Quote.MinRest,
-			AckTimeout: p.Health.AckTimeout,
+			MinRest:       p.Config.Quote.MinRest,
+			AckTimeout:    p.Health.AckTimeout,
+			RefillLockout: p.Config.Quote.RefillLockout,
 		},
 		bids: quotes.New(market.Buy, layers),
 		asks: quotes.New(market.Sell, layers),
@@ -787,7 +793,7 @@ func (e *Engine) handle(ctx context.Context, ev events.Event) {
 	case events.OpenOrdersSnapshot:
 		e.reconcile(ctx, v)
 	case events.MarkPriceStale:
-		e.withdraw(ctx, ports.CauseStaleMark, "no mark price updates")
+		e.onStaleMark(ctx, e.deps.Clock.Now())
 	case events.StreamDisconnected:
 		// Разрыв необязательного потока не отменяет права котировать.
 		//
@@ -851,6 +857,9 @@ func (e *Engine) onMarkPrice(ctx context.Context, ev events.MarkPriceUpdated) {
 	e.mark = ev.Mark.Price
 	e.markAt = ev.Mark.Received
 	e.vol.Observe(e.mark, e.markAt)
+	// Удержание кончается официальной ценой, а не таймером: пока её нет, актор
+	// не вправе выставлять, а как только она пришла — держать больше нечего.
+	e.staleMarkHeld = false
 
 	// Обе опорные точки запоминаются именно в момент такта: дальнейшее их
 	// смещение и служит оценкой смещения mark между тактами.
@@ -1174,7 +1183,7 @@ func (e *Engine) onTick(ctx context.Context) {
 	if e.mark.IsPositive() {
 		e.deps.Metrics.MarkStaleness(e.symbol, now.Sub(e.markAt).Seconds())
 		if now.Sub(e.markAt) > e.health.MarkStale {
-			e.withdraw(ctx, ports.CauseStaleMark, "no mark price updates")
+			e.onStaleMark(ctx, now)
 		}
 	}
 	// Повтор неудавшегося съёма идёт раньше всего остального: пока он не прошёл,
@@ -1279,6 +1288,76 @@ func (e *Engine) referenceDrift() (money.Bps, bool) {
 		return 0, false
 	}
 	return drift, true
+}
+
+// onStaleMark decides what a silent mark channel means for the resting quotes.
+//
+// LEAVING THE BOOK IS THE MOST EXPENSIVE ACTION THIS ACTOR CAN TAKE. Accrual is
+// a percentile of one-second samples, so a second spent outside is a zero in
+// the set that decides the whole hour; there is no partial credit for the rest
+// of it. Every other control in the loop may cost a few basis points of reward,
+// this one can cost the hour outright.
+//
+// Which is why the unconditional withdrawal that used to stand here was wrong.
+// The exchange's mark channel is not a heartbeat, it is a publication, and it
+// goes quiet on its own schedule. Measured on 18 August 2026: 22 stale spells
+// with ages of 10-12 seconds, 1514 withdrawals in a single day, and hour 06:00
+// UTC closed at zero Maker Hours with the market open and calm throughout.
+// Roughly 3.2 of the day's 5.5 lost Maker Hours were paid for silence on a
+// channel, not for movement in a price.
+//
+// A silent mark channel is not a moving market, and the two must not share an
+// answer. The reference venue is an independent view of the same instrument and
+// it keeps publishing through these spells. While it is fresh and shows the
+// price sitting where it was at the last mark tick, the geometry of the resting
+// orders is still the geometry that was computed for them, and the honest
+// response is to stop repricing — not to leave. Note what is being held: only
+// the orders already on the book. Nothing new is placed while the mark is
+// stale, because every price this actor sends is computed from the last known
+// mark (PLAN.md section 4.8), and a stale mark may not author new orders.
+//
+// The hold ends the moment the picture does: the reference moving past
+// staleMarkHoldBps, or going stale itself, returns the old behaviour of pulling
+// everything. Set staleMarkHoldBps to zero to restore the unconditional
+// withdrawal.
+func (e *Engine) onStaleMark(ctx context.Context, now time.Time) {
+	if reason, ok := e.holdThroughStaleMark(now); ok {
+		e.noteStaleMarkHold(now, reason)
+		return
+	}
+	e.staleMarkHeld = false
+	e.withdraw(ctx, ports.CauseStaleMark, "no mark price updates")
+}
+
+// holdThroughStaleMark answers whether the reference still vouches for the
+// resting quotes. The returned string explains the decision to the log.
+func (e *Engine) holdThroughStaleMark(now time.Time) (string, bool) {
+	if e.health.MarkStaleHoldBps <= 0 {
+		return "", false
+	}
+	drift, ok := e.referenceDrift()
+	if !ok {
+		return "", false
+	}
+	if drift.Abs() > e.health.MarkStaleHoldBps {
+		return "", false
+	}
+	return fmt.Sprintf("the reference has moved %s since the last mark, within the %s hold",
+		drift.Abs(), e.health.MarkStaleHoldBps), true
+}
+
+// noteStaleMarkHold prints the transition once. A hold that is invisible in the
+// log is indistinguishable from an actor that stopped working, which is the
+// exact ambiguity that made the previous behaviour feel safe.
+func (e *Engine) noteStaleMarkHold(now time.Time, reason string) {
+	if e.staleMarkHeld {
+		return
+	}
+	e.staleMarkHeld = true
+	e.deps.Log.Info("mark price is stale, holding the resting quotes on the reference",
+		"symbol", e.symbol,
+		"age", now.Sub(e.markAt).Truncate(time.Millisecond).String(),
+		"reason", reason)
 }
 
 // bookDrift — смещение середины стакана с момента последнего такта mark.

@@ -291,7 +291,7 @@ func (e *Engine) pullDanger(ctx context.Context, th policy.Thresholds, now time.
 
 	for _, side := range []market.Side{market.Buy, market.Sell} {
 		ladder := e.ladderFor(side)
-		actions := ladder.Danger(e.classifier(side, th))
+		actions := ladder.Danger(now, e.classifier(side, th), e.rules.RefillLockout)
 		for _, action := range actions {
 			intents = append(intents, cancelIntent{side: side, action: action})
 			ids = append(ids, action.ClOrdID)
@@ -532,7 +532,7 @@ func (e *Engine) withdraw(ctx context.Context, cause ports.WithdrawCause, detail
 	e.deps.Metrics.Quoting(e.symbol, false)
 
 	for _, ladder := range []*quotes.Ladder{e.bids, e.asks} {
-		actions := ladder.PullAll(string(cause))
+		actions := ladder.PullAll(now, e.rules.RefillLockout, string(cause))
 		for _, a := range actions {
 			ids = append(ids, a.ClOrdID)
 		}

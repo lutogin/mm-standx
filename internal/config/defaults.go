@@ -56,11 +56,25 @@ func defaults() *Config {
 		},
 		Reward: Reward{
 			BandBps: 10,
-			// Measured against credited samples, not read off the campaign page:
-			// its formula says 200 and its own table says otherwise, and the
-			// exchange scores by the table. Reconciliation matched to 0.04%
-			// (PLAN.md §12.1).
-			MaxWeightPct: 120,
+			// 200, and this is now an upper-bound proof rather than a reading
+			// of the campaign page. The page contradicts itself — its formula
+			// gives 200, one row of its table implies 120 — and the previous
+			// value here followed the table on the strength of a single
+			// micro-size reconciliation from 6 August, when the credited
+			// numbers were 0.02 units wide and could not separate the two.
+			//
+			// The 18 August report can. Over hours 09-12 UTC the actor never
+			// planned more than 87.402 units a side and never placed a rung
+			// nearer than 7.0 bps, so on the 120 curve the weighted side has a
+			// hard ceiling of 87.402 x 0.64 = 55.94 whatever the uptime.
+			// StandX published P50 = 74.25...78.09 and P70 = 68.80...72.20 for
+			// exactly those hours. The 120 curve cannot produce those numbers;
+			// the 200 curve caps at 87.402 x 0.88 = 76.91 and brackets them.
+			//
+			// DO NOT REVERT WITHOUT AN EXCHANGE REPORT THAT BREAKS THIS BOUND.
+			// See TestShippedRewardCurveFollowsTheMeasuredWeights and
+			// PLAN.md section 12.1.
+			MaxWeightPct: 200,
 			MinWeightPct: 40,
 			UptimeTiers: []UptimeTier{
 				{ThresholdPct: 70, Multiplier: 1.0},
@@ -130,7 +144,12 @@ func defaults() *Config {
 			// трёх секунд. Порог в 2 с давал непрерывные ложные срабатывания,
 			// поэтому берём запас на три пропущенных обновления.
 			// Значение уточняется по длительной записи, см. PLAN.md §12.9.
-			MarkStale:         10 * time.Second,
+			MarkStale: 10 * time.Second,
+			// Половина ширины полосы награды. Смещение ориентира внутри этого
+			// предела не выводит уже стоящую ступень из полосы и не подводит
+			// её к касанию — то есть держать ордера ещё честно. Дальше картина
+			// перестаёт быть той, по которой они выставлялись.
+			MarkStaleHoldBps:  5,
 			ReconcileInterval: 5 * time.Second,
 			AckTimeout:        2 * time.Second,
 			HeartbeatInterval: time.Second,
@@ -138,14 +157,35 @@ func defaults() *Config {
 		Defaults: Symbol{
 			Enabled: false,
 			Economics: Economics{
+				// Ноль означает «ставка пула для этого инструмента ещё
+				// не измерена», и как умолчание он верен: новый символ
+				// действительно не измерен, а ноль запирает работу в полный
+				// тир до первого отчёта биржи. Оставлено намеренно.
 				RewardRateLowerBoundUSDPerMakerHour: 0,
-				BreakEvenUSDPerMakerHour:            22,
+				// 22 — МОДЕЛЬНАЯ ОЦЕНКА, ИЗВЕСТНО ЗАВЫШЕННАЯ НА ДВА ПОРЯДКА.
+				// Для XAU-USD измерено (PLAN.md §12.4, шесть закрытых дней):
+				// награда 0.79…0.86 DUSD за Maker Hour, стоимость 0.21…0.23.
+				// Боевой конфиг это переопределяет; здесь число оставлено
+				// потому, что оно относится к инструменту, а не к программе,
+				// и переносить золотой замер на неизмеренный символ нельзя.
+				//
+				// Сочетание «ставка задана, порог не задан» отвергает всё
+				// подряд — отказ безопасен, но выглядит как поломка.
+				// НЕ ВЫВОДИТЬ ЭТО ЧИСЛО ЗАНОВО ИЗ МОДЕЛИ: мерить по
+				// mm_realized_pnl_usd, делённому на зачтённые часы.
+				BreakEvenUSDPerMakerHour: 22,
 			},
 			Quote: Quote{
 				LadderLayers:    3,
 				LadderSpreadBps: 1.0,
 				MinRest:         3200 * time.Millisecond, // ≥3с для зачёта Maker Points
 				RequoteCooldown: 250 * time.Millisecond,
+				// Три секунды: замер 18 августа 2026 показал возврат ступени
+				// через 1.95 с после защитного снятия и залив ещё через 3.3 с.
+				// Полутора секунд, принятых у сравнимого оператора, там
+				// не хватило бы. Стоимость — около 1% времени ступени,
+				// арифметика в quotes.Rules.RefillLockout.
+				RefillLockout: 3 * time.Second,
 				// Two ticks. On gold that is 0.46 bps, small next to the seven
 				// the quote normally stands at, so the clamp binds only when the
 				// book has run past a mark that has not caught up yet — which is

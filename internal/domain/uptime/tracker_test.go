@@ -190,3 +190,75 @@ func TestStandardTierRequiresEconomicEligibility(t *testing.T) {
 
 	require.Equal(t, Lost, blocked.Assess(at).Mode)
 }
+
+// Час, который ещё берётся по порогу программы, не сдаётся из-за страхового
+// запаса. Это регрессия на живой убыток, а не гипотеза.
+//
+// 18 августа 2026, час 13:00 UTC: после залива актор простоял двенадцать минут
+// и к 13:45:33 держал 47.8% при прошедших 75.9%, то есть best possible 71.9%.
+// Порог программы — 70%, HardFloorPct — 72. Прежний код сравнивал достижимое
+// с HardFloorPct, объявлял «no economically eligible uptime tier remains»,
+// снимал котировки до конца часа и делал собственный прогноз верным. StandX
+// заплатил 0.82 Maker Hour по тиру 0.5x там, где полные 2.00 ещё брались.
+func TestReachableProgrammeThresholdSurvivesTheSafetyCushion(t *testing.T) {
+	tr := tracker(1)
+
+	// 47.8% присутствия за 75.9% часа: ровно та точка, с которой актор сдался.
+	elapsed := 2733 * time.Second
+	quoting := 1721 * time.Second
+	at := fill(tr, elapsed, quoting, 3000)
+
+	s := tr.Assess(at.Add(time.Second))
+
+	require.InDelta(t, 71.9, s.BestPossiblePct, 0.3,
+		"фиксируем саму точку замера: дальше проверяется решение по ней")
+	require.NotEqual(t, Lost, s.Mode,
+		"порог программы 70%% ещё достижим — час обязан остаться в игре")
+	require.Equal(t, Earning, s.Mode)
+	require.Equal(t, 1.0, s.TierMultiplier,
+		"это полный тир, а не запасной 0.5x")
+	require.InDelta(t, 70, s.TargetPct, 1e-9,
+		"цель падает до порога программы, а не до HardFloorPct, который уже недостижим")
+}
+
+// Ниже порога программы час действительно потерян: присутствие оплачивается
+// исполнениями и не приносит зачёта. Правка выше не должна это отменять.
+func TestUnreachableProgrammeThresholdStillLosesTheHour(t *testing.T) {
+	tr := tracker(1)
+
+	// 10% присутствия за 80% часа: best possible 30%, ниже и 70%, и 50%.
+	at := fill(tr, 2880*time.Second, 288*time.Second, 3000)
+
+	s := tr.Assess(at.Add(time.Second))
+
+	require.Less(t, s.BestPossiblePct, 50.0)
+	require.Equal(t, Lost, s.Mode)
+}
+
+// Пока запас достижим, целью остаётся именно он: правка меняет только исход
+// в полосе между порогом программы и страховым запасом.
+func TestComfortableTargetIsStillPreferredWhenReachable(t *testing.T) {
+	tr := tracker(1)
+
+	at := fill(tr, 600*time.Second, 600*time.Second, 3000)
+
+	s := tr.Assess(at.Add(time.Second))
+
+	require.Equal(t, Earning, s.Mode)
+	require.InDelta(t, 78, s.TargetPct, 1e-9, "TargetPct достижим — берём его")
+}
+
+// Запасной тир выбирается, когда полный уже недостижим, и это отдельная ветка:
+// у неё свой резерв и свой порог.
+func TestLowerTierKeepsItsOwnReserve(t *testing.T) {
+	tr := tracker(0.5)
+
+	// 30% присутствия за 70% часа: best possible 60% — ниже 70, выше 50+8.
+	at := fill(tr, 2520*time.Second, 1080*time.Second, 3000)
+
+	s := tr.Assess(at.Add(time.Second))
+
+	require.Equal(t, Earning, s.Mode)
+	require.Equal(t, 0.5, s.TierMultiplier)
+	require.InDelta(t, 58, s.TargetPct, 1e-9, "порог 50 плюс резерв 8")
+}
