@@ -116,30 +116,6 @@ jobs:
       group: production-deploy
       cancel-in-progress: false
     steps:
-      # Recreating the container resets the scoring hour: every grid slot before
-      # the process started is counted as zero, deliberately, so that a restart
-      # cannot manufacture uptime the exchange never saw. Past roughly minute 15
-      # the hour can no longer reach the qualifying tier, so the actor withdraws
-      # until the next one — a deploy at minute 30 costs the whole remainder.
-      # Measured 10 August: four restarts, three of them mid-hour, three hours
-      # written off. The push lands at an arbitrary minute; the deploy should
-      # not.
-      #
-      # Put an escape hatch in the commit message when the fix cannot wait.
-      # - name: Wait for the UTC hour boundary
-      #   if: ${{ !contains(github.event.head_commit.message, '[deploy-now]') }}
-      #   shell: bash
-      #   run: |
-      #     set -euo pipefail
-      #     minute=$(date -u +%-M)
-      #     if (( minute < 15 )); then
-      #       echo "minute $minute: the hour is still reachable, deploying now"
-      #       exit 0
-      #     fi
-      #     seconds=$(( (60 - minute) * 60 - $(date -u +%-S) ))
-      #     echo "minute $minute: waiting ${seconds}s so the deploy lands on the hour"
-      #     sleep "$seconds"
-
       # Деплою нужны исходники: конфигурация больше не едет внутри образа,
       # и её берут из рабочего каталога, а не из выкачанного тега.
       - name: Check out source
@@ -195,6 +171,46 @@ jobs:
           scp -o BatchMode=yes -o StrictHostKeyChecking=yes \
             ./docker-compose.yml "root@${VPS_HOST}:/root/opt/mm-standx/docker-compose.yml"
 
+      # Пересоздание контейнера обнуляет учётный час: все слоты сетки до старта
+      # процесса считаются нулями — намеренно, чтобы рестарт не изобретал
+      # аптайм, которого биржа не видела. Достижимый максимум после рестарта
+      # на минуте M равен (60-M)/60, и отсюда весь расчёт:
+      #
+      #   до 15   ->  >=75%  ->  полный тир, 2.00 Maker Hour
+      #   15..30  ->  50-75% ->  половинный тир, около 1.00
+      #   после 30->  <50%   ->  час потерян целиком
+      #
+      # Замер 10 августа: четыре рестарта, три из них в середине часа, трое
+      # суток... точнее три часа списано. Push приходит на произвольной минуте,
+      # деплой не обязан.
+      #
+      # ШАГ СТОЯЛ ЗАКОММЕНТИРОВАННЫМ И СТОЯЛ НЕ ЗДЕСЬ. Он был первым в задаче,
+      # то есть спал до границы часа, а ПОТОМ шли checkout, настройка ssh,
+      # копирование конфигурации и pull образа — несколько минут, на которые
+      # перезапуск съезжал за границу. Ожидание обязано быть последним, что
+      # происходит перед сменой контейнера, иначе оно отмеряет не то событие.
+      #
+      # Порог оставлен на 15, хотя после починки экономического шлюза
+      # половинный тир снова оплачивается и промах до 30-й минуты больше
+      # не обнуляет час. Менять 15 на 30 значит менять гарантированный полный
+      # тир на половинный — обмен невыгодный; смягчение здесь работает
+      # страховкой, а не разрешением.
+      #
+      # Аварийный выход — [deploy-now] в сообщении коммита.
+      - name: Wait for the UTC hour boundary
+        if: ${{ !contains(github.event.head_commit.message, '[deploy-now]') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          minute=$(date -u +%-M)
+          if (( minute < 15 )); then
+            echo "minute $minute: the hour is still reachable, deploying now"
+            exit 0
+          fi
+          seconds=$(( (60 - minute) * 60 - $(date -u +%-S) ))
+          echo "minute $minute: waiting ${seconds}s so the deploy lands on the hour"
+          sleep "$seconds"
+
       - name: Deploy
         shell: bash
         env:
@@ -241,8 +257,19 @@ jobs:
           mkdir -p "$root/logs"
           chown 10001:10001 "$root/logs"
 
-          previous_image="$(docker image inspect lutogin/mm-standx:latest \
-            --format '{{.Id}}' 2>/dev/null || true)"
+          # Снимок того, что работает сейчас, — для отката. Берётся с самого
+          # контейнера, а не с тега: тег к этому моменту уже может означать
+          # что угодно, а контейнер — это буквально то, что торгует.
+          previous_image="$(docker inspect --format '{{.Image}}' mmbot \
+            2>/dev/null || true)"
+          previous_revision="$(docker inspect --format \
+            '{{with index .Config.Labels "org.opencontainers.image.revision"}}{{.}}{{end}}' \
+            mmbot 2>/dev/null || true)"
+          echo "currently running: ${previous_revision:-unknown revision} ($previous_image)"
+
+          # Образ закрепляется на коммит. compose подставляет это в
+          # image: lutogin/mm-standx:${MM_IMAGE_TAG:-latest}.
+          export MM_IMAGE_TAG="sha-${DEPLOY_SHA}"
 
           # Откатывается пара целиком — образ и конфигурация. Порознь они
           # не совпадают: сломать старт способна любая из двух половин, и
@@ -259,9 +286,15 @@ jobs:
               echo "configuration rolled back to the previous version" >&2
             fi
             if [[ -n "$previous_image" ]]; then
-              docker tag "$previous_image" lutogin/mm-standx:latest
-              docker compose --project-directory "$root" \
+              # Отдельный локальный тег, а НЕ latest. Прежняя версия делала
+              # `docker tag <старый> latest`, после чего локальный latest
+              # расходился с реестром и сервер начинал врать о том, что этот
+              # тег означает. Откат обязан быть обратим и виден, а не
+              # переписывать общую вывеску.
+              docker tag "$previous_image" lutogin/mm-standx:rollback
+              MM_IMAGE_TAG=rollback docker compose --project-directory "$root" \
                 up -d --force-recreate mmbot
+              echo "rolled back to ${previous_revision:-$previous_image}" >&2
             fi
             exit 1
           }
@@ -284,8 +317,7 @@ jobs:
           # в 16:35 UTC, процесс был поднят сутками раньше и читает файл только
           # при старте: правка не действовала и об этом никто не узнал, потому
           # что спросить было нечего. Проверка стоит одного docker inspect.
-          published="lutogin/mm-standx:sha-${DEPLOY_SHA}"
-          docker pull --quiet "$published" >/dev/null
+          published="lutogin/mm-standx:${MM_IMAGE_TAG}"
           expected="$(docker image inspect "$published" --format '{{.Id}}')"
           running="$(docker inspect --format '{{.Image}}' mmbot)"
           if [[ "$expected" != "$running" ]]; then
@@ -293,7 +325,7 @@ jobs:
             echo "  expected $expected ($published)" >&2
             echo "  running  $running" >&2
             docker inspect --format \
-              'label revision: {{index .Config.Labels "org.opencontainers.image.revision"}}' \
+              'label revision: {{with index .Config.Labels "org.opencontainers.image.revision"}}{{.}}{{else}}none{{end}}' \
               "$running" >&2 || true
             rollback
           fi
@@ -303,6 +335,20 @@ jobs:
             status="$(docker inspect --format '{{.State.Health.Status}}' mmbot \
               2>/dev/null || true)"
             if [[ "$status" == "healthy" ]]; then
+              # Локальный latest приводится к выкаченному образу.
+              #
+              # Деплой тянет sha-<commit> и latest больше не обновляет, так что
+              # без этой строки тег на сервере остался бы указывать на прежний
+              # образ — а именно он подставляется умолчанием
+              # ${MM_IMAGE_TAG:-latest}, когда на сервере руками делают
+              # `docker compose up -d`. Молчаливый откат на старый образ через
+              # ручную команду — ровно та ловушка, ради закрытия которой
+              # образ и закрепляли.
+              #
+              # Только после healthcheck: тег обязан означать «этот образ
+              # работал», а не «этот образ пробовали запустить».
+              docker tag "$published" lutogin/mm-standx:latest
+              echo "deployed ${DEPLOY_SHA} and healthy"
               exit 0
             fi
             if [[ "$status" == "unhealthy" ]]; then
