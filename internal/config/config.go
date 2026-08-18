@@ -209,7 +209,7 @@ type Fees struct {
 // за 22.6 часа стоили 11 минут присутствия, то есть 0.8%. Отсрочка выкупала бы
 // эту долю ценой секунд слепоты с живыми ордерами — обмен невыгодный.
 type Health struct {
-	MarkStale 		time.Duration `koanf:"markStale"`
+	MarkStale time.Duration `koanf:"markStale"`
 	// MarkStaleHoldBps — насколько ориентиру позволено разойтись с последним
 	// тактом mark, чтобы уже стоящие котировки не снимались.
 	//

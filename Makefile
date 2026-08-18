@@ -50,7 +50,23 @@ lint: ## Static analysis
 
 .PHONY: fmt
 fmt: ## Format sources
-	$(GO) fmt ./...
+	gofmt -w .
+
+# Проверка ровно тем же способом, что и в CI: `go fmt ./...` обходит пакеты
+# и пропускает то, что видит `gofmt -l .`, из-за чего локально всё выглядело
+# чистым при красном конвейере.
+.PHONY: fmt-check
+fmt-check: ## Fail if anything is unformatted (same check as CI)
+	@files="$$(gofmt -l .)"; \
+	if [ -n "$$files" ]; then \
+		printf 'Go files are not formatted:\n%s\nfix with: make fmt\n' "$$files"; \
+		exit 1; \
+	fi
+
+.PHONY: hooks
+hooks: ## Install the git hooks from .githooks
+	git config core.hooksPath .githooks
+	@echo "core.hooksPath -> .githooks (снять: git config --unset core.hooksPath)"
 
 .PHONY: tidy
 tidy: ## Tidy go.mod

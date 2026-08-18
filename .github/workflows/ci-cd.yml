@@ -23,15 +23,18 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # Одно определение проверки на CI и на машину разработчика.
+      #
+      # Раньше здесь стоял свой gofmt, а в Makefile — `go fmt ./...`, который
+      # обходит пакеты и видит не то же самое. Локально проект выглядел чистым
+      # при красном конвейере, и «почини формат» превращалось в отдельный
+      # коммит после каждого push.
+      #
+      # Причина устраняется хуком (`make hooks`), а этот шаг остаётся
+      # страховкой: хук живёт на машине разработчика, его можно не поставить
+      # и можно обойти через --no-verify.
       - name: Check formatting
-        shell: bash
-        run: |
-          set -euo pipefail
-          files="$(gofmt -l .)"
-          if [[ -n "$files" ]]; then
-            printf 'Go files are not formatted:\n%s\n' "$files"
-            exit 1
-          fi
+        run: make fmt-check
 
       - name: Download modules
         run: go mod download
@@ -196,13 +199,15 @@ jobs:
         shell: bash
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
+          DEPLOY_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
-            "root@${VPS_HOST}" 'bash -s' <<'REMOTE'
+            "root@${VPS_HOST}" "DEPLOY_SHA='${DEPLOY_SHA}' bash -s" <<'REMOTE'
           set -Eeuo pipefail
 
           root=/root/opt/mm-standx
+          : "${DEPLOY_SHA:?the deploy needs the commit it is publishing}"
 
           test -f "$root/docker-compose.yml" || {
             echo "missing $root/docker-compose.yml" >&2
@@ -239,9 +244,60 @@ jobs:
           previous_image="$(docker image inspect lutogin/mm-standx:latest \
             --format '{{.Id}}' 2>/dev/null || true)"
 
+          # Откатывается пара целиком — образ и конфигурация. Порознь они
+          # не совпадают: сломать старт способна любая из двух половин, и
+          # старый бинарь с новым файлом — такое же несочетание, как наоборот.
+          #
+          # Вынесено в функцию, потому что путей неудачи теперь два: не встал
+          # healthcheck и не совпал образ. Второй наступает уже ПОСЛЕ подмены
+          # конфигурации, поэтому выйти из него без отката значило бы оставить
+          # на сервере ровно то несочетание, от которого этот блок и заведён.
+          rollback() {
+            if [[ -d "$root/config.previous" ]]; then
+              rm -rf "$root/config"
+              mv "$root/config.previous" "$root/config"
+              echo "configuration rolled back to the previous version" >&2
+            fi
+            if [[ -n "$previous_image" ]]; then
+              docker tag "$previous_image" lutogin/mm-standx:latest
+              docker compose --project-directory "$root" \
+                up -d --force-recreate mmbot
+            fi
+            exit 1
+          }
+
           docker compose --project-directory "$root" pull mmbot
           docker compose --project-directory "$root" \
             up -d --remove-orphans mmbot
+
+          # УТВЕРЖДЕНИЕ, А НЕ НАДЕЖДА: контейнер обязан работать ровно на том
+          # коммите, который только что опубликован.
+          #
+          # Сам по себе конвейер верен — `compose pull` идёт в реестр, а `up -d`
+          # пересоздаёт контейнер, когда идентификатор образа сменился. Но
+          # тег `latest` подвижен, и все способы промахнуться мимо него тихие:
+          # неудавшийся pull при живом локальном образе, откат предыдущего
+          # деплоя, оставивший старый образ под этим тегом, ручной `up -d`
+          # на сервере. Ни один из них не оставляет следа в логе выкатки.
+          #
+          # Цена молчания измерена. Конфигурацию на сервере правили 18 августа
+          # в 16:35 UTC, процесс был поднят сутками раньше и читает файл только
+          # при старте: правка не действовала и об этом никто не узнал, потому
+          # что спросить было нечего. Проверка стоит одного docker inspect.
+          published="lutogin/mm-standx:sha-${DEPLOY_SHA}"
+          docker pull --quiet "$published" >/dev/null
+          expected="$(docker image inspect "$published" --format '{{.Id}}')"
+          running="$(docker inspect --format '{{.Image}}' mmbot)"
+          if [[ "$expected" != "$running" ]]; then
+            echo "deployed image does not match the published commit" >&2
+            echo "  expected $expected ($published)" >&2
+            echo "  running  $running" >&2
+            docker inspect --format \
+              'label revision: {{index .Config.Labels "org.opencontainers.image.revision"}}' \
+              "$running" >&2 || true
+            rollback
+          fi
+          echo "container is running the published image ($published)"
 
           for _ in $(seq 1 60); do
             status="$(docker inspect --format '{{.State.Health.Status}}' mmbot \
@@ -257,21 +313,5 @@ jobs:
 
           docker compose --project-directory "$root" \
             logs --no-color --tail=100 mmbot >&2 || true
-
-          # Откатывается пара целиком — образ и конфигурация. Порознь они
-          # не совпадают: сломать старт способна любая из двух половин, и
-          # старый бинарь с новым файлом — такое же несочетание, как наоборот.
-          if [[ -d "$root/config.previous" ]]; then
-            rm -rf "$root/config"
-            mv "$root/config.previous" "$root/config"
-            echo "configuration rolled back to the previous version" >&2
-          fi
-
-          if [[ -n "$previous_image" ]]; then
-            docker tag "$previous_image" lutogin/mm-standx:latest
-            docker compose --project-directory "$root" \
-              up -d --force-recreate mmbot
-          fi
-
-          exit 1
+          rollback
           REMOTE

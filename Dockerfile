@@ -38,6 +38,21 @@ RUN apk add --no-cache ca-certificates tzdata curl && \
 WORKDIR /app
 COPY --from=build /out/mmbot /out/guardian /out/standxctl /usr/local/bin/
 
+# Коммит, из которого собран образ.
+#
+# ARG VERSION до этого объявлялся в сборочной стадии и не использовался нигде:
+# ни в ldflags, ни в лейбле. Образ не помнил, откуда он, и «доехала ли правка»
+# приходилось выводить из тега на сервере — то есть из того самого места,
+# ошибку в котором вопрос и должен был обнаружить.
+#
+# ARG объявляется повторно намеренно: он действует в пределах одной стадии.
+# Лейбл читается на сервере без запуска контейнера:
+#   docker inspect lutogin/mm-standx:latest \
+#     --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'
+ARG VERSION=dev
+LABEL org.opencontainers.image.revision="$VERSION"
+LABEL org.opencontainers.image.source="https://github.com/lutogin/mm-standx"
+
 # Конфигурация в образ НЕ кладётся: она подключается томом в /app/config.
 #
 # Запечённый в образ файл означал, что правка любого порога стоит пересборки
