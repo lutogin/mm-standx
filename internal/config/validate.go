@@ -641,6 +641,20 @@ func (v Volatility) validate(prefix string) []error {
 		errs = append(errs, fmt.Errorf("%s: require minSamples <= fullConfidenceAt, got %d > %d",
 			prefix, v.MinSamples, v.FullConfidenceAt))
 	}
+	// Обязателен, в отличие от memoryHalfLife: ноль здесь не отключает защиту,
+	// а тихо возвращает старую уязвимость целиком — см. поле в config.go.
+	if v.WindowHalfLife <= 0 {
+		errs = append(errs, fmt.Errorf("%s.windowHalfLife must be positive", prefix))
+	}
+	// Не короче — это уже проверено выше. Не длиннее или равно Window — иначе
+	// затухание не успевает случиться быстрее, чем событие и так выпало бы
+	// из сырого окна, и вся правка от 19 августа не делает ничего.
+	if v.WindowHalfLife > 0 && v.WindowHalfLife >= v.Window {
+		errs = append(errs, fmt.Errorf(
+			"%s: windowHalfLife (%s) must be shorter than window (%s), "+
+				"or the fast record never releases faster than the raw window would have",
+			prefix, v.WindowHalfLife, v.Window))
+	}
 	if v.MemoryHalfLife < 0 {
 		errs = append(errs, fmt.Errorf("%s.memoryHalfLife must not be negative", prefix))
 	}

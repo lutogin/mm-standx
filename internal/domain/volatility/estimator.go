@@ -6,7 +6,6 @@
 package volatility
 
 import (
-	"math"
 	"sort"
 	"time"
 
@@ -27,13 +26,15 @@ type sample struct {
 // тела распределения (PLAN.md §1.4). Правило, откалиброванное по перцентилю,
 // было бы пробито первым же выбросом.
 //
-// Максимум окна вдобавок обладает нужным поведением во времени: после крупного
-// скачка осторожность сохраняется до конца окна, а затем спадает сама.
+// Максимум вдобавок обладает нужным поведением во времени: после крупного
+// скачка осторожность сохраняется и спадает сама. С 19 августа берётся
+// не сырой максимум окна, а его затухающая версия (поле fast): та же
+// нечувствительность к телу распределения, но без плоской полки на всё окно
+// и обрыва на его краю.
 type Estimator struct {
 	window         time.Duration
 	minSamples     int
 	fullAt         int
-	halfLife       time.Duration
 	windowMultiple float64
 
 	samples  []sample
@@ -50,11 +51,32 @@ type Estimator struct {
 	// а потому что мерка была чужая.
 	gaps []time.Duration
 
-	// memory — затухающий рекорд: максимум скачка, забываемый экспоненциально
-	// с полураспадом halfLife. Живёт дольше окна и служит нижней границей меры
-	// риска, см. Config.MemoryHalfLife.
-	memory   money.Bps
-	memoryAt time.Time
+	// fast — быстрый затухающий рекорд, основной источник JumpBps.
+	//
+	// До 19 августа эту роль играл сырой максимум скользящего окна (см. поле
+	// window выше): плоская полка на всё время, что тик остаётся в пределах
+	// окна, обрыв разом, когда выпадает. Обрыв — не спад: рынок мог остыть
+	// много раньше, а мера риска об этом не узнавала, пока не пройдёт всё
+	// окно. Измерено на боевом счёте 19 августа при window: 8m: 52% плато
+	// держались дольше пяти минут, и почти все длинные — одно и то же число
+	// без изменений всё время, то есть один тик, а не серия. Короткий
+	// полураспад вместо жёсткого окна отпускает такой тик за минуты, а не
+	// ждёт края окна.
+	//
+	// Повторный сопоставимый скачок до полного затухания взводит запись
+	// заново — тем самым же механизмом, что и memory. Настоящую серию это
+	// не отпускает: 19 августа тем же вечером час 15:00 UTC дал один тик
+	// на 26.37 bps при полностью пустой стороне стакана (depth_ask_usd: 0) —
+	// ровно то, ради чего мера и существует, и короткий полураспад эту
+	// реакцию не ослабляет: величина скачка та же, отпускает только время.
+	fast decayingMax
+
+	// memory — медленный затухающий рекорд, внешний пол для fast.
+	//
+	// Полураспад на порядки длиннее — часы, не минуты — и назначение другое:
+	// не «что произошло только что», а «не забывать всплеск быстрее, чем
+	// он того заслуживает», см. Config.MemoryHalfLife и bounded.
+	memory decayingMax
 }
 
 // Config — параметры оценщика.
@@ -70,6 +92,19 @@ type Config struct {
 	// FullConfidenceAt — при каком числе замеров оценка считается зрелой.
 	// Между MinSamples и этим значением требуемый запас искусственно завышается.
 	FullConfidenceAt int
+
+	// WindowHalfLife is the half-life of the fast record that primarily drives
+	// JumpBps — see Estimator.fast.
+	//
+	// Required, not optional like MemoryHalfLife: zero here would not merely
+	// disable a floor, it would collapse the whole outer max() to whatever the
+	// slow memory term computes unbounded (bounded's fastMax<=0 exemption),
+	// silently reviving the multi-hour drag memory's own window bound exists
+	// to prevent. A load-bearing parameter should not have a quiet off switch.
+	//
+	// Choose it meaningfully shorter than Window: at or above Window it stops
+	// being faster than the behaviour it replaces and the fix does nothing.
+	WindowHalfLife time.Duration
 
 	// MemoryHalfLife is the half-life of the record of large jumps.
 	//
@@ -128,8 +163,9 @@ func New(cfg Config) *Estimator {
 		window:         cfg.Window,
 		minSamples:     cfg.MinSamples,
 		fullAt:         max(cfg.FullConfidenceAt, cfg.MinSamples),
-		halfLife:       cfg.MemoryHalfLife,
 		windowMultiple: cfg.MemoryWindowMultiple,
+		fast:           decayingMax{halfLife: cfg.WindowHalfLife},
+		memory:         decayingMax{halfLife: cfg.MemoryHalfLife},
 	}
 }
 
@@ -180,32 +216,11 @@ func (e *Estimator) Observe(mark money.Price, at time.Time) {
 		return
 	}
 	e.samples = append(e.samples, sample{at: at, jump: jump.Abs()})
-	e.remember(jump.Abs(), at)
+	// Оба рекорда получают наблюдение одинаково — каждый решает сам, забыть
+	// его быстро или держать часами.
+	e.fast.observe(jump.Abs(), at)
+	e.memory.observe(jump.Abs(), at)
 	e.evict(at)
-}
-
-// remember обновляет затухающий рекорд.
-func (e *Estimator) remember(jump money.Bps, at time.Time) {
-	if e.halfLife <= 0 {
-		return
-	}
-	e.memory = max(e.decayed(at), jump)
-	e.memoryAt = at
-}
-
-// decayed возвращает рекорд, приведённый к моменту now.
-//
-// Метод не изменяет состояние: оценка запрашивается на каждом служебном тике,
-// а мутация ради чтения превратила бы частоту опроса в параметр модели риска.
-func (e *Estimator) decayed(now time.Time) money.Bps {
-	if e.halfLife <= 0 || e.memory <= 0 || e.memoryAt.IsZero() {
-		return 0
-	}
-	age := now.Sub(e.memoryAt)
-	if age <= 0 {
-		return e.memory
-	}
-	return e.memory * money.Bps(math.Exp2(-age.Seconds()/e.halfLife.Seconds()))
 }
 
 const (
@@ -264,13 +279,18 @@ func (e *Estimator) evict(now time.Time) {
 
 // Estimate — снимок оценки.
 type Estimate struct {
-	// JumpBps — принятая мера риска: больший из максимума окна и памяти.
+	// JumpBps — принятая мера риска: больший из fast и ограниченной memory.
 	JumpBps money.Bps
-	// WindowMaxBps — максимум скачка в скользящем окне.
+	// FastBps — быстрый затухающий рекорд, приведённый к текущему моменту.
+	// Обычно и есть JumpBps: см. Estimator.fast.
+	FastBps money.Bps
+	// WindowMaxBps — сырой максимум скачка в скользящем окне, без затухания.
+	// Держится только для наблюдаемости и сравнения с FastBps в логах —
+	// решение больше не принимается по этому полю напрямую.
 	WindowMaxBps money.Bps
-	// MemoryBps — затухающий рекорд, приведённый к текущему моменту.
-	// Отдельное поле нужно, чтобы по метрикам было видно, какая из двух
-	// величин связывает оценку прямо сейчас.
+	// MemoryBps — медленный затухающий рекорд, приведённый к текущему моменту.
+	// Отдельное поле нужно, чтобы по метрикам было видно, какая из величин
+	// связывает оценку прямо сейчас.
 	MemoryBps money.Bps
 	// P95Bps — 95-й перцентиль, только для наблюдаемости.
 	P95Bps money.Bps
@@ -290,11 +310,12 @@ type Estimate struct {
 func (e *Estimator) Estimate(now time.Time) Estimate {
 	e.evict(now)
 
-	out := Estimate{Samples: len(e.samples), MemoryBps: e.decayed(now)}
+	fast := e.fast.decayed(now)
+	out := Estimate{Samples: len(e.samples), FastBps: fast, MemoryBps: e.memory.decayed(now)}
 	out.Tick, _ = e.tick()
 	if out.Samples == 0 {
 		out.Inflation = 1
-		out.JumpBps = out.MemoryBps
+		out.JumpBps = max(fast, e.bounded(out, fast))
 		return out
 	}
 
@@ -311,10 +332,12 @@ func (e *Estimator) Estimate(now time.Time) Estimate {
 	out.Confidence = min(float64(out.Samples)/float64(e.fullAt), 1)
 	out.Ready = out.Samples >= e.minSamples
 
-	// Память служит нижней границей: спокойное окно не отменяет того,
-	// что рынок уже показывал несколькими часами раньше. Но и требовать
-	// сколько угодно она не вправе — см. windowMultiple.
-	out.JumpBps = max(out.WindowMaxBps, e.bounded(out))
+	// fast — основной источник, память служит нижней границей: спокойный
+	// fast не отменяет того, что рынок уже показывал часами раньше. Но
+	// и требовать сколько угодно она не вправе — см. bounded. Ограничение
+	// считается от fast, а не от сырого WindowMaxBps: тот больше не участвует
+	// в решении вообще, только в наблюдаемости.
+	out.JumpBps = max(fast, e.bounded(out, fast))
 
 	// Малая выборка систематически недооценивает хвост: по n замерам виден
 	// в лучшем случае квантиль (1 − 1/n), всё что реже — не наблюдалось вовсе.
@@ -324,7 +347,7 @@ func (e *Estimator) Estimate(now time.Time) Estimate {
 	return out
 }
 
-// bounded limits what the decaying record may claim over the live window.
+// bounded limits what the slow record may claim over the fast one.
 //
 // A decaying maximum has a property no volatility estimator should have: it
 // does not revert. Subsequent observations cannot lower it — only the clock
@@ -336,25 +359,34 @@ func (e *Estimator) Estimate(now time.Time) Estimate {
 // Standard estimators — EWMA of squared returns, GARCH — avoid this by
 // reverting towards the recent level: every calm observation pulls the estimate
 // down, and decay counts in observations rather than hours. Bounding the record
-// by a multiple of the window maximum buys the same property in one comparison:
-// the memory converges to what the market currently shows instead of to zero on
-// a schedule.
+// by a multiple of a faster reference buys the same property in one comparison:
+// the slow memory converges to what the market currently shows instead of to
+// zero on a schedule.
+//
+// Bounded by fast now, not by the raw window maximum. Before 19 August it was
+// the latter, and that quietly defeated the whole point of fast having a short
+// half-life: with windowMultiple back above 1 (needed for this bound to matter
+// at all — see fast's own doc), bounded(memory) could sit at the still-flat raw
+// maximum for as long as that one sample stayed in the window, and the outer
+// max(fast, bounded(...)) would keep picking that flat value right through the
+// stretch fast was supposed to be tapering. Bounding by fast instead means both
+// terms feeding the outer max now move on the same short clock.
 //
 // The bound is deliberately not applied while the estimate is still warming up.
 // An empty or short window says nothing about the market, and reading its
 // maximum as evidence of calm would erase the record exactly when it is the only
 // thing left — right after a reconnect, which tends to coincide with the
 // turbulence that caused it.
-// A window whose maximum is exactly zero is the second exemption. A market that
-// has not moved at all across the whole window carries no information about
-// magnitude, and multiplying that nothing by anything still yields nothing —
-// the very failure the record was written to cover. There the record stands
-// unbounded and the absolute floor (policy.Bounds.MinBps) backs it up.
-func (e *Estimator) bounded(out Estimate) money.Bps {
-	if e.windowMultiple <= 0 || !out.Ready || out.WindowMaxBps <= 0 {
+// A fast record of exactly zero is the second exemption. A market that has not
+// moved at all across its whole span carries no information about magnitude,
+// and multiplying that nothing by anything still yields nothing — the very
+// failure the record was written to cover. There the record stands unbounded
+// and the absolute floor (policy.Bounds.MinBps) backs it up.
+func (e *Estimator) bounded(out Estimate, fast money.Bps) money.Bps {
+	if e.windowMultiple <= 0 || !out.Ready || fast <= 0 {
 		return out.MemoryBps
 	}
-	return min(out.MemoryBps, out.WindowMaxBps*money.Bps(e.windowMultiple))
+	return min(out.MemoryBps, fast*money.Bps(e.windowMultiple))
 }
 
 // EffectiveJump возвращает меру риска с поправкой на незрелость оценки.
@@ -371,11 +403,12 @@ func (e Estimate) EffectiveJump() money.Bps {
 // рынок, а склейка через разрыв дала бы ложный скачок. Право котировать
 // зарабатывается заново, потому что Ready считается по окну.
 //
-// Затухающий рекорд при этом сохраняется намеренно. Разрыв соединения —
-// не довод в пользу того, что рынок успокоился; скорее наоборот, всплески
-// нагрузки на биржу и всплески волатильности приходят вместе. Забыв память,
-// бот вернулся бы после реконнекта с заниженной мерой риска и подошёл бы
-// к рынку ближе именно в тот момент, когда для этого меньше всего оснований.
+// Оба затухающих рекорда — fast и memory — при этом сохраняются намеренно.
+// Разрыв соединения не довод в пользу того, что рынок успокоился; скорее
+// наоборот, всплески нагрузки на биржу и всплески волатильности приходят
+// вместе. Забыв их, бот вернулся бы после реконнекта с заниженной мерой
+// риска и подошёл бы к рынку ближе именно в тот момент, когда для этого
+// меньше всего оснований.
 func (e *Estimator) Reset() {
 	e.samples = e.samples[:0]
 	e.lastMark = money.Price{}

@@ -222,6 +222,17 @@ func defaults() *Config {
 				Window:           20 * time.Minute,
 				MinSamples:       40,
 				FullConfidenceAt: 100,
+				// Half the window, the same ratio the one measured instrument
+				// settled on (XAU-USD: 4m of an 8m window). A half-life only
+				// means anything relative to the window's own timescale, so
+				// the ratio is the default, not the number.
+				//
+				// Cannot be equal to Window: at that point the record releases
+				// no faster than the raw window it replaced, which validate.go
+				// rejects rather than accepting a no-op. An instrument that
+				// shortens Window below this must shorten the half-life with
+				// it — the rejection names both values.
+				WindowHalfLife: 10 * time.Minute,
 				// Six hours was never derived. It was chosen to carry Friday's
 				// volatility across the weekend and does not do that either:
 				// 51 hours of decay leave 0.3% of the record. What it actually

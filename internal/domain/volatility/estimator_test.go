@@ -13,7 +13,16 @@ import (
 var epoch = time.Unix(1_754_897_028, 0).UTC()
 
 func config() Config {
-	return Config{Window: 20 * time.Minute, MinSamples: 40, FullConfidenceAt: 100}
+	// WindowHalfLife is required (Config's own doc: a load-bearing parameter
+	// should not have a quiet off switch). Set equal to Window so tests running
+	// over the usual few minutes of simulated time see negligible decay and the
+	// pre-19-August assertions about "the outlier drives the estimate" keep
+	// meaning what they said; tests that specifically probe decay timing set
+	// their own shorter half-life.
+	return Config{
+		Window: 20 * time.Minute, WindowHalfLife: 20 * time.Minute,
+		MinSamples: 40, FullConfidenceAt: 100,
+	}
 }
 
 // feed replays a price path at the real three second cadence.
@@ -119,22 +128,48 @@ func TestMaximumDrivesTheEstimate(t *testing.T) {
 	moves[50] = 4.4 // the outlier BTC actually produced on 2026-08-02
 	at := feed(e, money.MustParsePrice("63400"), moves)
 
+	// The last 49 ticks after the outlier (147s) already cost fast a little of
+	// its twenty-minute half-life — expected now that fast, not a flat raw
+	// max, is what drives JumpBps. Tolerance widened from 0.01 to cover that
+	// real decay without hiding an actual regression (P95 would leak far more
+	// than this if the outlier stopped setting the measure at all).
 	est := e.Estimate(at)
-	require.InDelta(t, 4.4, est.JumpBps.Float64(), 0.01, "the outlier must set the risk measure")
+	require.InDelta(t, 4.4, est.JumpBps.Float64(), 0.5, "the outlier must set the risk measure")
 	require.Less(t, est.P95Bps.Float64(), 1.0, "the percentile stays blind to it")
 }
 
-// Caution must persist for the length of the window, then fade by itself.
-func TestOutlierFadesWithTheWindow(t *testing.T) {
-	e := New(Config{Window: 2 * time.Minute, MinSamples: 2, FullConfidenceAt: 5})
+// An outlier's grip on the estimate fades continuously, not at the raw
+// window's edge.
+//
+// Before 19 August, caution held at a flat plateau for as long as the tick
+// stayed inside Window, then dropped all at once. Measured on the live account
+// that day, where Window was eight minutes: 52% of these plateaus outlasted
+// five minutes, and almost all of the long ones were a single unchanging
+// number — one tick, not a cluster, held by the shape of the window rather
+// than by anything still happening. fast is deliberately shorter-lived than
+// Window so relief arrives on its own clock.
+func TestOutlierFadesBeforeTheRawWindowWould(t *testing.T) {
+	cfg := Config{Window: 20 * time.Minute, WindowHalfLife: time.Minute, MinSamples: 2, FullConfidenceAt: 5}
+	e := New(cfg)
 
-	moves := flat(29)
-	moves[10] = 5.0
+	// At least minGapsForTick (8) quiet ticks before the spike, or the tick
+	// calibration is not known yet and Observe drops the jump on the floor
+	// before it ever reaches fast — a warm-up rule this test must respect
+	// like any other caller, not a special case. The spike is also the last
+	// element: feed's returned time is the spike's own, not a few ticks past
+	// it, which is what "fresh, full caution" below actually means to check.
+	moves := flat(10)
+	moves = append(moves, 5.0)
 	at := feed(e, money.MustParsePrice("100"), moves)
-	require.InDelta(t, 5.0, e.Estimate(at).JumpBps.Float64(), 0.01)
+	require.InDelta(t, 5.0, e.Estimate(at).JumpBps.Float64(), 0.01, "fresh, full caution")
 
-	// Once the window has rolled past the outlier the estimate relaxes.
-	require.Zero(t, e.Estimate(at.Add(4*time.Minute)).Samples)
+	// One half-life later the raw sample is still well inside the twenty
+	// minute window — the old mechanism would still report a flat 5.0 here.
+	later := e.Estimate(at.Add(time.Minute))
+	require.InDelta(t, 5.0, later.WindowMaxBps.Float64(), 0.01,
+		"the raw window has not forgotten anything yet")
+	require.InDelta(t, 2.5, later.JumpBps.Float64(), 0.1,
+		"but the primary measure has already halved")
 }
 
 // A thin sample cannot have seen the tail, so the margin is inflated until it
@@ -243,18 +278,19 @@ func TestMemoryDecaysByHalfEveryHalfLife(t *testing.T) {
 	require.InDelta(t, 1, float64(e.Estimate(at.Add(3*time.Hour)).MemoryBps), 0.01)
 }
 
-// Memory is a floor, never a ceiling. It decays while the window does not, so
-// a jump still inside the window always dominates its own faded record.
-func TestWindowWinsOverAFadedRecord(t *testing.T) {
-	// Half-life shorter than the window, so the record fades while the sample
-	// that produced it is still being counted.
-	e := New(memoryConfig(10 * time.Minute))
+// Memory is a floor, never a ceiling: whichever record is still less decayed
+// governs, and a memory tuned to fade faster than fast must not drag the
+// estimate down below what fast still shows.
+func TestFastWinsOverAFasterFadingMemory(t *testing.T) {
+	// config()'s fast half-life is twenty minutes; memory here fades in five,
+	// so after fifteen minutes memory has faded further than fast has.
+	e := New(memoryConfig(5 * time.Minute))
 	at := feed(e, money.MustParsePrice("100"), append(append(flat(10), 5), flat(300)...))
 
 	est := e.Estimate(at)
-	require.InDelta(t, 5, float64(est.WindowMaxBps), 0.01, "still inside the twenty minute window")
-	require.InDelta(t, 5*0.354, float64(est.MemoryBps), 0.05, "faded by a jump and a half")
-	require.Equal(t, est.WindowMaxBps, est.JumpBps)
+	require.Less(t, float64(est.MemoryBps), float64(est.FastBps),
+		"memory fades faster in this configuration")
+	require.Equal(t, est.FastBps, est.JumpBps, "the less-decayed record governs")
 }
 
 // A disconnect is no evidence that the market calmed down; if anything, load
@@ -275,15 +311,16 @@ func TestReconnectForgetsTheWindowButNotTheMemory(t *testing.T) {
 	require.Equal(t, before, after.JumpBps)
 }
 
-// Zero half-life keeps the original behaviour: the estimate is the window
-// maximum and nothing else.
+// Disabling memory removes only the slow floor, not the measure itself: fast
+// is a separate, always-on term and keeps working without it.
 func TestMemoryIsOptional(t *testing.T) {
 	e := New(config())
 	at := feed(e, money.MustParsePrice("100"), append(append(flat(10), 4.4), flat(1200)...))
 
 	est := e.Estimate(at)
-	require.Zero(t, est.MemoryBps)
-	require.Zero(t, est.JumpBps)
+	require.Zero(t, est.MemoryBps, "memory never armed")
+	require.Greater(t, est.JumpBps.Float64(), 0.0,
+		"fast does not depend on memory being configured")
 }
 
 // --- The record bounded by the live window ---
@@ -311,12 +348,28 @@ func calm(n int) []float64 {
 
 // The live episode of 7 August, reproduced.
 //
-// One tick of 15 bps, then a market that goes quiet at half a basis point. The
-// window forgets the spike after twenty minutes; the unbounded record kept
-// demanding fifteen for most of a working day, and the actor stood aside for
-// 8.4 hours while the window reported a tenth of that.
+// One tick of 15 bps, then a market that goes truly quiet. The unbounded
+// record kept demanding fifteen for most of a working day; bounded by a
+// multiple of a reference that itself converges towards what the market
+// currently shows, it does not.
+//
+// The horizon moved from one hour to three after 19 August, when fast replaced
+// the raw window as bounded's reference (see bounded's own doc for why the raw
+// window could no longer be used there: it would have let the original
+// plateau bug back in through this exact door). fast's own half-life means
+// bounded's ceiling now takes longer than the old flat 20-minute cliff to
+// first start relaxing after a spike this large — proportionally, exactly as
+// it should: a graduated release tied to the size of the spike is the
+// improvement over a fixed cliff that released a 3 bps tick and a 15 bps one
+// on the same clock. By three hours (nine of fast's own half-lives) the two
+// paths are unambiguously apart either way.
+//
+// Truly flat, not calm(): calm's continuous ±0.5 bps ticks would keep
+// re-arming fast at that floor forever — real ambient noise, correctly
+// tracked, but it would leave the bounded side settling at 0.5×multiple
+// instead of decaying toward what an empty market actually shows.
 func TestBoundedRecordFollowsTheWindowBackDown(t *testing.T) {
-	spike := append(append(calm(50), 15.0), calm(1200)...)
+	spike := append(append(flat(50), 15.0), flat(3600)...)
 
 	unbounded := New(memoryConfig(6 * time.Hour))
 	at := feed(unbounded, money.MustParsePrice("100"), spike)
@@ -326,12 +379,11 @@ func TestBoundedRecordFollowsTheWindowBackDown(t *testing.T) {
 	at = feed(bounded, money.MustParsePrice("100"), spike)
 	tight := bounded.Estimate(at)
 
-	require.InDelta(t, 0.5, loose.WindowMaxBps.Float64(), 0.05,
-		"the spike has left the window in both, the market is calm")
-	require.Greater(t, loose.JumpBps.Float64(), 13.0,
-		"unbounded, one observation still governs an hour later")
-	require.InDelta(t, 1.5, tight.JumpBps.Float64(), 0.15,
-		"bounded, the record may claim three times what the window shows")
+	require.Zero(t, loose.WindowMaxBps, "nothing moved for the whole raw window")
+	require.Greater(t, loose.JumpBps.Float64(), 8.0,
+		"unbounded, one observation still governs hours later")
+	require.Less(t, tight.JumpBps.Float64(), 0.5,
+		"bounded, the record has decayed to near what an empty market shows")
 }
 
 // While the burst is still inside the window the bound must not touch it:
@@ -362,17 +414,24 @@ func TestBoundIsNotAppliedBeforeTheEstimateIsReady(t *testing.T) {
 		"the record survives the reconnect unbounded")
 }
 
-// A market that has not moved at all carries no information about magnitude.
-// Bounding by its maximum would multiply nothing by three and erase the record
-// — precisely the frozen-market case it was written to cover.
-func TestFrozenMarketDoesNotEraseTheRecord(t *testing.T) {
+// A reference of exactly zero carries no information about current magnitude
+// and must not erase memory by multiplying it by zero.
+//
+// Exercised directly rather than through feed(): that is now the point of
+// decaying instead of snapshotting a raw window. Before 19 August a market
+// that had not ticked at all since a spike reached this state the moment the
+// spike aged out of Window, a real and fairly common shape. fast
+// decays continuously instead, so reaching literal zero from a real spike
+// takes on the order of fifty half-lives — not a scenario ordinary replay can
+// reach, which is exactly the property the fix set out to have. The exemption
+// itself is worth keeping as a defensive floor regardless: something upstream
+// could still hand it exactly zero.
+func TestZeroFastRecordDoesNotEraseMemory(t *testing.T) {
 	e := New(boundedConfig(6*time.Hour, 3))
-	at := feed(e, money.MustParsePrice("100"), append(append(calm(50), 15.0), flat(1200)...))
+	e.memory.observe(15.0, epoch)
 
-	est := e.Estimate(at)
-	require.Zero(t, est.WindowMaxBps, "nothing moved for the whole window")
-	require.Greater(t, est.JumpBps.Float64(), 13.0,
-		"a frozen market must not be read as a safe one")
+	got := e.bounded(Estimate{Ready: true, MemoryBps: e.memory.decayed(epoch)}, 0)
+	require.InDelta(t, 15.0, float64(got), 0.01, "must not be multiplied down to zero")
 }
 
 // Zero keeps the previous behaviour, so the bound can be switched off in place.

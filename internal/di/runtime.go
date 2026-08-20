@@ -403,6 +403,7 @@ func provideEngines(
 					Window:               symCfg.Volatility.Window,
 					MinSamples:           symCfg.Volatility.MinSamples,
 					FullConfidenceAt:     symCfg.Volatility.FullConfidenceAt,
+					WindowHalfLife:       symCfg.Volatility.WindowHalfLife,
 					MemoryHalfLife:       symCfg.Volatility.MemoryHalfLife,
 					MemoryWindowMultiple: symCfg.Volatility.MemoryWindowMultiple,
 				},

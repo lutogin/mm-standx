@@ -191,7 +191,7 @@ risk:
   # does not arm the kill switch. It used to, and that was the wedge: the
   # measured condition expired an hour later, the flag lasted until midnight
   # UTC, and it survived the restart meant to clear it.
-  maxFillsPerHour: 6
+  maxFillsPerHour: 18
   # Ставки StandX, одинаковые для всех рынков. Нужны для независимой оценки
   # стоимости залива, см. PLAN.md §1.3.
   fees: { makerBps: 1, takerBps: 4 }
@@ -201,11 +201,15 @@ risk:
   # position-based fallback retry as soon as a PositionUpdated event arrives.
   flattenDebounce: 0ms
   postFillCooldown: 3s
-  # Two independent fill episodes in ten minutes indicate a temporary regime
+  # Four independent fill episodes in ten minutes indicate a temporary regime
   # mismatch. Step away, then re-evaluate current data; this is deliberately
   # self-resetting and does not wedge the bot for the day.
   #
-  # Three minutes, not twenty. Accrual is tiered, so idling costs nothing while
+  # Raised from two, and the cooldown cut from three minutes to two: the
+  # reference bot takes far more fills over the same volume and earns more for
+  # it, so two episodes was catching ordinary flow, not a regime break.
+  #
+  # Two minutes, not twenty. Accrual is tiered, so idling costs nothing while
   # presence stays above the tier threshold and costs the whole hour one step
   # past it. During calibration only the 1.0x tier is eligible, which leaves
   # about 28% of the hour — under 17 minutes — to spend in total. A twenty
@@ -214,9 +218,9 @@ risk:
   # remained. The engine now also clamps this to whatever the hour can still
   # absorb (Engine.burstCooldown); the configured value should not be relying
   # on that clamp.
-  fillBurstLimit: 2
+  fillBurstLimit: 4
   fillBurstWindow: 10m
-  fillBurstCooldown: 3m
+  fillBurstCooldown: 2m
   killSwitchOnDrawdown: true
 
 health:
@@ -456,9 +460,9 @@ defaults:
     minBps: 7.0
     maxBps: 9.5 # дальше награда обнуляется
   volatility:
-    # Мера риска — максимум окна, поэтому один тик правит ею ровно столько,
-    # сколько живёт окно. Это и есть длительность отказа котировать после
-    # всплеска, и никакого таймера, кроме неё, в контуре нет.
+    # Окно больше не задаёт длительность осторожности — с 19 августа это делает
+    # windowHalfLife ниже. Окно осталось горизонтом выборки: по нему считаются
+    # перцентили, наблюдаемый jump_window и зрелость оценки.
     #
     # Сокращено с 20m. Измерено 10-11 августа: тик 7.55 bps встал в окне и
     # держал требуемую дистанцию выше всей полосы награды двадцать минут,
@@ -473,22 +477,42 @@ defaults:
     window: 8m
     minSamples: 40 # 2 минуты прогрева до первой котировки
     fullConfidenceAt: 100 # 5 минут до зрелой оценки
+    # Полураспад меры риска — сколько на самом деле длится осторожность после
+    # всплеска. До 19 августа этой величины не было: мера равнялась сырому
+    # максимуму окна, то есть держалась на полке всё окно и обрывалась разом.
+    #
+    # Замер боевого счёта 19 августа при этом же window: 8m: 52% полок
+    # держались дольше пяти минут, и почти все длинные — одно и то же число
+    # без изменений, то есть один тик, а не серия. Рынок остывал за минуты,
+    # мера об этом не узнавала до края окна.
+    #
+    # Четыре минуты выбраны по этому же замеру. На пятой минуте — там, где
+    # измерена проблема — от всплеска остаётся 2^(-5/4) = 42%, то есть
+    # послабление ровно в 2.4 раза; к восьмой минуте, бывшему краю окна, 25%.
+    # Настоящую серию это не отпускает: повторный сопоставимый скачок взводит
+    # рекорд заново, и величина реакции на сам скачок не меняется — меняется
+    # только скорость выхода из неё.
+    #
+    # Обязан быть строго меньше window, иначе рекорд отпускает медленнее,
+    # чем отпускало бы сырое окно, и смысл замены теряется (validate.go).
+    windowHalfLife: 4m
     # A floor on the risk measure that outlives the window: without it a frozen
     # market yields a mature estimate of a near-zero jump, and the actor walks
     # in just before the market wakes up.
     #
     # NOT justified by the weekend any more — that case is handled directly by
     # program.offHours, see PLAN.md section 12.14. What justifies it is that the
-    # window is 20 minutes and forgets a burst entirely, while volatility
-    # clusters: the fill of 6 August was hours of quiet, then 5.38 bps in one
-    # tick.
+    # fast record fades in minutes, while volatility clusters over hours: the
+    # fill of 6 August was hours of quiet, then 5.38 bps in one tick.
     #
     # Six hours is also what kept the actor out of the book for hours at a
     # stretch that same day. The trade is settled by arithmetic once the price
     # of a Maker Hour and the fill rate are measured, not before.
     memoryHalfLife: 6h
-    # Верхняя граница рекорда: он не вправе требовать больше, чем эта доля
-    # от максимума живого окна.
+    # Верхняя граница долгой памяти: она не вправе требовать больше, чем эта
+    # доля от быстрого рекорда (fast). До 19 августа отсчитывалась от сырого
+    # максимума окна — то есть от плоской полки, которую замена и убирала;
+    # оставить границу на ней значило впустить полку обратно через эту дверь.
     #
     # Затухающий максимум не возвращается к среднему — понизить его не может
     # ни одно последующее наблюдение, только часы. 7 августа всплеск длиной
@@ -497,13 +521,13 @@ defaults:
     # ради которого в EWMA и GARCH затухание считают по наблюдениям: рекорд
     # сходится к тому, что рынок показывает сейчас, а не к нулю по расписанию.
     #
-    # Пока всплеск внутри окна, ограничение не действует — защита полная.
-    # Ноль отключает его и возвращает безусловный рекорд.
+    # Пока всплеск свеж, fast равен ему целиком, и ограничение не действует —
+    # защита полная. Ноль отключает его и возвращает безусловную память.
     #
-    # Единица не отключает память, а запрещает ей требовать больше живого окна.
-    # Разница существенная: при незрелой оценке и при полностью замершем окне
-    # ограничение не применяется вовсе (Estimator.bounded), и рекорд действует
-    # безусловно — то есть ровно в тех двух случаях, ради которых он и написан.
+    # Единица не отключает память, а запрещает ей требовать больше текущего
+    # fast. Разница существенная: при незрелой оценке и при fast ровно в нуле
+    # ограничение не применяется вовсе (Estimator.bounded), и память действует
+    # безусловно — то есть ровно в тех двух случаях, ради которых она написана.
     #
     # Снижено с 3 по замеру 11 августа: живое окно показывало 2.97 bps, память
     # 7.32, ограничение 2x давало 5.95 и требование 9.73 при полосе 8.50 —
