@@ -147,7 +147,16 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 	}
 
 	if e.live && e.economics.BreakEvenUSDPerMakerHour > 0 {
-		decision := e.economics.Evaluate(hour.TierMultiplier, hour.Multiplier)
+		// quoteOffHours is the operator accepting the reduced accrual, so the
+		// gate prices the hour at full rate and does not refuse it a second
+		// time on the same grounds. The tier multiplier stays as measured:
+		// that one says how much of the hour is still reachable, which the
+		// flag has no opinion about.
+		accrual := hour.Multiplier
+		if e.cfg.Program.QuoteOffHours {
+			accrual = 1
+		}
+		decision := e.economics.Evaluate(hour.TierMultiplier, accrual)
 		if !decision.Allowed {
 			e.reportBlocked(now, conditions, estimate, decision.Reason, e.geometry(appetite, conditions))
 			e.withdraw(ctx, ports.CauseEconomics, decision.Reason)

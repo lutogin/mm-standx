@@ -463,10 +463,12 @@ type Program struct {
 	OffHoursMultiplier float64 `koanf:"offHoursMultiplier"`
 	// OffHours is the recurring shutdown window of the reference market.
 	OffHours OffHours `koanf:"offHours"`
-	// QuoteOffHours allows quoting while the reduced multiplier is in force.
+	// QuoteOffHours: true trades the shutdown window, false stands aside.
 	//
-	// Off by default. Presence during those hours carries the full fill risk
-	// and earns a fraction, so it has to be asked for explicitly.
+	// Off by default: those hours carry the full fill risk and earn a
+	// fraction, so quoting them is asked for explicitly. The economic gate
+	// reads the same flag (engine.evaluate) — otherwise it would refuse the
+	// window a second time and the key would do nothing in live.
 	QuoteOffHours bool `koanf:"quoteOffHours"`
 }
 

@@ -625,21 +625,9 @@ symbols:
         # The exchange publishes no machine-readable holiday calendar, so this
         # list is maintained by hand. Empty is not a claim that there are none.
         holidays: []
-      # Quote through the shutdown window instead of withdrawing on it.
-      #
-      # This key alone does NOT put quotes in the book while the market is
-      # live: the economic gate is a separate check and still refuses the
-      # hour, because the reward lower bound after the multiplier
-      # (0.78 * 0.1 = 0.078 USD/MH) is below the 0.25 break-even measured on
-      # 14 and 18 August. What changes in live is the reason recorded against
-      # the refusal — `economics` rather than `off_hours`.
-      #
-      # Where it does change behaviour is dry_run, which skips the economic
-      # gate entirely: a paper run over a weekend now shows the quoting the
-      # window otherwise hides. Turning the weekend into actual orders would
-      # mean lowering breakEvenUsdPerMakerHour below 0.078, which is a
-      # deliberate decision to pay full fill risk for a tenth of the accrual —
-      # not something this flag does on its own.
+      # true — торговать в выходные, false — стоять в стороне.
+      # Экономический шлюз следует этому же ключу: при true час оценивается
+      # по полной ставке, иначе он отверг бы выходные вторым отказом.
       quoteOffHours: true
     # Binance USD-M XAUUSDT, a TradFi-tracking perpetual: 1.26 bn USD of quote
     # volume and 875k trades a day at a 0.02 bps spread, measured 10 August.

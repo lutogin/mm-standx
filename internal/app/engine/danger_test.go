@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/nd/mm-standx/internal/config"
+	"github.com/nd/mm-standx/internal/domain/economics"
 	"github.com/nd/mm-standx/internal/domain/market"
 	"github.com/nd/mm-standx/internal/domain/money"
 	"github.com/nd/mm-standx/internal/domain/policy"
@@ -238,6 +239,31 @@ func TestQuotingResumesWhenTheReferenceMarketOpens(t *testing.T) {
 	e.evaluate(ctx, true)
 
 	require.NotEmpty(t, gw.placed, "an open market is quoted as usual")
+}
+
+// quoteOffHours is the single switch for the weekend: with it set the actor
+// quotes, and the economic gate must not veto the same hour behind it. Before
+// the gate read the flag, turning it on changed nothing in live — the refusal
+// merely moved from off_hours to economics, which is the shape of a setting
+// that silently does not work.
+func TestQuoteOffHoursAlsoLiftsTheEconomicGate(t *testing.T) {
+	ctx := context.Background()
+	e, gw, clk := offHoursEngine(t)
+	e.cfg.Program.QuoteOffHours = true
+	// The shipped numbers: the hour pays 0.78 USD/MH at full rate, a tenth of
+	// that during the shutdown, against a 0.25 break-even. Without the flag
+	// this is exactly the case the gate refuses.
+	e.economics = economics.Gate{
+		RewardRateLowerBoundUSDPerMakerHour: 0.78,
+		BreakEvenUSDPerMakerHour:            0.25,
+	}
+
+	clk.now = time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC) // Saturday
+	primeVolatility(t, e, clk)
+	e.available, e.equity = decimal.NewFromInt(1000), decimal.NewFromInt(1000)
+	e.evaluate(ctx, true)
+
+	require.NotEmpty(t, gw.placed, "the weekend is quoted once the flag is set")
 }
 
 // An operator reading the log has to see why the actor is idle. Without this
