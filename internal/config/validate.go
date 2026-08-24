@@ -410,6 +410,9 @@ func (a Appetite) validate(prefix string, band money.Bps) []error {
 	if a.ReentryDeadBandBps < 0 {
 		errs = append(errs, fmt.Errorf("%s.reentryDeadBandBps must not be negative", prefix))
 	}
+	if a.TargetRelaxAfter < 0 {
+		errs = append(errs, fmt.Errorf("%s.targetRelaxAfter must not be negative", prefix))
+	}
 	// Порог опасности обязан оставаться ниже мёртвой зоны, иначе аварийный съём
 	// накрывает её целиком: сторона снимается на обычном шуме, и присутствие
 	// обнуляется вместо того, чтобы защищаться. Восстановление порядка в

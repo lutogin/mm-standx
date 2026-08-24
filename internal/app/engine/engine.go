@@ -42,6 +42,21 @@ const (
 	// выборка аптайма, проверка устаревания цены.
 	tickInterval = 250 * time.Millisecond
 
+	// uptimeCarryGap — насколько долгий пропуск замера ещё описывается
+	// предыдущим наблюдением.
+	//
+	// Замер берётся с такта актора, а такт опаздывает: строка «mark tick
+	// handled more than a tick late» встречается в боевом логе десятками тысяч
+	// раз за прогон. Пропущенные при этом слоты заполнялись нулями, то есть
+	// объявлялись отсутствием котировок — хотя ордера всё это время стояли
+	// в стакане и биржа их считала.
+	//
+	// Пять секунд, а не больше: за этим порогом молчание актора перестаёт быть
+	// опозданием и становится отказом, а отказ обязан выглядеть отказом.
+	// Правило «перезапуск не вправе выдумывать аптайм» при этом сохраняется
+	// целиком — переносить нечего, пока не было ни одного наблюдения.
+	uptimeCarryGap = 5 * time.Second
+
 	// bankedCaution — во сколько раз увеличивается требуемый запас, когда
 	// часовая цель уже взята. Награда от дальнейшего присутствия не растёт,
 	// поэтому разумно отойти от рынка.
@@ -241,11 +256,15 @@ type Engine struct {
 	blocked       string
 	// blockedSince и nextStallLog поднимают затянувшееся молчание из сводки
 	// в тревогу. Ноль в blockedSince означает, что актор котирует.
-	blockedSince   time.Time
-	nextStallLog   time.Time
-	target         policy.Quote
-	fillEpisodes   []time.Time
-	fillBurstUntil time.Time
+	blockedSince time.Time
+	nextStallLog time.Time
+	target       policy.Quote
+	// targetNarrowSince — с какого момента требование держится ниже стоящей
+	// цели. Ноль означает, что оно её достигает, и отсчёт не идёт.
+	// См. stickyTarget: без этого отсчёта гистерезис цели работает храповиком.
+	targetNarrowSince time.Time
+	fillEpisodes      []time.Time
+	fillBurstUntil    time.Time
 
 	// sizeLimit и perSide — чем ограничен размер стороны и каким он вышел.
 	//
@@ -378,6 +397,7 @@ func New(p Params, deps Deps) *Engine {
 			ReservePct:        p.Config.Uptime.ReservePct,
 			MinTierMultiplier: minTierMultiplier,
 			SampleInterval:    tickInterval,
+			MaxCarryGap:       uptimeCarryGap,
 		}),
 		economics:     p.Economics,
 		position:      money.MustParseQty("0"),
@@ -1389,7 +1409,15 @@ func (e *Engine) sideOrders(l *quotes.Ladder) []reward.Order {
 			continue
 		}
 		d, err := market.DistanceBps(e.mark, l.Side, s.Price)
-		if err != nil || d < 0 || d > e.bounds.MaxBps {
+		// Полоса берётся у программы наград, а не у собственных границ
+		// котирования. Это разные числа: bounds.MaxBps — докуда мы согласны
+		// отпускать ордер, Curve.BandBps — докуда за него платит биржа.
+		// Первое строго меньше, и разница списывалась в ноль: ступень,
+		// выпавшая за 9.5, оплачивается по весу 0.46, а в замер шла как
+		// отсутствие. Выпадание за 9.5 — самый частый повод к перестановке,
+		// то есть вычиталось это регулярно, и оценка часа выходила заниженной
+		// примерно на сорок процентов против начисленного биржей.
+		if err != nil || d < 0 || d > e.program.Curve.BandBps {
 			continue
 		}
 		out = append(out, reward.Order{DistanceBps: d, Qty: s.Qty})

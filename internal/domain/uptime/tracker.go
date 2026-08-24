@@ -46,6 +46,18 @@ type Policy struct {
 	MinTierMultiplier float64
 	// SampleInterval is the actor's fixed observation cadence.
 	SampleInterval time.Duration
+	// MaxCarryGap is how long a missed observation is still described by the
+	// preceding one.
+	//
+	// The actor's tick is not punctual, and every slot it skipped used to be
+	// recorded as zero — as an absence of quotes — while the orders in question
+	// were resting in the book and being scored by the exchange. Carrying the
+	// last observation across a short gap states what was true; zeroing it
+	// states the opposite.
+	//
+	// Past this gap the silence is no longer lateness but a stall, and a stall
+	// must read as one. Zero disables carrying entirely.
+	MaxCarryGap time.Duration
 }
 
 // Tracker accumulates the normalized sample grid for the current UTC hour.
@@ -67,10 +79,12 @@ func New(program reward.Program, policy Policy) *Tracker {
 	return &Tracker{program: program, policy: policy, lastSlot: -1}
 }
 
-// Sample records one observation. Missing grid slots, including every slot
-// before a mid-hour process start, are inserted as zero. This is deliberately
-// pessimistic: a restart must never manufacture uptime that the exchange did
-// not observe.
+// Sample records one observation. Slots missed by a late tick are filled with
+// the preceding observation for up to MaxCarryGap, because the orders it
+// described did not leave the book while the actor was late. Everything else —
+// a longer gap, and every slot before a mid-hour process start — is inserted as
+// zero. That part stays deliberately pessimistic: a restart must never
+// manufacture uptime that the exchange did not observe.
 func (t *Tracker) Sample(now time.Time, value decimal.Decimal) {
 	t.resetHour(now)
 	slot := t.slot(now)
@@ -114,8 +128,25 @@ func (t *Tracker) slot(now time.Time) int {
 }
 
 func (t *Tracker) fillBefore(slot int) {
+	if t.lastSlot < 0 || slot <= t.lastSlot+1 {
+		t.fillWith(slot, decimal.Zero)
+		return
+	}
+
+	previous := t.samples[len(t.samples)-1]
+	gap := time.Duration(slot-t.lastSlot-1) * t.policy.SampleInterval
+	if gap > t.policy.MaxCarryGap {
+		previous = decimal.Zero
+	}
+	t.fillWith(slot, previous)
+}
+
+func (t *Tracker) fillWith(slot int, value decimal.Decimal) {
 	for missing := t.lastSlot + 1; missing < slot; missing++ {
-		t.samples = append(t.samples, decimal.Zero)
+		t.samples = append(t.samples, value)
+		if value.IsPositive() {
+			t.nonZero++
+		}
 		t.lastSlot = missing
 	}
 }

@@ -176,7 +176,7 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 	// её ширина берётся из того же бюджета дистанции, что и сама котировка,
 	// и перестаёт помещаться раньше неё. См. policy.Ladder.Fit.
 	ladder, anchored := e.ladder.Fit(appetite.Target(conditions, bounds), bounds)
-	quote := e.stickyTarget(anchored)
+	quote := e.stickyTarget(now, anchored)
 	e.rungs = ladder.Layers
 	e.reportStatus(now, conditions, estimate, quote)
 	e.reportMetrics(now, conditions, estimate, quote)
@@ -335,22 +335,53 @@ func (e *Engine) pullDanger(ctx context.Context, th policy.Thresholds, now time.
 // что под ними сдвинули границы. Защита от дрожания должна начинаться с того,
 // чтобы не дрожала сама точка отсчёта.
 //
-// Новая цель принимается только при существенном расхождении либо когда она
-// требует отойти дальше: осторожность применяется немедленно, жадность — нет.
-func (e *Engine) stickyTarget(fresh policy.Quote) policy.Quote {
+// Новая цель принимается немедленно, когда она требует отойти дальше, либо
+// когда расхождение уже не спишешь на дрожание. Возврат к рынку допускает
+// третье основание — время: требование, продержавшееся ниже стоящей цели
+// целый TargetRelaxAfter, дрожанием не является.
+//
+// Третье основание существует потому, что без него порог расхождения работал
+// не гистерезисом, а храповиком. Свежая цель снизу зажата полом (minBps плюс
+// половина ширины лесенки), значит расхождение с ней ограничено сверху тем,
+// насколько цель отодвинулась от пола. Всякий всплеск, отодвинувший её меньше
+// чем на MinDeadBandBps, разрешить возврат уже не мог ничем: рынок успокаивался,
+// требование падало до пола, а лесенка так и стояла снаружи. На боевом счёте
+// это держало центр на 8.4 bps более двадцати часов подряд при требовании 3.1
+// и поле 7.4 — базисный пункт дистанции, который никто не выбирал, ценой
+// пятой части веса котировки.
+func (e *Engine) stickyTarget(now time.Time, fresh policy.Quote) policy.Quote {
 	if !fresh.Feasible || !e.target.Feasible {
 		e.target = fresh
+		e.targetNarrowSince = time.Time{}
 		return fresh
 	}
 
-	widening := fresh.Distance > e.target.Distance
-	drift := fresh.Distance - e.target.Distance
-	if drift < 0 {
-		drift = -drift
+	// Осторожность применяется немедленно и обнуляет отсчёт: требование
+	// вернулось к стоящей цели, отступать больше не от чего.
+	if fresh.Distance >= e.target.Distance {
+		e.targetNarrowSince = time.Time{}
+		if fresh.Distance > e.target.Distance {
+			e.target = fresh
+		}
+		return e.target
 	}
 
-	if widening || drift >= e.cfg.Appetite.MinDeadBandBps {
+	if e.target.Distance-fresh.Distance >= e.cfg.Appetite.MinDeadBandBps {
 		e.target = fresh
+		e.targetNarrowSince = time.Time{}
+		return e.target
+	}
+
+	if e.cfg.Appetite.TargetRelaxAfter <= 0 {
+		return e.target
+	}
+	if e.targetNarrowSince.IsZero() {
+		e.targetNarrowSince = now
+		return e.target
+	}
+	if now.Sub(e.targetNarrowSince) >= e.cfg.Appetite.TargetRelaxAfter {
+		e.target = fresh
+		e.targetNarrowSince = time.Time{}
 	}
 	return e.target
 }

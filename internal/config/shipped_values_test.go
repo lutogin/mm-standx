@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/nd/mm-standx/internal/domain/economics"
+	"github.com/nd/mm-standx/internal/domain/policy"
 	"github.com/nd/mm-standx/internal/domain/reward"
 )
 
@@ -155,4 +156,46 @@ func TestShippedRefillLockoutCoversTheMeasuredReturn(t *testing.T) {
 func TestNegativeRefillLockoutIsRejected(t *testing.T) {
 	_, err := Load(writeConfig(t, minimalConfig+"\ndefaults:\n  quote:\n    refillLockout: -1s\n"))
 	require.ErrorContains(t, err, "refillLockout")
+}
+
+// Срок возврата цели обязан быть задан, и ноль здесь — не «выключено».
+//
+// Гистерезис цели построен на пороге расхождения (minDeadBandBps), а свежая
+// цель снизу зажата полом: minBps плюс половина ширины лесенки. Значит
+// расхождение с ней ограничено сверху тем, насколько цель отодвинулась от пола,
+// и весь диапазон [пол, пол + minDeadBandBps) становится ловушкой: попав туда,
+// цель не возвращается уже ничем. На золоте это 7.4-8.6 bps, то есть больше
+// базисного пункта полосы шириной в десять.
+//
+// Замер боевого счёта 22-24 августа: центр простоял на 8.36-8.52 более двадцати
+// часов подряд при требовании по риску около 3.1. Средний вес ступеней вышел
+// 0.672 вместо 0.816 — пятая часть начисления за дистанцию, которую никто
+// не выбирал.
+//
+// Отвергнутая альтернатива — ноль, то есть прежнее поведение. Граница, которая
+// её отвергает, проверяется здесь же: ловушка существует ровно потому, что
+// minDeadBandBps не помещается между полом и целью.
+func TestShippedTargetRelaxReleasesTheDistanceRatchet(t *testing.T) {
+	gold := shippedConfig(t).Symbols["XAU-USD"]
+	ladder := policy.Ladder{
+		Layers:    gold.Quote.LadderLayers,
+		SpreadBps: gold.Quote.LadderSpreadBps,
+	}
+
+	floor := gold.Appetite.MinBps + ladder.HalfWidth()
+	trap := floor + gold.Appetite.MinDeadBandBps
+	require.Less(t, trap, gold.Appetite.MaxBps,
+		"ловушка обязана быть внутри полосы, иначе доказывать нечего: "+
+			"цель, попавшая между %s и %s, порогом расхождения не возвращается")
+
+	require.Positive(t, gold.Appetite.TargetRelaxAfter,
+		"без срока диапазон %s..%s удерживает цель до перезапуска", floor, trap)
+	require.LessOrEqual(t, gold.Appetite.TargetRelaxAfter, 5*time.Minute,
+		"всплеск не вправе стоить веса дольше, чем рынок после него остывает: "+
+			"замер 19 августа дал полураспад беспокойства в четыре минуты")
+}
+
+func TestNegativeTargetRelaxIsRejected(t *testing.T) {
+	_, err := Load(writeConfig(t, minimalConfig+"\ndefaults:\n  appetite:\n    targetRelaxAfter: -1s\n"))
+	require.ErrorContains(t, err, "targetRelaxAfter")
 }

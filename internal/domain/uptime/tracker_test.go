@@ -262,3 +262,66 @@ func TestLowerTierKeepsItsOwnReserve(t *testing.T) {
 	require.Equal(t, 0.5, s.TierMultiplier)
 	require.InDelta(t, 58, s.TargetPct, 1e-9, "порог 50 плюс резерв 8")
 }
+
+// carryTracker samples every second and describes a gap of up to five seconds
+// by the observation preceding it — the actor's cadence on the live account.
+func carryTracker() *Tracker {
+	return New(program(), Policy{
+		TargetPct:         78,
+		HardFloorPct:      72,
+		ReservePct:        8,
+		MinTierMultiplier: 1,
+		SampleInterval:    time.Second,
+		MaxCarryGap:       5 * time.Second,
+	})
+}
+
+// A late tick is not an absence of quotes.
+//
+// The actor's tick slips regularly — "mark tick handled more than a tick late"
+// appears tens of thousands of times in a live run — and every slot it skipped
+// used to be recorded as zero. The orders it would have described were resting
+// in the book throughout, and the exchange scored them: its report for 24 August
+// credited 1.81-1.98 Maker Hours in the hours our own estimate put at 1.05-1.22.
+//
+// The rejected alternative is named by the second half: with MaxCarryGap at
+// zero the same gap reads as downtime, which is what the code did before.
+func TestShortGapIsDescribedByThePrecedingObservation(t *testing.T) {
+	const size = 3000
+
+	late := carryTracker()
+	late.Sample(hourStart(), decimal.NewFromInt(size))
+	late.Sample(hourStart().Add(4*time.Second), decimal.NewFromInt(size))
+
+	require.Equal(t, 5, len(late.samples), "the grid is filled to the observed slot")
+	require.Equal(t, 5, late.nonZero, "four late seconds are not four seconds of absence")
+
+	strict := tracker(1) // MaxCarryGap is zero here
+	strict.Sample(hourStart(), decimal.NewFromInt(size))
+	strict.Sample(hourStart().Add(4*time.Second), decimal.NewFromInt(size))
+	require.Equal(t, 2, strict.nonZero, "this is the behaviour the carry replaces")
+}
+
+// Past the carry gap the silence is a stall, and a stall must read as one.
+func TestLongGapStillReadsAsDowntime(t *testing.T) {
+	tr := carryTracker()
+	tr.Sample(hourStart(), decimal.NewFromInt(3000))
+	tr.Sample(hourStart().Add(20*time.Second), decimal.NewFromInt(3000))
+
+	require.Equal(t, 21, len(tr.samples))
+	require.Equal(t, 2, tr.nonZero,
+		"twenty seconds of silence is not lateness, and carrying it would manufacture uptime")
+}
+
+// A process starting mid-hour has nothing to carry, and must not invent it.
+//
+// This is the invariant the zero-filling existed for, and it survives the
+// change untouched: the carry needs a preceding observation, and before the
+// first sample of the hour there is none.
+func TestMidHourStartStillCountsTheMissedSlotsAsZero(t *testing.T) {
+	tr := carryTracker()
+	tr.Sample(hourStart().Add(30*time.Minute), decimal.NewFromInt(3000))
+
+	require.Equal(t, 1801, len(tr.samples))
+	require.Equal(t, 1, tr.nonZero, "a restart must never manufacture uptime")
+}
