@@ -2,6 +2,8 @@
 package metrics
 
 import (
+	"strconv"
+
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/nd/mm-standx/internal/domain/market"
@@ -102,7 +104,10 @@ func New() *Prometheus {
 	p.refStaleness = gauge("reference_staleness_seconds",
 		"Age of the last external reference price", "symbol")
 
-	p.fills = counter("fills_total", "Quotes hit by the market", "symbol", "side")
+	// The rung label answers whether a touch takes one rung or the whole side.
+	// That is the entire case for or against the ladder: it costs mean weight
+	// and buys nothing unless fills actually stop at the near rung.
+	p.fills = counter("fills_total", "Quotes hit by the market", "symbol", "side", "rung")
 	p.shadowFills = counter("shadow_fills_total",
 		"Dry run: times the market reached a quote, an upper bound on fills", "symbol", "side")
 	p.flattenCost = counter("flatten_cost_usd_total",
@@ -198,8 +203,18 @@ func (p *Prometheus) ReferenceStaleness(s market.Symbol, seconds float64) {
 	p.refStaleness.WithLabelValues(s.String()).Set(seconds)
 }
 
-func (p *Prometheus) Fill(s market.Symbol, side market.Side) {
-	p.fills.WithLabelValues(s.String(), string(side)).Inc()
+func (p *Prometheus) Fill(s market.Symbol, side market.Side, rung int) {
+	p.fills.WithLabelValues(s.String(), string(side), rungLabel(rung)).Inc()
+}
+
+// rungLabel keeps an unattributed fill out of the rung-zero bucket. The
+// cardinality is bounded by the ladder, which the exchange caps at 100 orders
+// per instrument and the configuration keeps in single digits.
+func rungLabel(rung int) string {
+	if rung < 0 {
+		return "unknown"
+	}
+	return strconv.Itoa(rung)
 }
 
 func (p *Prometheus) ShadowFill(s market.Symbol, side market.Side) {

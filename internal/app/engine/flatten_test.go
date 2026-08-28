@@ -131,7 +131,7 @@ func TestClosingOrderFillDoesNotOpenAnEpisode(t *testing.T) {
 	e, gw, clk, episodes := fillEngine(t)
 
 	// A quote is hit and the exchange reports the resulting short.
-	e.onFill(ctx, fill("quote-1", market.Sell, "0.008", "4276.1"))
+	e.onFill(ctx, fill("quote-1", market.Sell, "0.008", "4276.1"), 0)
 	require.Equal(t, 1, *episodes)
 
 	// The close is submitted from the fill delta without waiting for the
@@ -178,7 +178,7 @@ func TestFillWithoutAPositionClearsTheEpisode(t *testing.T) {
 	ctx := context.Background()
 	e, gw, clk, _ := fillEngine(t)
 
-	e.onFill(ctx, fill("quote-1", market.Sell, "0.008", "4276.1"))
+	e.onFill(ctx, fill("quote-1", market.Sell, "0.008", "4276.1"), 0)
 	require.True(t, e.pendingFill.IsPositive())
 	require.Len(t, gw.marketOrders(), 1,
 		"the reduce-only close is attempted immediately because the position stream may be late")
@@ -200,9 +200,9 @@ func TestEveryPartialFillDeltaIsFlattenedImmediately(t *testing.T) {
 	ctx := context.Background()
 	e, gw, _, episodes := fillEngine(t)
 
-	e.onFill(ctx, fill("quote-1", market.Sell, "0.003", "4276.1"))
-	e.onFill(ctx, fill("quote-1", market.Sell, "0.008", "4276.1"))
-	e.onFill(ctx, fill("quote-1", market.Sell, "0.008", "4276.1"))
+	e.onFill(ctx, fill("quote-1", market.Sell, "0.003", "4276.1"), 0)
+	e.onFill(ctx, fill("quote-1", market.Sell, "0.008", "4276.1"), 0)
+	e.onFill(ctx, fill("quote-1", market.Sell, "0.008", "4276.1"), 0)
 
 	closing := gw.marketOrders()
 	require.Len(t, closing, 2, "the repeated cumulative report must not create a third close")
@@ -225,10 +225,10 @@ func TestFillBurstCooldownResetsWithoutOperatorIntervention(t *testing.T) {
 	e.risk.FillBurstWindow = 10 * time.Minute
 	e.risk.FillBurstCooldown = 20 * time.Minute
 
-	e.onFill(ctx, fill("quote-1", market.Sell, "0.008", "4276.1"))
+	e.onFill(ctx, fill("quote-1", market.Sell, "0.008", "4276.1"), 0)
 	e.clearEpisode(clk.now)
 	clk.advance(5 * time.Minute)
-	e.onFill(ctx, fill("quote-2", market.Sell, "0.008", "4276.1"))
+	e.onFill(ctx, fill("quote-2", market.Sell, "0.008", "4276.1"), 0)
 
 	// This engine has no reward programme, so the hour offers no downtime
 	// budget and the pause collapses to the floor. It still has to end.
@@ -301,7 +301,7 @@ func TestRepeatedClosingReportsSendOneOrder(t *testing.T) {
 	ctx := context.Background()
 	e, gw, clk, _ := fillEngine(t)
 
-	e.onFill(ctx, fill("quote-1", market.Sell, "0.008", "4276.1"))
+	e.onFill(ctx, fill("quote-1", market.Sell, "0.008", "4276.1"), 0)
 	e.position = money.MustParseQty("-0.008")
 
 	clk.advance(200 * time.Millisecond)

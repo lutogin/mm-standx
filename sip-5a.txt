@@ -1,0 +1,209 @@
+Community Maker Yield
+Community Maker Yield is the live implementation of SIP-5A. Makers who keep real, executable, two-sided liquidity on the order book are measured at tick-level granularity and paid for it.
+
+This page publishes the live operating parameters for every market. The full mechanism, scoring path, and rationale are specified in SIP-5A: Community Maker Yield; this page only lists the values StandX operations currently run.
+
+Basic Rules
+Two-sided quoting. Keep active orders on both the bid and ask side within the qualifying band. One-sided quoting does not qualify.
+Qualifying band. Orders must sit within 10 bps of the aggregated latest mark price. Quote slightly tighter than the band to stay qualified through price movement.
+Minimum uptime. Maintain qualifying orders for at least 30 minutes of each hour.
+Per-side cap. Order value counts only up to the per-pair cap; size beyond the cap is ignored.
+Proximity matters. The closer you quote to the mark, the more each order counts, up to 2× at the tightest spreads.
+Reward Assets
+Yield is paid in DUSD, in platform token allocation, or in both at once. While the platform token is not yet live, the standing policy pays makers in both: platform token accrues as allocation entries, and DUSD is distributed under the campaign rules.
+
+Yield is settled daily. Each day has its own reward pool, distributed in proportion to the Maker Hours earned that day. The size of the pool is not fixed; it adapts to market conditions and protocol policy.
+
+Per-Pair Parameters
+Trading session times are in US Eastern Time (America/New_York).
+
+Trading Pair	Unit Size (1 Maker Hour)	Per-Side Cap	Max Maker Hours / hour	Trading Session (ET)	Off-Session Multiplier
+BTC-USD	2	20	10	24/7	N/A (24/7 market)
+ETH-USD	60	600	10	24/7	N/A (24/7 market)
+XAG-USD	1500	3000	2	Sunday to Friday, 18:00 to 17:00 next day	10%
+XAU-USD	30	60	2	Sunday to Friday, 18:00 to 17:00 next day	10%
+CL-USD	1400	2800	2	Sunday to Friday, 18:00 to 17:00 next day	10%
+HYPE-USD	4000	40000	10	24/7	N/A (24/7 market)
+BNB-USD	300	3000	10	24/7	N/A (24/7 market)
+SOL-USD	1500	15000	10	24/7	N/A (24/7 market)
+TSLA-USD	400	800	2	US equity session	10%
+SPCX-USD	800	800	2	US equity session	10%
+MU-USD	200	400	2	US equity session	10%
+Any hour outside a pair’s trading session is scored at 10%. That covers the daily maintenance window (17:00 to 18:00 ET for XAU, XAG and CL), weekends, and holidays, all under the same rule. Crypto markets trade around the clock, so they have no off-session hours and no multiplier.
+
+Plan your uptime around the trading session rather than the calendar day.
+
+StandX operations set and maintain these values and may adjust them for market conditions. Check this page for the current requirements.
+
+Proximity Weight
+Order quantity is scaled by a proximity weight based on distance from the mark price. Live curve: max_weight = 200%, min_weight = 40%, band_bps = 10.
+
+Distance from Mark	Weight	1 BTC Order Counts As
+0 bps	200%	2.0 BTC
+5 bps	80%	0.8 BTC
+10 bps	40%	0.4 BTC
+weight     = (200% - 40%) × (10 - distance_bps) / 10 + 40%
+scaled_qty = weight × original_qty
+Uptime Tiers
+Hourly accrual depends on the share of the hour that qualifying orders stayed on the book.
+
+Tier	Uptime Requirement	Multiplier
+Boosted	≥70% (42+ min/hour)	1.0x
+Standard	≥50% (30+ min/hour)	0.5x
+Your Maker Hours take the better tier outcome, bounded by the per-hour ceiling. See the SIP-5A Maker Hours formula for the full scoring path.
+
+Market Maker Fee Tiers
+Your maker performance is evaluated monthly. Based on the Maker Hours you accumulate in a month, you unlock a fee tier for the following month, and it stays active for that one month. Each month is re-evaluated, so keep up your Maker Hours to maintain or raise your tier.
+
+Tier	Maker Hours Required	Taker Fee (bps)	Maker Fee Rebate (bps)
+MM0	≥ 250 hours (~34%)	3.00	0
+MM1	≥ 360 hours (50%)	2.25	-0.25
+MM2	> 504 hours (70%)	2.00	-0.50
+
+Full Specification
+
+SIP-5A: Community Maker Yield
+Field	Value
+SIP	5A
+Parent	SIP-5: Universal Markets Listing
+Title	Community Maker Yield
+Status	Implemented
+Date	2026-06-30
+Release Date	2026-07-05
+Author	StandX Team
+Summary
+SIP-5A is the first rollout phase of SIP-5. It upgrades the existing Market Maker Uptime Program into Community Maker Yield, activating the order book yield layer of Universal Markets ahead of the full permissionless listing framework.
+
+Community Maker Yield rests on a simple principle: makers who keep real, executable liquidity on the book are paid for it, every day.
+
+Daily yield. Maker contribution is measured and rewarded on a daily cadence. Each day stands on its own: provide qualifying two-sided liquidity, earn that day’s yield.
+Flexible reward assets. Yield is paid in DUSD, in platform token allocation, or in both at once. The reward mix adapts over time according to market conditions, liquidity demand, and protocol policy.
+In parallel, StandX activates platform fee routing into order book incentives: as the always-on platform-level Market Sponsor, the protocol routes a configurable portion of trading fees back into the markets it supports, so that trading activity continuously recycles into maker yield.
+
+After SIP-2 introduced Position Yield and SIP-3 routed Perps fees into native DUSD yield, SIP-5A brings yield to the order book itself. Liquidity becomes a productive layer of Universal Markets. This is the StandX vision of Universal Markets, Universal Yield.
+
+NOTE: At the time of writing, the StandX platform token has not yet been issued.
+
+Motivation
+The Market Maker Uptime Program was built to measure and reward real order book liquidity.
+
+Unlike programs based on reported volume, passive capital, or one-off depth snapshots, StandX measures maker contribution at tick-level granularity. The system evaluates whether liquidity is continuously present, executable, and competitive around the order book. This makes MM Uptime an industry-leading mechanism for rewarding genuine market-making behavior rather than headline numbers.
+
+The mechanism has already proven its value. StandX BTC order book depth crossed 800 BTC within a 10 bps spread, a level that places the venue ahead of many centralized exchanges and major perp DEXes. That milestone showed that properly measured community market-making can produce institutional-grade execution quality.
+
+SIP-5A takes this proven mechanism and turns it into a standing daily yield layer for the order book.
+
+Relationship to SIP-5
+SIP-5 defines the Market Sponsor as a native role in Universal Markets. A Sponsor funds a Market’s Reward Vault, and that vault rewards the market-makers who supply real order book liquidity.
+
+SIP-5A applies this same model to the markets StandX already operates, with one observation that follows naturally from the framework: the protocol itself is a permanent, always-on Market Sponsor. For every protocol-supported market, StandX can route a configurable portion of trading fees into that market’s Reward Vault, or an equivalent order book incentive pool, establishing a continuous platform-backed yield flow.
+
+This is the same fee-routing principle established by earlier proposals, now pointed at the order book:
+
+SIP-2 (Position Yield) routes a portion of fee flow to qualifying open positions.
+SIP-3 (DUSD Native Yield Expansion) routes a portion of Perps fees into DUSD yield.
+SIP-5A routes a portion of fees into order book maker yield.
+When the full SIP-5 framework opens, Community Market Sponsors fund their own Reward Vaults, and StandX continues to operate alongside them as the platform-level Sponsor rather than stepping away. The result is a liquidity layer that is always backed by at least one committed Sponsor.
+
+Specification
+Community Maker Yield measures liquidity at tick-level granularity, not by reported volume or passive balances. The system records each maker’s quoting throughout every hour, scores it, and accrues Maker Hours, which drive the daily reward split. The full scoring path is specified below.
+
+Qualification
+To earn Maker Hours in a given hour, a maker must keep active orders on both the bid and ask sides within a defined qualifying band of the mark price for at least a minimum share of the hour. Both sides must be live; one-sided quoting does not qualify. Order value counts only up to a per-side cap, so any size beyond the cap is ignored.
+
+The qualifying band is measured against the aggregated latest mark price, which moves continuously, so makers should quote slightly inside the band to stay qualified through price movement.
+
+Each market is governed by a set of per-pair parameters:
+
+Unit Size — the notional that equals one Maker Hour;
+Per-side cap — the maximum order value counted per side;
+Maximum Maker Hours per hour — the per-hour ceiling on accrual;
+Qualifying band and minimum uptime — the distance and time thresholds above.
+These parameters are set and maintained by StandX operations, and tuned to each asset’s volatility, depth, and trading hours. This proposal does not fix their values; the live parameters for every market are published on the campaign page.
+
+Proximity Weight
+An order’s quantity is scaled by a proximity weight based on its distance from the mark price. The tighter the quote, the more it counts, so the same Maker Hours can be reached with less capital by quoting closer to the mark.
+
+The weight is a configurable curve defined by three parameters: max_weight (the weight at the mark), min_weight (the weight at the edge of the qualifying band), and band_bps (the qualifying band width):
+
+weight     = (max_weight - min_weight) × (band_bps - distance_bps) / band_bps + min_weight
+scaled_qty = weight × original_qty
+For example, with max_weight = 200%, min_weight = 80%, and band_bps = 10, the curve scales an order from 2x at the mark down to 0.8x at the edge of the band:
+
+Distance from Mark	Weight	1 BTC Order Counts As
+0 bps	200%	2.0 BTC
+5 bps	140%	1.4 BTC
+10 bps	80%	0.8 BTC
+Like the qualification parameters, the proximity curve is set per market by StandX operations and tuned to market conditions, since assets differ in volatility, depth, and trading hours. This proposal does not fix these values; the live curve for each market is published on the campaign page.
+
+Uptime Tiers
+A maker’s hourly accrual depends on uptime, the share of the hour that qualifying orders stayed on the book. Uptime maps to a configurable set of tiers, each pairing an uptime threshold with a reward multiplier (a higher, stricter tier carries a larger multiplier than a lower, more lenient one). The number of tiers, their thresholds, and their multipliers are set by StandX operations and published on the campaign page.
+
+Maker Hours Formula
+Within each hour, the system samples a maker’s proximity-weighted, capped order size (the smaller of the bid/ask side) at irregular intervals, then sorts the samples in descending order. For each tier it reads the order size at the percentile position matching that tier’s uptime threshold (X_p), and computes a candidate score:
+
+score(tier) = (X_p / Unit Size) × multiplier
+The hour’s Maker Hours take the best tier outcome, bounded by the pair’s per-hour ceiling:
+
+Maker Hours = min( max over tiers of score(tier), max_maker_hours_per_hour )
+Taking the maximum across tiers guarantees a maker always receives the better result. All inputs to this formula (the tier thresholds and multipliers, the percentile points, the Unit Size, and the per-hour ceiling) are operations-set parameters, not values fixed by this proposal.
+
+Daily Settlement
+Maker Hours accrue every hour and accumulate across each daily epoch. At epoch close, the day’s reward pool is allocated across makers in proportion to the Maker Hours they earned that day. Quote stuffing, short-cycle cancels, wash trades, and related-account behavior are excluded.
+
+Daily accounting is the primary cadence for Community Maker Yield. Longer-window summaries may still be produced for reporting, audits, or special campaigns.
+
+Flexible Yield Assets
+Community Maker Yield is paid in DUSD, in platform token allocation, or in both at the same time.
+
+The standing policy while the platform token is not yet live is to pay makers in both: platform token allocation accrues as daily allocation entries, and DUSD rewards are distributed directly under the campaign rules. When the platform token goes live, the same daily Maker Hours accounting drives its distribution.
+
+This lets StandX tune the reward mix as markets evolve. DUSD weighting gives a stronger immediate liquidity incentive; platform token weighting aligns long-term makers with the growth of the protocol. The composition can shift without changing the underlying daily measurement.
+
+Fee Routing to Order Book Incentives
+As the always-on platform-level Sponsor, StandX may route a configurable portion of platform fees into Reward Vaults or equivalent order book incentive pools.
+
+This routed fee flow strengthens the liquidity layer of each market: as a market generates trading activity, part of that activity recycles back into maker yield.
+
+The allocation is not uniform across markets, and it is not fixed. Different trading pairs receive different reward emphasis, and the protocol adjusts the split according to market conditions. For example, markets tracking non-24/7 reference assets (such as equities or commodities that close on weekends) need little incentive during their off-hours, so that emphasis is better redirected toward crypto markets that remain continuously tradable around the clock.
+
+The guiding principle is to direct yield where it produces the most useful liquidity, rather than to spread rewards mechanically across every market.
+
+Scope
+SIP-5A applies to market-maker incentives for StandX order book markets. It covers:
+
+the activation of daily Community Maker Yield;
+flexible reward assets (DUSD, platform token, or both);
+platform-level sponsorship by the protocol;
+fee routing into order book incentives.
+SIP-5A does not define the full permissionless market listing process, and it does not finalize user-created Reward Vault mechanics. Those remain part of later SIP-5 rollout phases.
+
+Rationale
+Universal Markets need more than listing access. They need liquidity.
+
+A market becomes useful only when traders can execute against real depth, tight spreads, and reliable availability. This is why SIP-5 cannot be only a listing framework. It also needs a yield framework for the participants who build and maintain the book.
+
+Useful order book contribution can be measured objectively at tick-level granularity, so it can be paid as a standing daily yield rather than a discretionary campaign. SIP-5A makes the protocol itself the first Sponsor backing that yield, so every protocol-supported market carries a committed liquidity layer from day one.
+
+Market makers stop being only service providers. They become yield participants in the markets they help build:
+
+StandX backs the market. Fees return to liquidity. Makers improve the book. Traders get better execution. The market grows through its own activity.
+
+That is Community Maker Yield.
+
+Compatibility
+Community Maker Yield runs on the market-making primitives makers already use: two-sided quoting, uptime, depth contribution, and proximity to the mark price. Participating requires no new model and no new integration. Detailed campaign parameters are published and updated on the campaign pages.
+
+Future Extensions
+SIP-5A prepares the liquidity foundation for later SIP-5 modules.
+
+Future proposals may introduce user-created Reward Vaults, community-sponsored and co-sponsored Markets, fully permissionless market deployment, and more advanced market-specific incentive structures. Each of those can build on the same daily reward rail that SIP-5A activates.
+
+Over time, Community Maker Yield can become the default liquidity engine for every Universal Market.
+
+Conclusion
+SIP-5A turns community market-making into the order book yield layer of SIP-5.
+
+It pays community market-making as a daily order book yield, in DUSD, platform token, or both, makes StandX an always-on platform-level Sponsor, and routes platform fees back into order book liquidity. Liquidity itself becomes a productive part of Universal Markets.
+
+Universal Markets need Universal Yield. SIP-5A brings yield to the order boo

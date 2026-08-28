@@ -144,7 +144,7 @@ func (g *Guard) Start(context.Context) error {
 					CostUSD:       ev.EstimatedCostUSD,
 					StartsEpisode: ev.StartsEpisode,
 				})
-				g.metrics.Fill(ev.Symbol, ev.Side)
+				g.metrics.Fill(ev.Symbol, ev.Side, ev.Rung)
 				cost, _ := ev.EstimatedCostUSD.Float64()
 				g.metrics.FlattenCost(ev.Symbol, cost)
 			})

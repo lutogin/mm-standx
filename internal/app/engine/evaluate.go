@@ -683,7 +683,7 @@ func (e *Engine) retryWithdrawal(ctx context.Context, now time.Time) {
 // the exact move that reached the quote. Taker fees are proportional to
 // notional, while that exposure can move again before the position stream or
 // service tick arrives.
-func (e *Engine) onFill(ctx context.Context, order trading.Order) {
+func (e *Engine) onFill(ctx context.Context, order trading.Order, rung int) {
 	// Биржа присылает накопленный объём исполнения, а не приращение: каждое
 	// следующее сообщение по тому же ордеру повторяет всё, что уже было.
 	// Складывать эти числа значило бы удваивать залив на каждом обновлении.
@@ -706,13 +706,17 @@ func (e *Engine) onFill(ctx context.Context, order trading.Order) {
 
 	e.deps.Log.Warn("order filled",
 		"symbol", e.symbol, "side", order.Side,
+		// Ступень отвечает на вопрос, которого больше не задать задним числом:
+		// снимает ли рынок сторону целиком или останавливается на ближней.
+		// От этого зависит, покупает ли лесенка что-нибудь за свой средний вес.
+		"rung", rung,
 		"qty", delta, "price", order.AvgFillPrice, "new_episode", startsEpisode,
 		// Отметка биржи и наше отставание от неё. Без них по логу нельзя
 		// отличить опоздавшую отмену от ордера, исполненного до решения о ней
 		// (Engine.venueLag).
 		"venue_ts", order.UpdatedAt, "venue_lag", e.venueLag(order))
 
-	e.publishFill(ctx, order, delta, startsEpisode, now)
+	e.publishFill(ctx, order, delta, startsEpisode, rung, now)
 	// The matching engine has applied the quote fill before publishing this
 	// update, so a reduce-only close can be submitted without waiting for the
 	// slower position channel. New fill deltas deliberately bypass
@@ -783,6 +787,7 @@ func (e *Engine) publishFill(
 	order trading.Order,
 	qty money.Qty,
 	startsEpisode bool,
+	rung int,
 	now time.Time,
 ) {
 	price := order.AvgFillPrice
@@ -805,6 +810,7 @@ func (e *Engine) publishFill(
 		NotionalUSD:      notional,
 		EstimatedCostUSD: cost,
 		StartsEpisode:    startsEpisode,
+		Rung:             rung,
 		At:               now,
 	})
 }

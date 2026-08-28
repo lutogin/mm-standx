@@ -126,15 +126,12 @@ func Compute(in Inputs) (Plan, error) {
 		return Plan{}, fmt.Errorf("sizing: %w", err)
 	}
 
-	// Размер сверх программного потолка не засчитывается, поэтому и держать
-	// его в стакане незачем: это риск исполнения без встречной награды.
-	if useful := usefulCeiling(in); useful.IsPositive() && perSide.Gt(useful) {
-		perSide, reason = useful, "capped by the reward ceiling"
-	}
-
-	rungs, err := split(perSide, in.Distances, in.Spec)
+	rungs, capped, err := allocate(perSide, in)
 	if err != nil {
 		return Plan{}, err
+	}
+	if capped {
+		reason = "capped by the reward ceiling"
 	}
 
 	total := money.MustParseQty("0")
@@ -168,27 +165,44 @@ func usableCapital(b Budget) (decimal.Decimal, string) {
 //
 // Потолок зависит от дистанции: чем ближе котировка, тем больше её вес и тем
 // меньше нужно единиц, чтобы упереться в программный предел.
-func usefulCeiling(in Inputs) money.Qty {
-	if !in.Program.PerSideCap.IsPositive() {
+//
+// THE DIVISOR IS THE AVERAGE RUNG WEIGHT, NOT THE NEAREST ONE. The programme
+// scores the sum over every rung at its own weight, while the size is split
+// evenly, so what the side actually reaches is `perSide x mean(weight)`.
+// Dividing the cap by the nearest weight therefore aims at a target the ladder
+// cannot hit: with rungs at 7.0 / 7.4 / 7.8 bps the mean weight is 0.816
+// against 0.880 at the near rung, and the side settles 7% under its own
+// ceiling.
+//
+// Замер 24 августа 2026 (PLAN.md §0), отчёт Maker Yield History по XAU-USD
+// за часы 06:00-14:00 UTC: P70 = 54.3…59.3 при потолке 60, то есть
+// MakerHours 1.81…1.98 из достижимых 2.00. Предсказание прежней формулы —
+// 60 / 0.880 x 0.816 = 55.6 — лежит внутри измеренного интервала, и недобор
+// до потолка объясняется целиком ею, а не аптаймом и не заливами.
+//
+// Расчёт обязан идти по тем ступеням, которые действительно будут выставлены:
+// лесенка, суженная минимальным размером ордера, оставляет ближние ступени
+// с более высокими весами, и средний вес по исходному списку дал бы перелёт
+// над потолком вместо недолёта. Поэтому потолок считается внутри allocate,
+// где число ступеней уже известно.
+func usefulCeiling(p reward.Program, distances []money.Bps) money.Qty {
+	if !p.PerSideCap.IsPositive() || len(distances) == 0 {
 		return money.Qty{}
 	}
 
-	// Считаем по ближней ступени: у неё наибольший вес, и именно она первой
-	// упирается в потолок.
-	nearest := in.Distances[0]
-	for _, d := range in.Distances {
-		if d < nearest {
-			nearest = d
-		}
+	total := 0.0
+	for _, d := range distances {
+		total += p.Curve.Weight(d)
 	}
-	weight := in.Program.Curve.Weight(nearest)
-	if weight <= 0 {
+	if total <= 0 {
 		return money.Qty{}
 	}
-	return money.NewQty(in.Program.PerSideCap.Div(decimal.NewFromFloat(weight)))
+	average := total / float64(len(distances))
+	return money.NewQty(p.PerSideCap.Div(decimal.NewFromFloat(average)))
 }
 
-// split делит размер стороны между ступенями поровну.
+// allocate делит размер стороны между ступенями поровну, применяя программный
+// потолок к тому числу ступеней, которое действительно уместилось.
 //
 // Равное деление выбрано намеренно, хотя перекос в сторону ближних ступеней
 // дал бы больше зачёта на тот же капитал: ближние ступени рискованнее, а цена
@@ -196,22 +210,36 @@ func usefulCeiling(in Inputs) money.Qty {
 //
 // Если ступень не дотягивает до минимального размера инструмента, число ступеней
 // уменьшается. Лучше две полноценные ступени, чем три отвергнутых ордера.
-func split(perSide money.Qty, distances []money.Bps, spec market.SymbolSpec) ([]money.Qty, error) {
-	for layers := len(distances); layers >= 1; layers-- {
-		each := spec.SnapQty(money.NewQty(
-			perSide.Decimal().Div(decimal.NewFromInt(int64(layers)))))
+//
+// The ceiling lives inside this loop rather than before it because the two
+// decisions are coupled: fewer rungs means a higher mean weight, which means a
+// lower ceiling. Capping first and shrinking afterwards would leave the side
+// above the cap — with weights 0.96 / 0.80 / 0.64, a ladder cut to two rungs
+// would reach 1.10x the cap, and the excess earns nothing while carrying the
+// full risk of a fill.
+func allocate(perSide money.Qty, in Inputs) ([]money.Qty, bool, error) {
+	for layers := len(in.Distances); layers >= 1; layers-- {
+		// Размер сверх программного потолка не засчитывается, поэтому и держать
+		// его в стакане незачем: это риск исполнения без встречной награды.
+		size, capped := perSide, false
+		if useful := usefulCeiling(in.Program, in.Distances[:layers]); useful.IsPositive() && size.Gt(useful) {
+			size, capped = useful, true
+		}
 
-		if err := spec.ValidateQty(each); err != nil {
+		each := in.Spec.SnapQty(money.NewQty(
+			size.Decimal().Div(decimal.NewFromInt(int64(layers)))))
+
+		if err := in.Spec.ValidateQty(each); err != nil {
 			continue
 		}
 		rungs := make([]money.Qty, layers)
 		for i := range rungs {
 			rungs[i] = each
 		}
-		return rungs, nil
+		return rungs, capped, nil
 	}
 
-	return nil, fmt.Errorf(
+	return nil, false, fmt.Errorf(
 		"sizing: capital allows %s per side, below the %s minimum for %s",
-		perSide, spec.MinOrderQty, spec.Symbol)
+		perSide, in.Spec.MinOrderQty, in.Spec.Symbol)
 }

@@ -110,9 +110,97 @@ func TestRewardCeilingCapsSize(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, plan.Reason, "reward ceiling")
 
-	// The nearest rung sits at 6.5 bps, where the weight is 96%.
-	// The 20 unit cap therefore saturates at 20 / 0.96 units.
-	require.InDelta(t, 20/0.96, plan.PerSide.Decimal().InexactFloat64(), 0.001)
+	// Rungs stand at 6.5 / 7.5 / 8.5 bps, where the weights are 0.96, 0.80 and
+	// 0.64. The programme scores their sum and the size is split evenly, so the
+	// 20 unit cap saturates at 20 / 0.80 — the mean weight, not the 0.96 of the
+	// near rung.
+	require.InDelta(t, 20/0.80, plan.PerSide.Decimal().InexactFloat64(), 0.001)
+}
+
+// Потолок обязан достигаться ровно, а не приблизительно.
+//
+// Зачёт — сумма по ступеням, каждая со своим весом; именно она упирается в cap,
+// и планировать нужно её, а не размер стороны. Прежняя формула делила cap
+// на вес ближней ступени, и сторона садилась на 7% ниже собственного потолка:
+// отчёт биржи 24 августа 2026 по XAU-USD давал P70 = 54.3…59.3 при потолке 60,
+// то есть 1.81…1.98 Maker Hour из достижимых 2.00 (PLAN.md §0).
+func TestCeilingIsReachedExactlyAtEveryLayerCount(t *testing.T) {
+	ladders := [][]money.Bps{
+		{7},
+		{7, 7.4},
+		{7, 7.4, 7.8},
+		{6.5, 7.5, 8.5},
+	}
+	for _, distances := range ladders {
+		rich := inputs(100_000_000)
+		rich.Distances = distances
+
+		plan, err := Compute(rich)
+		require.NoError(t, err)
+		require.Len(t, plan.Rungs, len(distances))
+
+		scored := 0.0
+		for i, r := range plan.Rungs {
+			scored += r.Decimal().InexactFloat64() * rich.Program.Curve.Weight(distances[i])
+		}
+		perSideCap := rich.Program.PerSideCap.InexactFloat64()
+		require.InDelta(t, perSideCap, scored, 0.001,
+			"the weighted side must land on the cap for %v", distances)
+	}
+}
+
+// Меньше ступеней — меньше нотионала под тем же зачётом.
+//
+// Вес падает с дистанцией, поэтому дальние ступени покупают зачёт дороже:
+// на 7.0 / 7.4 / 7.8 bps средний вес 0.816 против 0.880 у одиночного ордера
+// на 7.0. Ближняя ступень при этом стоит на той же дистанции в обоих случаях —
+// Ladder.Anchor отодвигает наружу центр, а не её.
+//
+// Это и есть цена лесенки: она существует ради присутствия во время
+// перестановки, а не ради награды, и оплачивается семью процентами нотионала
+// под тем же риском.
+func TestFewerRungsReachTheCeilingWithLessSize(t *testing.T) {
+	sizeFor := func(distances []money.Bps) float64 {
+		in := inputs(100_000_000)
+		in.Distances = distances
+		plan, err := Compute(in)
+		require.NoError(t, err)
+		return plan.PerSide.Decimal().InexactFloat64()
+	}
+
+	one := sizeFor([]money.Bps{7})
+	two := sizeFor([]money.Bps{7, 7.4})
+	three := sizeFor([]money.Bps{7, 7.4, 7.8})
+
+	require.Less(t, one, two)
+	require.Less(t, two, three)
+	require.InDelta(t, 0.928, one/three, 0.002,
+		"a single order needs about 7% less size than three rungs")
+}
+
+// Лесенка, суженная минимальным размером ордера, не имеет права перелететь
+// потолок.
+//
+// Потолок и число ступеней связаны: меньше ступеней — выше средний вес — ниже
+// потолок. Посчитанный до сужения, он относился бы к геометрии, которой в итоге
+// нет: при весах 0.96 / 0.80 / 0.64 обрезанная до двух ступеней сторона взяла бы
+// 1.10 потолка, и излишек не приносил бы ничего, неся при этом полный риск
+// исполнения.
+func TestShrunkLadderStillRespectsTheCeiling(t *testing.T) {
+	in := inputs(100_000_000)
+	in.Spec.MinOrderQty = money.MustParseQty("10")
+
+	plan, err := Compute(in)
+	require.NoError(t, err)
+	require.Len(t, plan.Rungs, 2, "three rungs of 8.33 do not clear the 10 unit minimum")
+	require.Contains(t, plan.Reason, "ladder reduced")
+
+	scored := 0.0
+	for i, r := range plan.Rungs {
+		scored += r.Decimal().InexactFloat64() * in.Program.Curve.Weight(in.Distances[i])
+	}
+	require.InDelta(t, in.Program.PerSideCap.InexactFloat64(), scored, 0.001,
+		"the surviving rungs must land on the cap, not above it")
 }
 
 // Quoting closer means more weight per unit, so less size is needed to reach

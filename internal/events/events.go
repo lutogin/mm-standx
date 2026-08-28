@@ -135,8 +135,23 @@ type QuoteFilled struct {
 	EstimatedCostUSD decimal.Decimal
 	// StartsEpisode отличает первое исполнение серии от продолжения.
 	StartsEpisode bool
-	At            time.Time
+	// Rung is the ladder index the filled order was standing on, or
+	// RungUnknown when the order is no longer matched to a slot.
+	//
+	// It decides the ladder geometry and nothing else. A ladder limits the
+	// size taken at a touch only if fills arrive rung by rung; if the market
+	// sweeps the side, the extra rungs buy no protection and cost weight,
+	// because the mean rung weight is what the programme scores. Both readings
+	// exist in the record — three rungs went in 51 ms on 6 August, six fills in
+	// 1.8 s on 18 August — and neither says how the ordinary fill behaves.
+	Rung int
+	At   time.Time
 }
+
+// RungUnknown marks a fill that could not be attributed to a ladder rung: the
+// slot had already been released when the update arrived. Counting these as
+// rung zero would quietly bias the distribution the geometry is chosen from.
+const RungUnknown = -1
 
 func (QuoteFilled) EventName() string { return "account.quote_filled" }
 

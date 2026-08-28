@@ -62,7 +62,12 @@ type Metrics interface {
 
 	// Fill — исполнение котировки, то есть событие, которого стратегия
 	// стремится избежать.
-	Fill(s market.Symbol, side market.Side)
+	//
+	// rung — ступень лесенки, на которой стоял ордер, или events.RungUnknown.
+	// Разметка нужна для одного решения: диверсифицирует лесенка риск или нет.
+	// Если рынок снимает сторону свипом, дальние ступени защиты не покупают,
+	// а вес теряют, потому что зачёт считается по среднему весу ступеней.
+	Fill(s market.Symbol, side market.Side, rung int)
 	// ShadowFill — рынок дошёл до нашей котировки в теневом прогоне.
 	//
 	// Отдельный ряд, а не Fill: смешивать измеренное с гипотетическим в одной
@@ -225,7 +230,7 @@ func (NopMetrics) BookDepth(market.Symbol, market.Side, float64)     {}
 func (NopMetrics) Jump(market.Symbol, float64)                       {}
 func (NopMetrics) MarkStaleness(market.Symbol, float64)              {}
 func (NopMetrics) ReferenceStaleness(market.Symbol, float64)         {}
-func (NopMetrics) Fill(market.Symbol, market.Side)                   {}
+func (NopMetrics) Fill(market.Symbol, market.Side, int)              {}
 func (NopMetrics) ShadowFill(market.Symbol, market.Side)             {}
 func (NopMetrics) FlattenCost(market.Symbol, float64)                {}
 func (NopMetrics) RealizedPnL(float64)                               {}

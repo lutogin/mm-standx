@@ -89,7 +89,16 @@ func main() {
 		"how far back from a touch a warning still counts")
 	flag.DurationVar(&opts.reaction, "reaction", 400*time.Millisecond,
 		"time the bot needs to pull a quote; a warning later than this is useless")
+
+	sweep := sweepOptions{}
+	flag.Float64Var(&sweep.spacing, "ladder-spacing", 0.4, "distance between ladder rungs, bps")
+	flag.IntVar(&sweep.maxLayers, "ladder-layers", 3, "widest ladder to compare; every count below it is reported too")
+	flag.DurationVar(&sweep.window, "sweep-window", 2*time.Second,
+		"how long after the first touch the market is still credited with the same sweep")
 	flag.Parse()
+	// The near rung stands where the risk estimate allows, which is the same
+	// distance the touch report already quotes.
+	sweep.near = opts.quoteBps
 
 	files, err := filepath.Glob(filepath.Join(*dir, "*.ndjson"))
 	if err != nil || len(files) == 0 {
@@ -110,6 +119,7 @@ func main() {
 	}
 
 	report(files, lines, stats)
+	reportSweepsForAll(stats, sweep)
 	reportReference(stats, opts)
 }
 

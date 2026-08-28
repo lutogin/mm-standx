@@ -6,11 +6,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shopspring/decimal"
 	"github.com/stretchr/testify/require"
 
 	"github.com/nd/mm-standx/internal/domain/economics"
+	"github.com/nd/mm-standx/internal/domain/market"
+	"github.com/nd/mm-standx/internal/domain/money"
 	"github.com/nd/mm-standx/internal/domain/policy"
 	"github.com/nd/mm-standx/internal/domain/reward"
+	"github.com/nd/mm-standx/internal/domain/sizing"
 )
 
 // shippedConfig — тот самый файл, который едет на сервер.
@@ -198,4 +202,184 @@ func TestShippedTargetRelaxReleasesTheDistanceRatchet(t *testing.T) {
 func TestNegativeTargetRelaxIsRejected(t *testing.T) {
 	_, err := Load(writeConfig(t, minimalConfig+"\ndefaults:\n  appetite:\n    targetRelaxAfter: -1s\n"))
 	require.ErrorContains(t, err, "targetRelaxAfter")
+}
+
+// liveGoldSpec — инструмент, каким его отдаёт биржа: десятицентовый шаг цены
+// и три знака в количестве. Ни минимум, ни максимум ордера здесь не связывают,
+// и это намеренно: предмет проверки — потолок программы и бюджет маржи, а не
+// лимиты контракта.
+func liveGoldSpec() market.SymbolSpec {
+	return market.SymbolSpec{
+		Symbol:            "XAU-USD",
+		PriceTickDecimals: 1,
+		QtyTickDecimals:   3,
+		MinOrderQty:       money.MustParseQty("0.001"),
+		MaxOrderQty:       money.MustParseQty("100"),
+		MaxOpenOrders:     100,
+	}
+}
+
+// Замеры боевого счёта, от которых считается этот файл.
+const (
+	// liveEquityUSD — счёт 28 августа 2026 (PLAN.md §0, комментарий
+	// к utilizationPct).
+	liveEquityUSD = 20596
+	// liveMarkUSD — цена золота из standxctl symbols, PLAN.md §1.3.
+	liveMarkUSD = 4076.5
+	// liveMarginPct — доля нотионала, которую биржа заблокировала при плече 40.
+	// Оценка того же дня давала 2.667%; списала биржа по 2.887%.
+	//
+	// Расхождение и есть причина, по которой бюджет ограничен ещё и суммой,
+	// которую сообщает сама биржа (sizing.Budget.SpendableUSD): 2.667 — это
+	// оценка, а не свойство.
+	liveMarginPct         = 2.667
+	liveMarginPctObserved = 2.887
+)
+
+// livePlan считает план размера по действующей конфигурации для лесенки из
+// layers ступеней, ближняя из которых стоит на полу дистанции.
+func livePlan(t *testing.T, cfg *Config, layers int, marginPct float64) (sizing.Plan, []money.Bps) {
+	t.Helper()
+	gold := cfg.Symbols["XAU-USD"]
+
+	// Ступени расставляются вокруг центра, а не от него: policy.Ladder.Anchor
+	// отодвигает наружу центр, чтобы ближняя ступень встала ровно на дистанцию,
+	// которую потребовал риск. Здесь эта дистанция — жёсткий пол appetite.
+	ladder := policy.Ladder{Layers: layers, SpreadBps: gold.Quote.LadderSpreadBps}
+	distances := ladder.Distances(gold.Appetite.MinBps + ladder.HalfWidth())
+
+	plan, err := sizing.Compute(sizing.Inputs{
+		Budget: sizing.Budget{
+			EquityUSD:        decimal.NewFromInt(liveEquityUSD),
+			InitialMarginPct: marginPct,
+			UtilizationPct:   cfg.Risk.UtilizationPct,
+		},
+		Spec: liveGoldSpec(),
+		Program: reward.Program{
+			Curve: reward.Curve{
+				BandBps:      cfg.Reward.BandBps,
+				MaxWeightPct: cfg.Reward.MaxWeightPct,
+				MinWeightPct: cfg.Reward.MinWeightPct,
+			},
+			UnitSize:             requireDecimal(t, gold.Program.UnitSize),
+			PerSideCap:           requireDecimal(t, gold.Program.PerSideCap),
+			MaxMakerHoursPerHour: gold.Program.MaxMakerHoursPerHour,
+		},
+		Mark:      money.MustParsePrice("4076.5"),
+		Distances: distances,
+	})
+	require.NoError(t, err)
+	return plan, distances
+}
+
+// scoredSide — взвешенная сторона, то самое X_side, которое биржа кладёт
+// в перцентиль. Считается суммой по ступеням, каждая со своим весом.
+func scoredSide(cfg *Config, plan sizing.Plan, distances []money.Bps) float64 {
+	curve := reward.Curve{
+		BandBps:      cfg.Reward.BandBps,
+		MaxWeightPct: cfg.Reward.MaxWeightPct,
+		MinWeightPct: cfg.Reward.MinWeightPct,
+	}
+	out := 0.0
+	for i, r := range plan.Rungs {
+		out += r.Decimal().InexactFloat64() * curve.Weight(distances[i])
+	}
+	return out
+}
+
+// marginShare — какая доля счёта уходит под маржу обеих сторон.
+func marginShare(plan sizing.Plan, marginPct float64) float64 {
+	notional := plan.PerSide.Decimal().InexactFloat64() * liveMarkUSD * 2
+	return notional * marginPct / 100 / liveEquityUSD * 100
+}
+
+func requireDecimal(t *testing.T, s string) decimal.Decimal {
+	t.Helper()
+	d, err := decimal.NewFromString(s)
+	require.NoError(t, err)
+	return d
+}
+
+// Счёт обязан доходить до почасового потолка, и до 28 августа 2026 он до него
+// не доходил по вине расчёта размера, а не рынка.
+//
+// sizing.usefulCeiling делил перекрытие на вес БЛИЖНЕЙ ступени, тогда как
+// начисление считает сумму по всем ступеням, каждая со своим весом. Сторона
+// при этом планировалась под цель, которой лесенка достичь не может:
+// 60 / 0.880 x 0.816 = 55.6 против потолка 60.
+//
+// Отчёт Maker Yield History по XAU-USD за 24 августа, часы 06:00-14:00 UTC:
+// P70 = 54.3…59.3, Maker Hours 1.81…1.98 при потолке 2.00. Предсказание старой
+// формулы лежит внутри измеренного интервала — недобор объяснялся ею целиком,
+// а не аптаймом и не заливами.
+func TestShippedSizingReachesTheHourlyCeilingOnTheLiveAccount(t *testing.T) {
+	cfg := shippedConfig(t)
+	gold := cfg.Symbols["XAU-USD"]
+	perSideCap := requireDecimal(t, gold.Program.PerSideCap).InexactFloat64()
+
+	plan, distances := livePlan(t, cfg, gold.Quote.LadderLayers, liveMarginPct)
+	require.Contains(t, plan.Reason, "reward ceiling",
+		"на боевом счёте связывать обязан потолок программы, а не капитал")
+
+	scored := scoredSide(cfg, plan, distances)
+	require.InDelta(t, perSideCap, scored, 0.01,
+		"взвешенная сторона обязана вставать ровно на потолок")
+	require.InDelta(t, gold.Program.MaxMakerHoursPerHour, scored/requireDecimal(t, gold.Program.UnitSize).InexactFloat64(), 0.01,
+		"это и есть 2.00 Maker Hour в час")
+
+	// Отвергнутая формула названа явно, чтобы её нельзя было вернуть молча.
+	curve := reward.Curve{BandBps: cfg.Reward.BandBps, MaxWeightPct: cfg.Reward.MaxWeightPct, MinWeightPct: cfg.Reward.MinWeightPct}
+	mean := 0.0
+	for _, d := range distances {
+		mean += curve.Weight(d)
+	}
+	mean /= float64(len(distances))
+	byNearest := perSideCap / curve.Weight(distances[0]) * mean
+	require.Less(t, byNearest, perSideCap*0.94,
+		"деление на вес ближней ступени не доносит сторону до потолка")
+
+	// Возросший размер обязан помещаться в бюджет маржи, иначе выигрыш
+	// в зачёте оплачивался бы отказами «balance not enough».
+	require.Less(t, marginShare(plan, liveMarginPct), cfg.Risk.UtilizationPct,
+		"план обязан оставаться внутри utilizationPct")
+}
+
+// Меньше ступеней — больше запаса по марже под тем же зачётом.
+//
+// Это вход в решение о числе ступеней, а не само решение: лесенка существует
+// ради присутствия во время перестановки, и отказ от неё оплачивается
+// концентрацией размера на ближней ступени. Здесь фиксируется только цена
+// в марже, которую видно из конфигурации.
+//
+// Замеренная ставка блокировки — величина неточная: 2.667% дала оценка того же
+// дня, 2.887% списала биржа. При верхнем значении трёхступенчатая лесенка
+// в бюджет уже не помещается и падает обратно под ограничение капитала,
+// то есть до потолка часа не доходит.
+func TestFewerRungsBuyMarginHeadroomAtTheHourlyCeiling(t *testing.T) {
+	cfg := shippedConfig(t)
+	perSideCap := requireDecimal(t, cfg.Symbols["XAU-USD"].Program.PerSideCap).InexactFloat64()
+
+	var shares []float64
+	for layers := 1; layers <= 3; layers++ {
+		plan, distances := livePlan(t, cfg, layers, liveMarginPct)
+		require.InDelta(t, perSideCap, scoredSide(cfg, plan, distances), 0.01,
+			"каждая геометрия обязана доходить до потолка при %d ступенях", layers)
+		shares = append(shares, marginShare(plan, liveMarginPct))
+	}
+
+	require.Less(t, shares[0], shares[1])
+	require.Less(t, shares[1], shares[2])
+	require.InDelta(t, 0.927, shares[0]/shares[2], 0.005,
+		"один ордер берёт тот же зачёт примерно на 7%% меньшем нотионале")
+
+	// При верхней оценке ставки блокировки трёх ступеней бюджет уже не несёт.
+	three, distances := livePlan(t, cfg, 3, liveMarginPctObserved)
+	require.Contains(t, three.Reason, "margin budget")
+	require.Less(t, scoredSide(cfg, three, distances), perSideCap,
+		"под 2.887% трёхступенчатая лесенка до потолка часа не доходит")
+
+	one, oneDistances := livePlan(t, cfg, 1, liveMarginPctObserved)
+	require.Contains(t, one.Reason, "reward ceiling")
+	require.InDelta(t, perSideCap, scoredSide(cfg, one, oneDistances), 0.01,
+		"одиночный ордер доходит до потолка и под верхней оценкой ставки")
 }

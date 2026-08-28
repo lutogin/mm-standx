@@ -1080,12 +1080,22 @@ func (e *Engine) onOrder(ctx context.Context, ev events.OrderUpdated) {
 
 	_, knownQuote := e.filled[ev.Order.ClOrdID]
 	matched := false
+	// Ступень запоминается здесь, потому что дальше её уже нет: терминальный
+	// статус сбрасывает слот, и к моменту учёта залива сопоставлять было бы
+	// не с чем. Повторное сообщение по тому же ордеру приходит уже без ступени
+	// и попадает в RungUnknown — это и есть цена того, что слот один, а
+	// сообщений о нём несколько.
+	rung := events.RungUnknown
 	ladder := e.ladderFor(ev.Order.Side)
 	if ladder != nil {
-		_, matched = ladder.OnOrderUpdate(ev.Order, e.deps.Clock.Now())
+		var slot int
+		slot, matched = ladder.OnOrderUpdate(ev.Order, e.deps.Clock.Now())
+		if matched {
+			rung = slot
+		}
 	}
 	if ev.Order.FilledQty.IsPositive() && (knownQuote || matched) {
-		e.onFill(ctx, ev.Order)
+		e.onFill(ctx, ev.Order, rung)
 	} else if ev.Order.FilledQty.IsPositive() {
 		// PositionUpdated remains the authority for account exposure and will
 		// flatten an unexpected position. It must not turn a manual or replayed

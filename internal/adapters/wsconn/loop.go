@@ -107,6 +107,12 @@ type Loop struct {
 	// жизни соединения, а спрашивать его на каждом разрыве значило бы допускать,
 	// что мог бы измениться.
 	optional bool
+	// healthyAfter is how long a session must last to be judged healthy. It is
+	// a field rather than the bare constant so the rotation test can shrink it:
+	// the property under test is that a planned rotation resets the backoff,
+	// and waiting a real minute to observe it would price the test out of the
+	// suite it belongs in.
+	healthyAfter time.Duration
 
 	// active хранит соединение, открытое для внешних отправителей. Устанавливается
 	// только после успешного рукопожатия: до этого писать в сокет вправе лишь
@@ -127,15 +133,16 @@ func New(
 	log *slog.Logger,
 ) *Loop {
 	return &Loop{
-		name:     name,
-		url:      url,
-		cfg:      cfg,
-		handler:  handler,
-		bus:      bus,
-		clock:    clock,
-		log:      log.With("component", "wsconn", "stream", name),
-		optional: optional(handler),
-		done:     make(chan struct{}),
+		name:         name,
+		url:          url,
+		cfg:          cfg,
+		handler:      handler,
+		bus:          bus,
+		clock:        clock,
+		log:          log.With("component", "wsconn", "stream", name),
+		optional:     optional(handler),
+		healthyAfter: healthyAfter,
+		done:         make(chan struct{}),
 	}
 }
 
@@ -215,7 +222,7 @@ func (l *Loop) run(ctx context.Context) {
 
 		// Соединение, прожившее заметное время, считаем здоровым: иначе плановая
 		// ротация раз в двадцать часов разгоняла бы экспоненту задержки.
-		if l.clock.Now().Sub(start) > healthyAfter {
+		if l.clock.Now().Sub(start) > l.healthyAfter {
 			delay = l.cfg.WSReconnectMin
 		}
 		l.log.Warn("connection lost, reconnecting", "error", err, "delay", delay)
