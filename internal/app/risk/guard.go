@@ -54,6 +54,10 @@ type Guard struct {
 	pausedUntil time.Time
 	// nextSuspectLog прореживает предупреждение о канале сделок.
 	nextSuspectLog time.Time
+	// trippedUntil — объявленный срок автоснятия. Хранится, чтобы отличить
+	// снятие по истечении срока от смены суток и от вмешательства человека:
+	// вердикт этой разницы не несёт, а в логе она — первое, что спросят.
+	trippedUntil time.Time
 }
 
 // suspectLogInterval — как часто повторяется предупреждение о канале сделок.
@@ -77,6 +81,8 @@ func New(
 		MaxDailyLossUSD: cfg.MaxDailyLossUSD,
 		MaxFillsPerHour: cfg.MaxFillsPerHour,
 		TripOnDrawdown:  cfg.KillSwitchOnDrawdown,
+		Cooldown:        cfg.KillSwitchCooldown,
+		MaxAutoResumes:  cfg.KillSwitchMaxAutoResumes,
 	}
 	return &Guard{
 		limits:            limits,
@@ -110,6 +116,8 @@ func (g *Guard) Start(context.Context) error {
 		"fill_burst_window", g.fillBurstWindow,
 		"fill_burst_cooldown", g.fillBurstCooldown,
 		"trip_on_drawdown", g.limits.TripOnDrawdown,
+		"kill_switch_cooldown", g.limits.Cooldown,
+		"kill_switch_max_auto_resumes", g.limits.MaxAutoResumes,
 		"persisted", g.store != nil)
 
 	// The same values as metrics: the startup line answers the question only
@@ -122,6 +130,8 @@ func (g *Guard) Start(context.Context) error {
 	g.metrics.RiskLimit("fill_burst_window_seconds", g.fillBurstWindow.Seconds())
 	g.metrics.RiskLimit("fill_burst_cooldown_seconds", g.fillBurstCooldown.Seconds())
 	g.metrics.RiskLimit("trip_on_drawdown", boolAsFloat(g.limits.TripOnDrawdown))
+	g.metrics.RiskLimit("kill_switch_cooldown_seconds", g.limits.Cooldown.Seconds())
+	g.metrics.RiskLimit("kill_switch_max_auto_resumes", float64(g.limits.MaxAutoResumes))
 
 	g.restore()
 
@@ -278,15 +288,28 @@ func (g *Guard) evaluate(ctx context.Context) {
 			return
 		}
 		g.announced = true
+		g.trippedUntil = v.TrippedUntil
+
+		// Срок снятия печатается и уходит актору внутри причины: в сводке
+		// движка причина показывается как есть, и оператор, увидевший
+		// «halted: ...», обязан узнать оттуда же, ждать ему полутора часов
+		// или полуночи UTC.
+		reason, resume := v.Reason, "midnight UTC"
+		if !v.TrippedUntil.IsZero() {
+			resume = v.TrippedUntil.UTC().Format(time.RFC3339)
+			reason = fmt.Sprintf("%s; resuming at %s", v.Reason, resume)
+		}
 		g.log.Error("kill switch tripped, trading halted",
 			"reason", v.Reason,
 			"loss_usd", fmt.Sprintf("%.2f", v.LossUSD),
-			"fills_last_hour", v.FillsLastHour)
+			"fills_last_hour", v.FillsLastHour,
+			"resume_at", resume,
+			"auto_resumes_left", v.AutoResumesLeft)
 
 		// Снимок пишется до публикации: если процесс погибнет в момент остановки,
 		// перезапуск обязан застать защиту уже взведённой.
 		g.persist()
-		events.Publish(g.bus, ctx, events.KillSwitchTripped{Reason: v.Reason, At: now})
+		events.Publish(g.bus, ctx, events.KillSwitchTripped{Reason: reason, At: now})
 		return
 	}
 
@@ -294,8 +317,15 @@ func (g *Guard) evaluate(ctx context.Context) {
 	// об этом нужно сказать: у него запрет хранится флагом, и снять его самому
 	// ему нечем.
 	if g.announced {
+		cause := "a new UTC day or a cleared state snapshot"
+		if !g.trippedUntil.IsZero() && !now.Before(g.trippedUntil) {
+			cause = "the cooldown expired"
+		}
 		g.announced = false
-		g.log.Warn("kill switch cleared, quoting is allowed again")
+		g.trippedUntil = time.Time{}
+		g.log.Warn("kill switch cleared, quoting is allowed again",
+			"cause", cause,
+			"auto_resumes_left", v.AutoResumesLeft)
 		events.Publish(g.bus, ctx, events.KillSwitchCleared{At: now})
 	}
 }

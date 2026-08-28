@@ -39,6 +39,29 @@ type Limits struct {
 	// TripOnDrawdown включает остановку по дневному убытку. Выключенный
 	// лимит по-прежнему считается и публикуется в метриках, но не тормозит.
 	TripOnDrawdown bool
+
+	// Cooldown — сколько остановка по дневному убытку держится, прежде чем
+	// снимется сама. Ноль возвращает прежнее поведение: до полуночи UTC.
+	//
+	// Заведено потому, что прежняя несоразмерность стоила суток присутствия
+	// за один залив. 27 августа свип одной ступени дал 71 USD при лимите 60
+	// и снял котирование на 9 ч 14 мин — до полуночи UTC. Защита сработала
+	// по замыслу, но цена ответа не имела отношения к цене события: убыток
+	// был разовым и уже реализованным, а платили за него присутствием.
+	//
+	// Снятие переносит начало отсчёта убытка на момент снятия (см. release):
+	// иначе первая же оценка после паузы увидела бы ту же величину и взвела
+	// бы остановку снова, то есть пауза была бы вечной.
+	Cooldown time.Duration
+
+	// MaxAutoResumes — сколько раз за сутки UTC остановка снимается сама.
+	//
+	// Предел существует потому, что перенос отсчёта превращает дневной лимит
+	// в оконный: без потолка на число окон сутки стоили бы MaxDailyLossUSD
+	// столько раз, сколько их помещается в двадцать четыре часа. Исчерпание
+	// возвращает прежнее поведение — следующая остановка держится до полуночи
+	// UTC, и худший день ограничен (MaxAutoResumes+1) × MaxDailyLossUSD.
+	MaxAutoResumes int
 }
 
 // Fill — одно исполнение нашей котировки.
@@ -118,8 +141,29 @@ type State struct {
 	// осознанное действие человека, а не побочный эффект рестарта.
 	Tripped       bool   `json:"tripped"`
 	TrippedReason string `json:"tripped_reason,omitempty"`
-	// TrippedAt — момент срабатывания, для разбора инцидента.
+	// TrippedAt — момент срабатывания, для разбора инцидента. Не очищается
+	// при снятии: вопрос «когда сработало в прошлый раз» переживает снятие.
 	TrippedAt time.Time `json:"tripped_at"`
+
+	// TrippedUntil — момент, в который остановка снимется сама.
+	//
+	// Нулевое значение означает, что сама она не снимется: так взводятся
+	// остановки по внешней причине (нечитаемый снимок, решение человека)
+	// и остановка по убытку после того, как автоснятия за сутки исчерпаны.
+	// Снимок прошлой версии без этого поля читается именно так — консервативно.
+	TrippedUntil time.Time `json:"tripped_until,omitempty"`
+
+	// AutoResumesToday — сколько раз за эти сутки остановка снялась сама.
+	AutoResumesToday int `json:"auto_resumes_today"`
+
+	// WindowBaseNetUSD и WindowBaseCostUSD — счётчики на момент последнего
+	// автоснятия. Лимит меряется от них, а не от начала суток.
+	//
+	// Держатся отдельно от самих счётчиков намеренно: ReportedNetUSD остаётся
+	// дневным итогом и печатается как дневной итог. Обнулять его при снятии
+	// значило бы потерять ответ на вопрос, во что обошлись сутки целиком.
+	WindowBaseNetUSD  decimal.Decimal `json:"window_base_net_usd"`
+	WindowBaseCostUSD decimal.Decimal `json:"window_base_cost_usd"`
 }
 
 // New создаёт учёт с заданными лимитами.
@@ -237,6 +281,12 @@ type Verdict struct {
 	PausedUntil time.Time
 	// PauseReason описывает паузу человекочитаемо.
 	PauseReason string
+
+	// TrippedUntil — момент, в который остановка снимется сама. Нулевое
+	// значение при Tripped означает, что сама она не снимется.
+	TrippedUntil time.Time
+	// AutoResumesLeft — сколько автоснятий остаётся за эти сутки.
+	AutoResumesLeft int
 }
 
 // Paused сообщает, действует ли пауза на момент now.
@@ -246,13 +296,21 @@ func (v Verdict) Paused(now time.Time) bool {
 
 // Assess выносит вердикт и, при достижении лимита, взводит остановку.
 //
-// Взведённая остановка не снимается сама: вернуть бота в работу может только
-// человек, разобравшийся в причине. Автоматическое восстановление означало бы,
-// что защита срабатывает ровно столько раз, сколько нужно, чтобы исчерпать
-// депозит по частям.
+// Остановка по дневному убытку снимается сама по истечении Cooldown, и это
+// правка прежнего решения, а не отступление от него. Прежде она держалась
+// до полуночи UTC, и возражение против автоснятия было такое: защита,
+// снимающая себя, срабатывает ровно столько раз, сколько нужно, чтобы
+// исчерпать депозит по частям. Возражение верное, и отвечает на него не
+// длительность паузы, а MaxAutoResumes: число окон за сутки ограничено,
+// поэтому худший день по-прежнему ограничен суммой, а не временем суток.
+//
+// Что осталось прежним: остановка по внешней причине — нечитаемый снимок,
+// решение человека — не снимается сама никогда (см. Trip). Там условие
+// не спадает со временем, и снимать его должен тот, кто в нём разобрался.
 func (l *Ledger) Assess(now time.Time) Verdict {
 	l.roll(now)
 	l.evict(now)
+	l.release(now)
 
 	v := Verdict{
 		ReportedNetUSD:      f(l.state.ReportedNetUSD),
@@ -274,10 +332,14 @@ func (l *Ledger) Assess(now time.Time) Verdict {
 	// normal day by a strategy that is making money. The dual accounting was
 	// written for a broken trade channel (see EstimatedCostUSD), and that is the
 	// only case where it may speak for the exchange.
-	reportedLoss := -f(l.state.ReportedNetUSD)
+	//
+	// Меряется окно, а не сутки: после автоснятия отсчёт начинается заново
+	// (см. release). Пока автоснятий не было, база нулевая и окно совпадает
+	// с сутками — прежнее поведение.
+	reportedLoss := -f(l.state.ReportedNetUSD.Sub(l.state.WindowBaseNetUSD))
 	v.LossUSD = reportedLoss
 	if v.TradeChannelSuspect {
-		v.LossUSD = max(reportedLoss, v.EstimatedCostUSD)
+		v.LossUSD = max(reportedLoss, f(l.state.EstimatedCostUSD.Sub(l.state.WindowBaseCostUSD)))
 	}
 
 	// Частота заливов приостанавливает котирование, но не останавливает его.
@@ -289,12 +351,43 @@ func (l *Ledger) Assess(now time.Time) Verdict {
 
 	case l.limits.TripOnDrawdown && l.limits.MaxDailyLossUSD > 0 &&
 		v.LossUSD >= l.limits.MaxDailyLossUSD:
-		l.trip(now, fmt.Sprintf(
+		l.tripReleasable(now, fmt.Sprintf(
 			"daily loss %.2f USD reached the %.2f limit (exchange reported %.2f, cost model %.2f)",
 			v.LossUSD, l.limits.MaxDailyLossUSD, v.ReportedNetUSD, v.EstimatedCostUSD))
 		v.Tripped, v.Reason = true, l.state.TrippedReason
 	}
+
+	v.TrippedUntil = l.state.TrippedUntil
+	v.AutoResumesLeft = l.autoResumesLeft()
 	return v
+}
+
+// release снимает остановку по дневному убытку, когда её срок истёк.
+//
+// Перенос базы обязателен и не является поблажкой. Величина, взведшая
+// остановку, реализована и никуда не денется до полуночи UTC; оставить отсчёт
+// от начала суток значило бы, что первая же оценка после снятия увидит тот же
+// убыток и взведёт остановку снова — в тот же миг, навсегда, с точностью до
+// такта цикла. Отсчёт поэтому начинается заново, а от бесконечного повторения
+// защищает не он, а MaxAutoResumes.
+func (l *Ledger) release(now time.Time) {
+	if !l.state.Tripped || l.state.TrippedUntil.IsZero() || now.Before(l.state.TrippedUntil) {
+		return
+	}
+	l.state.Tripped = false
+	l.state.TrippedReason = ""
+	l.state.TrippedUntil = time.Time{}
+	l.state.AutoResumesToday++
+	l.state.WindowBaseNetUSD = l.state.ReportedNetUSD
+	l.state.WindowBaseCostUSD = l.state.EstimatedCostUSD
+}
+
+// autoResumesLeft — сколько автоснятий осталось за эти сутки.
+func (l *Ledger) autoResumesLeft() int {
+	if l.limits.Cooldown <= 0 {
+		return 0
+	}
+	return max(0, l.limits.MaxAutoResumes-l.state.AutoResumesToday)
 }
 
 // pause сообщает, до какого момента частота заливов запрещает котировать.
@@ -350,6 +443,10 @@ func (l *Ledger) tradeChannelSuspect(now time.Time) bool {
 }
 
 // Trip взводит остановку по внешней причине.
+//
+// Такая остановка не снимается сама ни при каком Cooldown. Причина у неё
+// не денежная и со временем не спадает: нечитаемый снимок через полтора часа
+// читаемым не станет, а решение человека отменяет человек.
 func (l *Ledger) Trip(now time.Time, reason string) {
 	l.roll(now)
 	l.trip(now, reason)
@@ -358,6 +455,19 @@ func (l *Ledger) Trip(now time.Time, reason string) {
 // Tripped сообщает, взведена ли остановка.
 func (l *Ledger) Tripped() bool { return l.state.Tripped }
 
+// tripReleasable взводит остановку, которая снимется сама по истечении
+// Cooldown, — если автоснятия за сутки ещё не исчерпаны. Когда исчерпаны,
+// остановка получается обычной: до полуночи UTC.
+func (l *Ledger) tripReleasable(now time.Time, reason string) {
+	if l.state.Tripped {
+		return
+	}
+	l.trip(now, reason)
+	if l.autoResumesLeft() > 0 {
+		l.state.TrippedUntil = now.Add(l.limits.Cooldown)
+	}
+}
+
 func (l *Ledger) trip(now time.Time, reason string) {
 	if l.state.Tripped {
 		return
@@ -365,6 +475,7 @@ func (l *Ledger) trip(now time.Time, reason string) {
 	l.state.Tripped = true
 	l.state.TrippedReason = reason
 	l.state.TrippedAt = now
+	l.state.TrippedUntil = time.Time{}
 }
 
 // roll переводит учёт на новые сутки UTC.

@@ -320,3 +320,127 @@ func TestUnclosedLegStaysVisible(t *testing.T) {
 	require.InDelta(t, 0, v.ReportedNetUSD, 1e-9)
 	require.InDelta(t, -263.27, v.OpenLegUSD, 0.01, "the leg is reported, not counted as loss")
 }
+
+// cooldownLimits — те же пределы, но остановка по убытку снимается сама.
+func cooldownLimits() risk.Limits {
+	l := limits()
+	l.Cooldown = 90 * time.Minute
+	l.MaxAutoResumes = 3
+	return l
+}
+
+// Остановка по дневному убытку прежде держалась до полуночи UTC. 27 августа
+// свип одной ступени в 14:46 снял котирование на девять часов при событии
+// длиной в две секунды — несоразмерность, ради которой заведён Cooldown.
+func TestDailyLossTripIsReleasedAfterTheCooldown(t *testing.T) {
+	l := risk.New(cooldownLimits())
+	l.OnTrade(at(10, 0), risk.Execution{CashUSD: usd("-120"), FeeUSD: usd("0")})
+
+	v := l.Assess(at(10, 0))
+	require.True(t, v.Tripped)
+	require.Equal(t, at(11, 30), v.TrippedUntil, "the release time is announced when the switch trips")
+
+	require.True(t, l.Assess(at(11, 29)).Tripped, "not a second early")
+
+	v = l.Assess(at(11, 30))
+	require.False(t, v.Tripped)
+	require.Empty(t, v.Reason)
+}
+
+// Снятие обязано перенести начало отсчёта. Убыток, взведший остановку, уже
+// реализован и до полуночи никуда не денется: оставь отсчёт от начала суток —
+// и первая же оценка после снятия взведёт остановку снова, в тот же миг.
+func TestReleaseRebasesTheLossWindow(t *testing.T) {
+	l := risk.New(cooldownLimits())
+	l.OnTrade(at(10, 0), risk.Execution{CashUSD: usd("-120"), FeeUSD: usd("0")})
+	require.True(t, l.Assess(at(10, 0)).Tripped)
+
+	v := l.Assess(at(11, 30))
+	require.False(t, v.Tripped)
+	require.Zero(t, v.LossUSD, "the window starts over")
+	require.InDelta(t, -120, v.ReportedNetUSD, 0.001, "the day total is not forgotten")
+
+	// Половина предела в новом окне ещё не останавливает.
+	l.OnTrade(at(12, 0), risk.Execution{CashUSD: usd("-50"), FeeUSD: usd("0")})
+	require.False(t, l.Assess(at(12, 0)).Tripped)
+
+	// А целый — останавливает снова.
+	l.OnTrade(at(12, 30), risk.Execution{CashUSD: usd("-50"), FeeUSD: usd("0")})
+	require.True(t, l.Assess(at(12, 30)).Tripped)
+}
+
+// Перенос отсчёта превращает дневной предел в оконный, и ограничивает сутки
+// уже не он, а число окон: без потолка сутки стоили бы предел столько раз,
+// сколько окон в них помещается.
+func TestAutoResumesAreCappedPerDay(t *testing.T) {
+	l := risk.New(cooldownLimits())
+
+	now := at(0, 0)
+	for range 3 {
+		l.OnTrade(now, risk.Execution{CashUSD: usd("-120"), FeeUSD: usd("0")})
+		require.True(t, l.Assess(now).Tripped)
+		now = now.Add(90 * time.Minute)
+		require.False(t, l.Assess(now).Tripped)
+	}
+
+	l.OnTrade(now, risk.Execution{CashUSD: usd("-120"), FeeUSD: usd("0")})
+	v := l.Assess(now)
+	require.True(t, v.Tripped)
+	require.Zero(t, v.AutoResumesLeft)
+	require.True(t, v.TrippedUntil.IsZero(), "the budget is spent: this one holds until midnight UTC")
+	require.True(t, l.Assess(now.Add(6*time.Hour)).Tripped)
+}
+
+// Бюджет автоснятий дневной, как и сам предел.
+func TestNewDayRestoresTheAutoResumeBudget(t *testing.T) {
+	l := risk.New(cooldownLimits())
+	l.OnTrade(at(23, 0), risk.Execution{CashUSD: usd("-120"), FeeUSD: usd("0")})
+	require.True(t, l.Assess(at(23, 0)).Tripped)
+
+	next := risk.New(cooldownLimits())
+	next.Restore(l.State(), at(23, 0).Add(2*time.Hour))
+
+	v := next.Assess(at(23, 0).Add(2 * time.Hour))
+	require.False(t, v.Tripped)
+	require.Equal(t, 3, v.AutoResumesLeft)
+	require.Zero(t, v.ReportedNetUSD, "and the day starts from a clean sheet")
+}
+
+// Cooldown касается только убытка. Нечитаемый снимок через полтора часа
+// читаемым не станет, а решение человека отменяет человек.
+func TestExternalTripIgnoresTheCooldown(t *testing.T) {
+	l := risk.New(cooldownLimits())
+	l.Trip(at(10, 0), "risk ledger state is unreadable")
+
+	v := l.Assess(at(10, 0))
+	require.True(t, v.Tripped)
+	require.True(t, v.TrippedUntil.IsZero())
+	require.True(t, l.Assess(at(23, 0)).Tripped, "and it is still standing hours later")
+}
+
+// Ноль оставляет прежнее поведение целиком: до полуночи UTC.
+func TestZeroCooldownHoldsUntilMidnight(t *testing.T) {
+	l := risk.New(limits())
+	l.OnTrade(at(10, 0), risk.Execution{CashUSD: usd("-120"), FeeUSD: usd("0")})
+
+	v := l.Assess(at(10, 0))
+	require.True(t, v.Tripped)
+	require.True(t, v.TrippedUntil.IsZero())
+	require.Zero(t, v.AutoResumesLeft)
+	require.True(t, l.Assess(at(23, 59)).Tripped)
+}
+
+// Взведённая остановка со сроком переживает перезапуск вместе со сроком:
+// рестарт в середине паузы не должен ни продлевать её, ни отменять.
+func TestPendingReleaseSurvivesRestart(t *testing.T) {
+	l := risk.New(cooldownLimits())
+	l.OnTrade(at(10, 0), risk.Execution{CashUSD: usd("-120"), FeeUSD: usd("0")})
+	require.True(t, l.Assess(at(10, 0)).Tripped)
+
+	restored := risk.New(cooldownLimits())
+	restored.Restore(l.State(), at(10, 30))
+	require.True(t, restored.Assess(at(10, 30)).Tripped)
+
+	v := restored.Assess(at(11, 30))
+	require.False(t, v.Tripped, "the deadline is the one set before the restart, not after it")
+}

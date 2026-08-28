@@ -205,6 +205,22 @@ func (r Risk) validate() []error {
 	if r.MaxFillsPerHour <= 0 {
 		errs = append(errs, errors.New("risk.maxFillsPerHour must be positive"))
 	}
+	if r.KillSwitchCooldown < 0 {
+		errs = append(errs, fmt.Errorf(
+			"risk.killSwitchCooldown (%s) must not be negative", r.KillSwitchCooldown))
+	}
+	// Нижняя граница не косметическая. Снятие переносит начало отсчёта убытка,
+	// то есть каждое окно заново разрешает потерять maxDailyLossUsd. Cooldown
+	// короче минуты означал бы, что предел суток измеряется тактом цикла.
+	if r.KillSwitchCooldown > 0 && r.KillSwitchCooldown < time.Minute {
+		errs = append(errs, fmt.Errorf(
+			"risk.killSwitchCooldown (%s) must be at least a minute", r.KillSwitchCooldown))
+	}
+	if r.KillSwitchCooldown > 0 && r.KillSwitchMaxAutoResumes <= 0 {
+		errs = append(errs, errors.New(
+			"risk.killSwitchMaxAutoResumes must be positive when killSwitchCooldown is set: "+
+				"a cooldown that is never granted only hides the setting"))
+	}
 	if r.MarginMode != trading.Cross && r.MarginMode != trading.Isolated {
 		errs = append(errs, fmt.Errorf("risk.marginMode: want cross or isolated, got %q", r.MarginMode))
 	}

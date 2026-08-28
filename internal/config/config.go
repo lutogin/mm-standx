@@ -185,7 +185,15 @@ type Risk struct {
 	FillBurstWindow      time.Duration      `koanf:"fillBurstWindow"`
 	FillBurstCooldown    time.Duration      `koanf:"fillBurstCooldown"`
 	KillSwitchOnDrawdown bool               `koanf:"killSwitchOnDrawdown"`
-	Fees                 Fees               `koanf:"fees"`
+	// KillSwitchCooldown — сколько остановка по дневному убытку держится,
+	// прежде чем снимется сама. Ноль оставляет прежнее поведение: до полуночи
+	// UTC. Остановки по внешней причине это не касается — они сами не снимаются.
+	KillSwitchCooldown time.Duration `koanf:"killSwitchCooldown"`
+	// KillSwitchMaxAutoResumes — сколько раз за сутки UTC остановка снимается
+	// сама. Ограничивает худший день суммой, а не временем: после исчерпания
+	// следующая остановка снова держится до полуночи.
+	KillSwitchMaxAutoResumes int  `koanf:"killSwitchMaxAutoResumes"`
+	Fees                     Fees `koanf:"fees"`
 }
 
 // Fees — ставки комиссий биржи.
