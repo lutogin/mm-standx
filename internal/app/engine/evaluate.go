@@ -828,6 +828,9 @@ func (e *Engine) flatten(ctx context.Context) {
 
 	position := e.position
 	if position.IsZero() {
+		// Позиции нет — значит и отсчёт попыток к следующему эпизоду
+		// отношения не имеет.
+		e.flattenAttempts = 0
 		if e.pendingFill.IsPositive() && now.Before(e.fillDeadline.Add(flattenGrace)) {
 			// Исполнение уже зафиксировано, но PositionUpdated ещё не пришёл.
 			// Следующий тик или событие позиции повторит попытку.
@@ -849,10 +852,63 @@ func (e *Engine) flatten(ctx context.Context) {
 	if !e.submitFlatten(ctx, side, position.Abs(), now, "position reconciliation") {
 		return
 	}
+	// Повтор замедляется, но не прекращается.
+	//
+	// ПОЧЕМУ НЕ ПОДАВЛЕНИЕ. Напрашивается не повторять, пока предыдущее
+	// закрытие в пути: замер 25-28 августа 2026 дал 4 эпизода дублей из 15,
+	// худший — шесть ордеров на один залив 0.03 XAU, пять из них отвергнуты.
+	// Но размен здесь несимметричен. Дубль стоит запроса и строки в логе,
+	// а двойной экспозиции не создаёт вовсе — от неё защищает reduce-only
+	// на самих ордерах. Пропущенное закрытие стоит открытой позиции. Поэтому
+	// повтор обязан оставаться безусловным: молчание биржи неотличимо
+	// от потерянного ордера, и трактовать его надо как потерю.
+	//
+	// Замедление же обходится даром. Первая попытка по-прежнему через
+	// AckTimeout, то есть скорость восстановления в обычном случае не меняется;
+	// удваивается только шаг, если биржа продолжает молчать. Эпизод 15:56
+	// с ответом через 11.49 с дал бы 4 ордера вместо 6 при той же реакции
+	// на первой секунде.
+	e.flattenAttempts++
+	e.flattenRetryAt = now.Add(e.flattenBackoff())
 
 	e.pendingFill = money.MustParseQty("0")
 	e.fillDeadline = time.Time{}
 	e.cooldownUntil = now.Add(e.risk.PostFillCooldown)
+}
+
+// outstandingFlatten — сколько закрывающего объёма отправлено и ещё не получило
+// терминального ответа биржи.
+//
+// Величина наблюдательная: она печатается рядом с повтором, чтобы по логу было
+// видно, повторяем ли мы в пустоту или поверх уже работающего закрытия.
+// Решения на ней не строятся — см. Engine.flatten о том, почему повтор
+// безусловен.
+//
+// Записи старше flattenInFlight не считаются: молчание биржи не имеет права
+// навсегда объявить объём закрывающимся.
+func (e *Engine) outstandingFlatten(now time.Time) money.Qty {
+	total := money.MustParseQty("0")
+	for _, o := range e.flattenOrders {
+		if now.Sub(o.at) <= flattenInFlight {
+			total = total.Add(o.qty)
+		}
+	}
+	return total
+}
+
+// flattenBackoff — пауза перед следующей попыткой закрыть позицию.
+//
+// Удвоение от AckTimeout с потолком: восстановление обязано оставаться
+// быстрым на первой попытке и переставать быть штормом на десятой.
+func (e *Engine) flattenBackoff() time.Duration {
+	step := e.health.AckTimeout
+	if step <= 0 {
+		step = time.Second
+	}
+	for i := 1; i < e.flattenAttempts && step < flattenBackoffCap; i++ {
+		step *= 2
+	}
+	return min(step, flattenBackoffCap)
 }
 
 // submitFlatten sends one reduce-only IOC close and remembers its identity.
@@ -874,7 +930,7 @@ func (e *Engine) submitFlatten(
 
 	e.flattenRetryAt = now.Add(e.health.AckTimeout)
 	id := trading.ClOrdID(ulid.Make().String())
-	e.flattenOrders[id] = now
+	e.flattenOrders[id] = flattenOrder{at: now, qty: qty}
 
 	err := e.deps.Gateway.Place(ctx, ports.PlaceRequest{
 		ClOrdID:     id,

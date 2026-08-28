@@ -306,7 +306,7 @@ type Engine struct {
 	// исполнение этого ордера приходит обратно как ещё один залив, и актор
 	// заводит эпизод, закрыть который уже нечем — позиция к тому моменту
 	// плоская. Итог — вечное «no quoting while exposure is open».
-	flattenOrders map[trading.ClOrdID]time.Time
+	flattenOrders map[trading.ClOrdID]flattenOrder
 
 	// flattenRetryAt is the earliest time for a position-based recovery close.
 	//
@@ -322,6 +322,9 @@ type Engine struct {
 	// Признаком нарочно выбран срок, а не флаг: флаг требует снятия сообщением,
 	// которое может не прийти, и тогда актор молчит до конца запуска.
 	flattenRetryAt time.Time
+	// flattenAttempts — сколько раз позиция закрывалась повтором в текущем
+	// эпизоде. Задаёт шаг замедления и обнуляется вместе с эпизодом.
+	flattenAttempts int
 
 	// pendingWithdraw — ордера, снятие которых не удалось отправить.
 	//
@@ -405,7 +408,7 @@ func New(p Params, deps Deps) *Engine {
 		position:      money.MustParseQty("0"),
 		filled:        make(map[trading.ClOrdID]money.Qty),
 		touched:       make(map[trading.ClOrdID]bool),
-		flattenOrders: make(map[trading.ClOrdID]time.Time),
+		flattenOrders: make(map[trading.ClOrdID]flattenOrder),
 		deps:          deps,
 		inbox:         make(chan events.Event, inboxSize),
 		wake:          make(chan struct{}, 1),
@@ -560,7 +563,7 @@ func (e *Engine) closePositionOnExit(ctx context.Context) {
 	e.position = net
 	// Пауза между попытками относится к штатной работе: на выходе времени
 	// на ещё один такт нет, а позиция обязана быть закрыта.
-	e.flattenRetryAt = time.Time{}
+	e.flattenRetryAt, e.flattenAttempts = time.Time{}, 0
 	e.flatten(ctx)
 }
 
@@ -1130,8 +1133,8 @@ func (e *Engine) onFlattenUpdate(ctx context.Context, o trading.Order) {
 // Терминальное сообщение чистит запись само; предел по возрасту нужен на случай,
 // когда оно не придёт вовсе, и не даёт карте расти в течение суток работы.
 func (e *Engine) pruneFlattenOrders(now time.Time) {
-	for id, at := range e.flattenOrders {
-		if now.Sub(at) > flattenMemory {
+	for id, o := range e.flattenOrders {
+		if now.Sub(o.at) > flattenMemory {
 			delete(e.flattenOrders, id)
 		}
 	}
@@ -1139,6 +1142,37 @@ func (e *Engine) pruneFlattenOrders(now time.Time) {
 
 // flattenMemory — сколько помнить отправленный закрывающий ордер.
 const flattenMemory = 5 * time.Minute
+
+// flattenOrder — отправленный закрывающий ордер.
+//
+// Объём хранится, а не только момент отправки, потому что путь восстановления
+// по позиции обязан знать, сколько уже в пути. Без этого он повторяет закрытие
+// по таймеру и шлёт дубли на ту же позицию.
+type flattenOrder struct {
+	at  time.Time
+	qty money.Qty
+}
+
+// flattenBackoffCap — предел паузы между попытками закрыть позицию.
+//
+// Тридцать секунд: дальше замедляться незачем, а открытая позиция обязана
+// получать новую попытку в пределах разумного времени независимо от того,
+// сколько их уже было.
+const flattenBackoffCap = 30 * time.Second
+
+// flattenInFlight — сколько закрывающий ордер считается неотвеченным.
+//
+// Ограничение нужно с двух сторон. Без верхней границы потерянный ордер,
+// о котором биржа промолчит, навсегда занимал бы объём в учёте, и позиция
+// осталась бы открытой без единой повторной попытки. Со слишком короткой —
+// повтор выходит раньше ответа, то есть возвращается ровно та неисправность,
+// ради которой учёт и заведён.
+//
+// Тридцать секунд по замеру 25-28 августа 2026: медиана закрытия 0.39 с,
+// но 28 августа в 15:56 отчёт об исполнении пришёл через 11.49 с. Тридцать
+// покрывают наблюдавшийся худший случай с запасом почти втрое и при этом
+// не превращают потерянный ордер в постоянную экспозицию.
+const flattenInFlight = 30 * time.Second
 
 // onOrderRejected обрабатывает отказ биржи на этапе матчинга.
 //
@@ -1161,6 +1195,16 @@ func (e *Engine) onOrderRejected(ctx context.Context, ev events.OrderRejected) {
 	// тот же ответ.
 	if _, ours := e.flattenOrders[ev.ClOrdID]; ours {
 		delete(e.flattenOrders, ev.ClOrdID)
+		// Отказ «размер reduce-only превышает позицию» означает ровно обратное
+		// тревоге: позиция закрыта, а этот ордер — обогнавший её повтор.
+		// Строка уровня ERROR с текстом «позиция осталась открытой» была здесь
+		// прямой дезинформацией: 28 августа 2026 в 15:56 она напечаталась
+		// пять раз подряд по уже закрытой позиции.
+		if closedAlready(ev) {
+			e.deps.Log.Info("close was no longer needed, the position is already flat",
+				"symbol", e.symbol, "cl_ord_id", ev.ClOrdID, "reason", ev.Reason)
+			return
+		}
 		e.deps.Log.Error("flatten order rejected, the position stays open",
 			"symbol", e.symbol, "cl_ord_id", ev.ClOrdID, "code", ev.Code, "reason", ev.Reason)
 		e.deps.Metrics.OrderFailed(e.symbol, "flatten")
@@ -1186,6 +1230,20 @@ func (e *Engine) onOrderRejected(ctx context.Context, ev events.OrderRejected) {
 	}
 	e.forget(ev.ClOrdID)
 	e.evaluate(ctx, true)
+}
+
+// closedAlready распознаёт отказ, который означает уже закрытую позицию.
+//
+// Формулировка принадлежит бирже — «reduce only order size exceeds position
+// size», замерена 28 августа 2026 на пяти ответах подряд. Сверяется как
+// подстрока без учёта регистра: обрамление у чужого текста своё.
+//
+// Ошибка в распознавании не опасна ни в одну сторону. Не узнали — получили
+// прежнюю строку тревоги. Приняли за него чужой отказ — потеряли строку
+// тревоги, но не саму попытку: повтор по позиции идёт от PositionUpdated
+// и от этого разбора не зависит.
+func closedAlready(ev events.OrderRejected) bool {
+	return strings.Contains(strings.ToLower(ev.Reason), "exceeds position size")
 }
 
 // insufficientBalance распознаёт отказ по недостатку средств.
