@@ -21,3 +21,5 @@ docs/
 recordings-cpi/
 recordings-ref/
 recordings-smoke/
+sip-5a.txt
+*.md
