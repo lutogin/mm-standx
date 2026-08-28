@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -384,9 +385,10 @@ func New(p Params, deps Deps) *Engine {
 		newsGuard:      p.News,
 		ladder:         policy.Ladder{Layers: layers, SpreadBps: p.Config.Quote.LadderSpreadBps},
 		rules: quotes.Rules{
-			MinRest:       p.Config.Quote.MinRest,
-			AckTimeout:    p.Health.AckTimeout,
-			RefillLockout: p.Config.Quote.RefillLockout,
+			MinRest:              p.Config.Quote.MinRest,
+			AckTimeout:           p.Health.AckTimeout,
+			RefillLockout:        p.Config.Quote.RefillLockout,
+			BalanceRejectBackoff: p.Config.Quote.BalanceRejectBackoff,
 		},
 		bids: quotes.New(market.Buy, layers),
 		asks: quotes.New(market.Sell, layers),
@@ -1108,7 +1110,8 @@ func (e *Engine) onFlattenUpdate(ctx context.Context, o trading.Order) {
 	if o.FilledQty.IsPositive() {
 		e.deps.Log.Info("flatten order filled",
 			"symbol", e.symbol, "side", o.Side,
-			"qty", o.FilledQty, "price", o.AvgFillPrice)
+			"qty", o.FilledQty, "price", o.AvgFillPrice,
+			"venue_ts", o.UpdatedAt, "venue_lag", e.venueLag(o))
 	}
 	if o.Status.IsTerminal() {
 		delete(e.flattenOrders, o.ClOrdID)
@@ -1143,6 +1146,12 @@ const flattenMemory = 5 * time.Minute
 // то есть стакан ушёл дальше, чем мы считали. Ступень освобождается сразу,
 // не дожидаясь таймаута подтверждения: ордера нет, и держать ступень занятой
 // две секунды значит терять присутствие впустую.
+//
+// Отказ по недостатку средств — другой случай, и обходится он иначе. Стакан
+// тут ни при чём, пересчёт цены ничего не меняет, и немедленный повтор
+// получает тот же ответ по той же причине. Ступень поэтому запирается
+// на Rules.BalanceRejectBackoff — не ради безопасности, а ради бюджета
+// запросов: 28 августа 2026 незапертый повтор дал 550 отказов за пять минут.
 func (e *Engine) onOrderRejected(ctx context.Context, ev events.OrderRejected) {
 	now := e.deps.Clock.Now()
 
@@ -1159,17 +1168,73 @@ func (e *Engine) onOrderRejected(ctx context.Context, ev events.OrderRejected) {
 	}
 
 	rejected := trading.Order{ClOrdID: ev.ClOrdID, Status: trading.StatusRejected}
+	backoff := insufficientBalance(ev)
 
 	for _, ladder := range []*quotes.Ladder{e.bids, e.asks} {
-		if _, matched := ladder.OnOrderUpdate(rejected, now); matched {
-			e.deps.Log.Warn("order rejected",
-				"symbol", e.symbol, "cl_ord_id", ev.ClOrdID, "code", ev.Code, "reason", ev.Reason)
-			e.deps.Metrics.ALOReject(e.symbol)
-			break
+		slot, matched := ladder.OnOrderUpdate(rejected, now)
+		if !matched {
+			continue
 		}
+		if backoff && e.rules.BalanceRejectBackoff > 0 {
+			ladder.HoldRefill(slot, now, e.rules.BalanceRejectBackoff)
+		}
+		e.deps.Log.Warn("order rejected",
+			"symbol", e.symbol, "cl_ord_id", ev.ClOrdID, "code", ev.Code, "reason", ev.Reason,
+			"backoff", e.rejectBackoffFor(backoff))
+		e.deps.Metrics.ALOReject(e.symbol)
+		break
 	}
 	e.forget(ev.ClOrdID)
 	e.evaluate(ctx, true)
+}
+
+// insufficientBalance распознаёт отказ по недостатку средств.
+//
+// Разбор по тексту, а не по коду: биржа отвечает кодом 400 на всё, что
+// отвергнуто на входе, и отличить нехватку денег от отклонения post-only
+// можно только по сообщению. Формулировка принадлежит бирже — «balance not
+// enough», замерена 28 августа 2026 на 652 ответах, — и сверяется без учёта
+// регистра и как подстрока, чтобы её обрамление не ломало распознавание.
+//
+// Ошибка в любую сторону не опасна. Не узнали отказ по деньгам — вернулись
+// к прежнему немедленному повтору. Приняли за него чужой отказ — ступень
+// простояла лишние секунды.
+func insufficientBalance(ev events.OrderRejected) bool {
+	return strings.Contains(strings.ToLower(ev.Reason), "balance not enough")
+}
+
+// rejectBackoffFor описывает решение о задержке для строки лога.
+//
+// Печатается всегда, в том числе словом "none": отказ, после которого ступень
+// молча простояла пять секунд, и отказ, после которого она вернулась сразу,
+// выглядят в логе одинаково, а различаются существенно.
+func (e *Engine) rejectBackoffFor(backoff bool) string {
+	if backoff && e.rules.BalanceRejectBackoff > 0 {
+		return e.rules.BalanceRejectBackoff.String()
+	}
+	return "none"
+}
+
+// venueLag — сколько прошло от отметки биржи на обновлении ордера до момента,
+// когда актор его обработал.
+//
+// Ради этого числа поле и логируется. До него единственным доступным замером
+// был зазор между НАШЕЙ отправкой отмены и НАШЕЙ обработкой отчёта о заливе —
+// 51 мс в эпизоде 28 августа 2026, 16:23:10, — а он не отвечает на нужный
+// вопрос. Отчёт приходит позже сведения сделки, поэтому из него не видно,
+// опоздала отмена или ордер был исполнен ещё до того, как решение о ней
+// принималось. Это разные неисправности с разными починками.
+//
+// ЧИСЛО ЗАВИСИТ ОТ РАСХОЖДЕНИЯ ЧАСОВ. Отметка ставится биржей, момент —
+// нашими часами, и постоянный сдвиг между ними войдёт в результат целиком.
+// Поэтому смысл имеет распределение и его изменение во времени, а не
+// единичное значение; отрицательные величины означают, что часы разошлись,
+// и это тоже стоит увидеть, а не спрятать.
+func (e *Engine) venueLag(o trading.Order) string {
+	if o.UpdatedAt.IsZero() {
+		return "unknown"
+	}
+	return e.deps.Clock.Now().Sub(o.UpdatedAt).Truncate(time.Millisecond).String()
 }
 
 // forget убирает завершённый ордер из вспомогательных карт.

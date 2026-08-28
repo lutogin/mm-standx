@@ -116,12 +116,43 @@ type Filter struct {
 	Impacts    []Impact
 }
 
+// AllCurrencies — метка фида для события, у которого одной валюты нет.
+//
+// Так помечены симпозиумы, саммиты и встречи, то есть ровно те события, что
+// двигают всё сразу. Их надо понимать как «подходит под любой список валют»,
+// а не как «валюта с именем All».
+const AllCurrencies = "ALL"
+
 // Match reports whether the event passes the filter. An empty list accepts
 // nothing: a filter that matched everything by omission would quietly blank the
 // book on every low-impact number in the week.
+//
+// СОБЫТИЯ БЕЗ ВАЛЮТЫ ПРОХОДЯТ ЛЮБОЙ НЕПУСТОЙ СПИСОК. Прежде сравнение шло
+// по имени, и метка All не совпадала ни с чем: список [USD] её отвергал.
+//
+// Замер боевого счёта 28 августа 2026. В фиде на этот день стояло
+// «16:15 All High Jackson Hole Symposium»; фильтр его отбросил, и в 16:15
+// поле news в сводке показывало «normal, nothing scheduled». Гард обязан был
+// увести актора в защитную позу в 16:00 и вывести из стакана с 16:14 по 16:18.
+// Вместо этого бот котировал сквозь открытие симпозиума: заливы в 15:56, 16:08,
+// 16:22 и 16:23, минус 84.39 USD за день при пороге 60 и остановка по килл-
+// свитчу в 16:23:11.
+//
+// Отбор по валюте существует, чтобы не снимать котировки на числах, до которых
+// инструменту нет дела. Событие, у которого валюты нет, к этому классу
+// не относится по определению: оно не «про чужую валюту», оно про все сразу.
+//
+// Пустой список по-прежнему не принимает ничего, включая All: выключенный
+// отбор обязан оставаться выключенным во всех своих ветках.
 func (f Filter) Match(e Event) bool {
-	return contains(f.Currencies, strings.ToUpper(strings.TrimSpace(e.Currency))) &&
-		containsImpact(f.Impacts, e.Impact)
+	if len(f.Currencies) == 0 {
+		return false
+	}
+	currency := strings.ToUpper(strings.TrimSpace(e.Currency))
+	if currency != AllCurrencies && !contains(f.Currencies, currency) {
+		return false
+	}
+	return containsImpact(f.Impacts, e.Impact)
 }
 
 // Select returns the matching events in chronological order.

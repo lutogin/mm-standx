@@ -186,6 +186,12 @@ func defaults() *Config {
 				// не хватило бы. Стоимость — около 1% времени ступени,
 				// арифметика в quotes.Rules.RefillLockout.
 				RefillLockout: 3 * time.Second,
+				// Пять секунд: причина отказа по деньгам держится ровно
+				// столько, сколько держится бюджет, а он пересчитывается
+				// на снимке баланса. Меньше — и повтор снова упрётся в тот же
+				// ответ; больше — и ступень простаивает после отказа, который
+				// уже неактуален. Арифметика в quotes.Rules.BalanceRejectBackoff.
+				BalanceRejectBackoff: 5 * time.Second,
 				// Two ticks. On gold that is 0.46 bps, small next to the seven
 				// the quote normally stands at, so the clamp binds only when the
 				// book has run past a mark that has not caught up yet — which is

@@ -362,6 +362,9 @@ func (q Quote) validate(prefix string) []error {
 	if q.RefillLockout < 0 {
 		errs = append(errs, fmt.Errorf("%s.refillLockout must not be negative", prefix))
 	}
+	if q.BalanceRejectBackoff < 0 {
+		errs = append(errs, fmt.Errorf("%s.balanceRejectBackoff must not be negative", prefix))
+	}
 	if q.PostOnlyBufferTicks < 0 {
 		errs = append(errs, fmt.Errorf("%s.postOnlyBufferTicks must not be negative", prefix))
 	}

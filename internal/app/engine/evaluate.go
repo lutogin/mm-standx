@@ -222,6 +222,7 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 	plan, err := sizing.Compute(sizing.Inputs{
 		Budget: sizing.Budget{
 			EquityUSD:        e.equity,
+			SpendableUSD:     e.spendable(),
 			InitialMarginPct: marginRate,
 			UtilizationPct:   utilization,
 		},
@@ -705,7 +706,11 @@ func (e *Engine) onFill(ctx context.Context, order trading.Order) {
 
 	e.deps.Log.Warn("order filled",
 		"symbol", e.symbol, "side", order.Side,
-		"qty", delta, "price", order.AvgFillPrice, "new_episode", startsEpisode)
+		"qty", delta, "price", order.AvgFillPrice, "new_episode", startsEpisode,
+		// Отметка биржи и наше отставание от неё. Без них по логу нельзя
+		// отличить опоздавшую отмену от ордера, исполненного до решения о ней
+		// (Engine.venueLag).
+		"venue_ts", order.UpdatedAt, "venue_lag", e.venueLag(order))
 
 	e.publishFill(ctx, order, delta, startsEpisode, now)
 	// The matching engine has applied the quote fill before publishing this
@@ -1305,6 +1310,26 @@ func (e *Engine) cleanMeasurement() bool {
 		}
 	}
 	return true
+}
+
+// spendable — сколько биржа готова заблокировать под висящими ордерами.
+//
+// Свободный остаток плюс уже заблокированное нашими же ордерами. Складывать
+// обязательно: Available сам по себе — это остаток ПОСЛЕ того, как мы
+// выставились, и бюджет от него сходится примерно на 40% капитала при любой
+// утилизации (sizing.Budget.EquityUSD). Locked возвращает в сумму ровно то,
+// что Available потерял, поэтому величина не зависит от того, стоим мы сейчас
+// в стакане или нет.
+//
+// Маржа под открытой позицией (Balance.Margin) сюда намеренно не входит: она
+// занята, и занята до закрытия позиции.
+//
+// Ноль означает «снимка баланса ещё не было» и отключает потолок в sizing.
+func (e *Engine) spendable() decimal.Decimal {
+	if !e.available.IsPositive() && !e.locked.IsPositive() {
+		return decimal.Zero
+	}
+	return e.available.Add(e.locked)
 }
 
 // marginRate — действующая доля блокировки, которой считается размер.

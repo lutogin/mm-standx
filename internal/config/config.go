@@ -382,6 +382,11 @@ type Quote struct {
 	// См. quotes.Rules.RefillLockout и quotes.Slot.RefillNotBefore.
 	RefillLockout time.Duration `koanf:"refillLockout"`
 
+	// BalanceRejectBackoff — сколько ступень остаётся пустой после отказа
+	// биржи по недостатку средств. Ноль возвращает немедленный повтор.
+	// См. quotes.Rules.BalanceRejectBackoff.
+	BalanceRejectBackoff time.Duration `koanf:"balanceRejectBackoff"`
+
 	// PostOnlyBufferTicks — на сколько тиков цена отодвигается от противоположной
 	// вершины стакана перед отправкой.
 	//
