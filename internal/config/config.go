@@ -464,6 +464,9 @@ type Liquidity struct {
 	// ThinFraction — доля медианы окна, ниже которой сторона не котируется.
 	// Ноль отключает проверку.
 	ThinFraction float64 `koanf:"thinFraction"`
+	// PullOnThin — снимать ли уже стоящие ступени, когда сторона объявлена
+	// тонкой. Ложь оставляет только запрет на новые ордера.
+	PullOnThin bool `koanf:"pullOnThin"`
 }
 
 type Volatility struct {

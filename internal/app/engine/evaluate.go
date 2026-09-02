@@ -205,6 +205,15 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 	if e.pullDanger(ctx, thresholds, now) {
 		return
 	}
+	// Глубина судится один раз за такт: вердикт нужен и съёму ниже, и запрету
+	// на размещение в самом конце, а печатать переход дважды нельзя.
+	thin := e.thinSides(now)
+	// Съём по обвалу стакана стоит здесь по той же причине, что и опасность:
+	// кулдаун бережёт бюджет запросов, а этот сигнал опережает движение
+	// на доли секунды, и четверть секунды задержки съедает весь запас.
+	if e.pullThin(ctx, thin, now) {
+		return
+	}
 	// Темп перестановки ограничен независимо от частоты событий: стакан
 	// приходит несколько раз в секунду, и реагировать на каждое обновление
 	// значило бы исчерпать бюджет запросов за минуту.
@@ -265,29 +274,25 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 		if len(actions) > 0 {
 			e.lastAction = now
 		}
-		e.execute(ctx, side, actions, allowPlace && !e.thinBook(side, now), plan.Rungs)
+		e.execute(ctx, side, actions, allowPlace && !thin[side], plan.Rungs)
 	}
 }
 
-// thinBook запрещает ставить НОВЫЕ ордера на сторону, у которой из стакана
-// ушла глубина.
+// thinSides судит обе стороны по глубине стакана и печатает переходы.
 //
-// Запрет только на размещение. Уже стоящие ступени остаются под обычными
-// правилами: они уже засчитываются программе, а снимать их по тонкому стакану
-// значило бы платить присутствием за состояние, которое чаще всего проходит
-// само. Опасность подхода цены к ним по-прежнему судит аварийный путь.
-//
-// Замер 1 сентября 2026 объясняет, почему запрет именно на размещение. Оба
-// самых дорогих залива того дня пришли по ордерам, ВЫСТАВЛЕННЫМ в уже тонкий
-// стакан: сель 22:00:33 прожил 1.76 секунды при глубине 0.62 от нормы, второй
-// такой же — при 0.23. Реагировать там было не на что: ордер родился в рынок,
-// который его сразу забрал.
-func (e *Engine) thinBook(side market.Side, now time.Time) bool {
-	v := e.liq.Verdict(side, now)
-	if v.Thin != e.thinSide[side] {
+// Считается один раз за такт: вердикт нужен и съёму, и запрету на размещение,
+// а строка о переходе обязана появиться ровно однажды.
+func (e *Engine) thinSides(now time.Time) map[market.Side]bool {
+	out := map[market.Side]bool{}
+	for _, side := range []market.Side{market.Buy, market.Sell} {
+		v := e.liq.Verdict(side, now)
+		out[side] = v.Thin
+		if v.Thin == e.thinSide[side] {
+			continue
+		}
 		e.thinSide[side] = v.Thin
 		if v.Thin {
-			e.deps.Log.Warn("book too thin to quote into, holding placements",
+			e.deps.Log.Warn("book depth collapsed on this side",
 				"symbol", e.symbol, "side", side,
 				"depth_usd", int64(v.DepthUSD), "median_usd", int64(v.MedianUSD),
 				"threshold_usd", int64(v.ThresholdUSD))
@@ -297,7 +302,66 @@ func (e *Engine) thinBook(side market.Side, now time.Time) bool {
 				"depth_usd", int64(v.DepthUSD), "median_usd", int64(v.MedianUSD))
 		}
 	}
-	return v.Thin
+	return out
+}
+
+// pullThin снимает сторону, из-под которой ушла ликвидность.
+//
+// ПОЧЕМУ СЪЁМ, А НЕ ТОЛЬКО ЗАПРЕТ НА РАЗМЕЩЕНИЕ. Первая версия ворот держала
+// только новые ордера, и замер 2 сентября 2026 показал, чего это стоит:
+//
+//	09:05:19.441  выставлен sell 4326.3
+//	09:05:59.668  ворота: глубина аска 2.84M против порога 4.90M
+//	09:06:00.073  биржа свела этот самый ордер
+//	09:06:11      jump вырос с 0.98 до 6.74
+//
+// Вердикт опередил исполнение на 405 миллисекунд, а обвал глубины опередил
+// само движение на десяток секунд. Круг запроса на снятие — десятки
+// миллисекунд, то есть запаса хватало с избытком. Не хватило права снимать:
+// ордер стоял с 09:05:19, под запрет на размещение не подпадал и дождался
+// своей сделки.
+//
+// Уходит вся сторона сразу, как и на пути опасности: глубина — свойство
+// стороны целиком, и оставлять на ней часть ступеней значит оставлять их
+// под тем же ударом.
+//
+// Возврат отдельного запрета не требует: пока сторона тонка, тот же вердикт
+// не даёт её заполнить.
+func (e *Engine) pullThin(ctx context.Context, thin map[market.Side]bool, now time.Time) bool {
+	if !e.cfg.Liquidity.PullOnThin {
+		return false
+	}
+
+	var ids []trading.ClOrdID
+	var sides []market.Side
+	for _, side := range []market.Side{market.Buy, market.Sell} {
+		if !thin[side] {
+			continue
+		}
+		ladder := e.ladderFor(side)
+		actions := ladder.PullAll(now, 0, "book depth collapsed")
+		for _, action := range actions {
+			ids = append(ids, action.ClOrdID)
+			ladder.OnCancelSent(action.Slot, now)
+		}
+		if len(actions) > 0 {
+			sides = append(sides, side)
+		}
+	}
+	if len(ids) == 0 {
+		return false
+	}
+
+	e.lastAction = now
+	if !e.sendWithdrawal(ctx, ids) {
+		return true
+	}
+	for _, side := range sides {
+		e.deps.Metrics.OrderSent(e.symbol, side, "cancel")
+	}
+	e.deps.Log.Warn("side pulled, the book under it went thin",
+		"symbol", e.symbol, "sides", sides, "orders", len(ids))
+	return true
 }
 
 // quotingBounds сужает полосу, пока актор вне рынка.

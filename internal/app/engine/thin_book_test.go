@@ -55,8 +55,8 @@ func TestThinSideStopsPlacingWhileTheOtherKeepsQuoting(t *testing.T) {
 	e.liq.Observe(market.Sell, 1_380_000, clk.now)
 	e.liq.Observe(market.Buy, 6_000_000, clk.now)
 
-	require.True(t, e.thinBook(market.Sell, clk.now))
-	require.False(t, e.thinBook(market.Buy, clk.now))
+	require.True(t, e.thinSides(clk.now)[market.Sell])
+	require.False(t, e.thinSides(clk.now)[market.Buy])
 }
 
 // Обычный стакан ничего не запрещает.
@@ -81,10 +81,16 @@ func TestNormalBookPlacesOnBothSides(t *testing.T) {
 	require.Equal(t, "no", e.thinSummary())
 }
 
-// Запрет касается только новых ордеров: уже стоящую ступень он не снимает.
-func TestThinBookDoesNotCancelRestingRungs(t *testing.T) {
+// Обвал глубины снимает уже стоящую сторону.
+//
+// Замер 2 сентября 2026: вердикт по глубине опередил исполнение на 405 мс,
+// но ордер стоял с 09:05:19, под запрет на размещение не подпадал и дождался
+// своей сделки. Круг запроса на снятие — десятки миллисекунд, запаса хватало
+// с избытком.
+func TestThinBookPullsRestingRungs(t *testing.T) {
 	ctx := context.Background()
 	e, gw, clk := thinEngine(t)
+	e.cfg.Liquidity.PullOnThin = true
 	e.handle(ctx, balanceEvent("10000", "10000", "0"))
 	primeVolatility(t, e, clk)
 	primeDepth(e, 6_000_000, clk.now.Add(-2*time.Minute), 60)
@@ -94,8 +100,47 @@ func TestThinBookDoesNotCancelRestingRungs(t *testing.T) {
 
 	gw.cancelled = nil
 	e.evaluate(ctx, true)
-	require.NotContains(t, gw.cancelled, trading.ClOrdID("ask-0"),
-		"a rung that already earns must not be pulled for a thin book alone")
+	require.Contains(t, gw.cancelled, trading.ClOrdID("ask-0"),
+		"the side must leave the book the collapse is happening in")
+}
+
+// Выключенный съём оставляет только запрет на размещение.
+func TestPullOnThinCanBeTurnedOff(t *testing.T) {
+	ctx := context.Background()
+	e, gw, clk := thinEngine(t)
+	e.cfg.Liquidity.PullOnThin = false
+	e.handle(ctx, balanceEvent("10000", "10000", "0"))
+	primeVolatility(t, e, clk)
+	primeDepth(e, 6_000_000, clk.now.Add(-2*time.Minute), 60)
+
+	liveRung(e, market.Sell, "ask-0", "4280", clk.now)
+	e.liq.Observe(market.Sell, 500_000, clk.now)
+
+	gw.cancelled = nil
+	e.evaluate(ctx, true)
+	require.NotContains(t, gw.cancelled, trading.ClOrdID("ask-0"))
+}
+
+// Тонкий аск не трогает бид: глубина — свойство стороны.
+func TestThinPullLeavesTheHealthySideAlone(t *testing.T) {
+	ctx := context.Background()
+	e, gw, clk := thinEngine(t)
+	e.cfg.Liquidity.PullOnThin = true
+	e.handle(ctx, balanceEvent("10000", "10000", "0"))
+	primeVolatility(t, e, clk)
+	primeDepth(e, 6_000_000, clk.now.Add(-2*time.Minute), 60)
+
+	liveRung(e, market.Sell, "ask-0", "4280", clk.now)
+	liveRung(e, market.Buy, "bid-0", "4270", clk.now)
+	e.liq.Observe(market.Sell, 500_000, clk.now)
+	e.liq.Observe(market.Buy, 6_100_000, clk.now)
+
+	// Через pullThin напрямую: обычный путь планирования может снять бид
+	// по своим причинам, и тогда тест мерил бы не то, что проверяет.
+	gw.cancelled = nil
+	require.True(t, e.pullThin(ctx, e.thinSides(clk.now), clk.now))
+	require.Contains(t, gw.cancelled, trading.ClOrdID("ask-0"))
+	require.NotContains(t, gw.cancelled, trading.ClOrdID("bid-0"))
 }
 
 // Сводка обязана показывать запрет: не котирующая сторона иначе выглядит
@@ -105,11 +150,11 @@ func TestThinSummaryNamesTheClosedSide(t *testing.T) {
 	primeDepth(e, 6_000_000, clk.now.Add(-2*time.Minute), 60)
 
 	e.liq.Observe(market.Sell, 500_000, clk.now)
-	e.thinBook(market.Sell, clk.now)
+	e.thinSides(clk.now)
 	require.Equal(t, "ask", e.thinSummary())
 
 	e.liq.Observe(market.Buy, 500_000, clk.now)
-	e.thinBook(market.Buy, clk.now)
+	e.thinSides(clk.now)
 	require.Equal(t, "both", e.thinSummary())
 }
 
@@ -117,5 +162,5 @@ func TestThinSummaryNamesTheClosedSide(t *testing.T) {
 func TestGateStaysOpenUntilTheWindowIsMature(t *testing.T) {
 	e, _, clk := thinEngine(t)
 	e.liq.Observe(market.Sell, 1, clk.now)
-	require.False(t, e.thinBook(market.Sell, clk.now))
+	require.False(t, e.thinSides(clk.now)[market.Sell])
 }
