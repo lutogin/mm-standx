@@ -321,13 +321,25 @@ func TestShippedSizingReachesTheHourlyCeilingOnTheLiveAccount(t *testing.T) {
 	require.Contains(t, plan.Reason, "reward ceiling",
 		"на боевом счёте связывать обязан потолок программы, а не капитал")
 
+	// Допуск, с которым верная формула обязана попадать в потолок. Он же
+	// служит границей для отвергнутой ниже: та обязана промахиваться заметно.
+	const ceilingTolerance = 0.01
+
 	scored := scoredSide(cfg, plan, distances)
-	require.InDelta(t, perSideCap, scored, 0.01,
+	require.InDelta(t, perSideCap, scored, ceilingTolerance,
 		"взвешенная сторона обязана вставать ровно на потолок")
-	require.InDelta(t, gold.Program.MaxMakerHoursPerHour, scored/requireDecimal(t, gold.Program.UnitSize).InexactFloat64(), 0.01,
+	require.InDelta(t, gold.Program.MaxMakerHoursPerHour, scored/requireDecimal(t, gold.Program.UnitSize).InexactFloat64(), ceilingTolerance,
 		"это и есть 2.00 Maker Hour в час")
 
 	// Отвергнутая формула названа явно, чтобы её нельзя было вернуть молча.
+	//
+	// Порог здесь привязан к допуску выше, а НЕ к доле от потолка. Недобор
+	// старой формулы равен отношению среднего веса ступеней к весу ближней,
+	// то есть сужается вместе с лесенкой: при трёх ступенях (6.6/7.0/7.4)
+	// это 6.78%, при двух (6.8/7.2) — 3.51%. Прежняя константа 0.94 молча
+	// кодировала трёхступенчатую геометрию и упала при переходе на две,
+	// хотя проверяемое свойство не изменилось: делить на вес ближней ступени
+	// по-прежнему значит недобрать до потолка.
 	curve := reward.Curve{BandBps: cfg.Reward.BandBps, MaxWeightPct: cfg.Reward.MaxWeightPct, MinWeightPct: cfg.Reward.MinWeightPct}
 	mean := 0.0
 	for _, d := range distances {
@@ -335,7 +347,7 @@ func TestShippedSizingReachesTheHourlyCeilingOnTheLiveAccount(t *testing.T) {
 	}
 	mean /= float64(len(distances))
 	byNearest := perSideCap / curve.Weight(distances[0]) * mean
-	require.Less(t, byNearest, perSideCap*0.94,
+	require.Less(t, byNearest, perSideCap-ceilingTolerance,
 		"деление на вес ближней ступени не доносит сторону до потолка")
 
 	// Возросший размер обязан помещаться в бюджет маржи, иначе выигрыш
