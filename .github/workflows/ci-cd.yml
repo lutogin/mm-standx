@@ -197,19 +197,19 @@ jobs:
       # страховкой, а не разрешением.
       #
       # Аварийный выход — [deploy-now] в сообщении коммита.
-      - name: Wait for the UTC hour boundary
-        if: ${{ !contains(github.event.head_commit.message, '[deploy-now]') }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          minute=$(date -u +%-M)
-          if (( minute < 15 )); then
-            echo "minute $minute: the hour is still reachable, deploying now"
-            exit 0
-          fi
-          seconds=$(( (60 - minute) * 60 - $(date -u +%-S) ))
-          echo "minute $minute: waiting ${seconds}s so the deploy lands on the hour"
-          sleep "$seconds"
+      # - name: Wait for the UTC hour boundary
+      #   if: ${{ !contains(github.event.head_commit.message, '[deploy-now]') }}
+      #   shell: bash
+      #   run: |
+      #     set -euo pipefail
+      #     minute=$(date -u +%-M)
+      #     if (( minute < 15 )); then
+      #       echo "minute $minute: the hour is still reachable, deploying now"
+      #       exit 0
+      #     fi
+      #     seconds=$(( (60 - minute) * 60 - $(date -u +%-S) ))
+      #     echo "minute $minute: waiting ${seconds}s so the deploy lands on the hour"
+      #     sleep "$seconds"
 
       - name: Deploy
         shell: bash
