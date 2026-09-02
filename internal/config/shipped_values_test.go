@@ -340,15 +340,22 @@ func TestShippedSizingReachesTheHourlyCeilingOnTheLiveAccount(t *testing.T) {
 	// кодировала трёхступенчатую геометрию и упала при переходе на две,
 	// хотя проверяемое свойство не изменилось: делить на вес ближней ступени
 	// по-прежнему значит недобрать до потолка.
-	curve := reward.Curve{BandBps: cfg.Reward.BandBps, MaxWeightPct: cfg.Reward.MaxWeightPct, MinWeightPct: cfg.Reward.MinWeightPct}
-	mean := 0.0
-	for _, d := range distances {
-		mean += curve.Weight(d)
+	//
+	// При одной ступени проверять нечего: ближняя и есть средняя, две формулы
+	// совпадают тождественно, и «недобор» равен нулю не потому, что формула
+	// верна, а потому, что различать ей нечего. Сторож остаётся — на случай
+	// возврата к лесенке.
+	if len(distances) > 1 {
+		curve := reward.Curve{BandBps: cfg.Reward.BandBps, MaxWeightPct: cfg.Reward.MaxWeightPct, MinWeightPct: cfg.Reward.MinWeightPct}
+		mean := 0.0
+		for _, d := range distances {
+			mean += curve.Weight(d)
+		}
+		mean /= float64(len(distances))
+		byNearest := perSideCap / curve.Weight(distances[0]) * mean
+		require.Less(t, byNearest, perSideCap-ceilingTolerance,
+			"деление на вес ближней ступени не доносит сторону до потолка")
 	}
-	mean /= float64(len(distances))
-	byNearest := perSideCap / curve.Weight(distances[0]) * mean
-	require.Less(t, byNearest, perSideCap-ceilingTolerance,
-		"деление на вес ближней ступени не доносит сторону до потолка")
 
 	// Возросший размер обязан помещаться в бюджет маржи, иначе выигрыш
 	// в зачёте оплачивался бы отказами «balance not enough».

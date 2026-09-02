@@ -53,14 +53,31 @@ func TestLoadAppliesDefaultsToSymbols(t *testing.T) {
 	require.Equal(t, defaults().Defaults.Volatility.MinSamples, btc.Volatility.MinSamples)
 }
 
-// Advertising an unimplemented flatten policy is unsafe: the process would
-// start successfully and still execute the immediate-market path. Reject such
-// a configuration until the alternative policy has an implementation.
-func TestOnlyImplementedFlattenPolicyIsAccepted(t *testing.T) {
+// Политика закрытия обязана быть одной из реализованных: неизвестное имя
+// молча запускало бы прежний маркет-путь под чужой вывеской.
+//
+// До 2 сентября 2026 реализована была одна, immediate_market, и тест сторожил
+// это. Теперь их две — maker_then_market закрывает залив post-only лимитом
+// и по таймауту добивает маркетом, — и у второй есть обязательный параметр.
+func TestFlattenPolicyMustBeImplemented(t *testing.T) {
 	cfg := defaults()
 	cfg.Risk.FlattenPolicy = "hybrid"
+	require.ErrorContains(t, cfg.Validate(), "risk.flattenPolicy")
 
-	require.ErrorContains(t, cfg.Validate(), "only \"immediate_market\" is implemented")
+	cfg = defaults()
+	cfg.Risk.FlattenPolicy = FlattenImmediateMarket
+	require.NoError(t, cfg.Validate())
+
+	cfg = defaults()
+	cfg.Risk.FlattenPolicy = FlattenMakerThenMarket
+	cfg.Risk.MakerUnwindTimeout = 3 * time.Second
+	require.NoError(t, cfg.Validate())
+
+	// Мейкерское закрытие без срока висело бы в стакане вечно.
+	cfg = defaults()
+	cfg.Risk.FlattenPolicy = FlattenMakerThenMarket
+	cfg.Risk.MakerUnwindTimeout = 0
+	require.ErrorContains(t, cfg.Validate(), "makerUnwindTimeout")
 }
 
 func liveEconomicConfig(rewardLowerBound float64) *Config {

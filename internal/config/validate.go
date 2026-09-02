@@ -224,10 +224,20 @@ func (r Risk) validate() []error {
 	if r.MarginMode != trading.Cross && r.MarginMode != trading.Isolated {
 		errs = append(errs, fmt.Errorf("risk.marginMode: want cross or isolated, got %q", r.MarginMode))
 	}
-	if r.FlattenPolicy != "immediate_market" {
+	switch r.FlattenPolicy {
+	case FlattenImmediateMarket:
+	case FlattenMakerThenMarket:
+		if r.MakerUnwindTimeout <= 0 {
+			errs = append(errs, errors.New(
+				"risk.makerUnwindTimeout must be positive with flattenPolicy maker_then_market"))
+		}
+	default:
 		errs = append(errs, fmt.Errorf(
-			"risk.flattenPolicy: only %q is implemented, got %q",
-			"immediate_market", r.FlattenPolicy))
+			"risk.flattenPolicy: want %q or %q, got %q",
+			FlattenImmediateMarket, FlattenMakerThenMarket, r.FlattenPolicy))
+	}
+	if r.MakerUnwindTimeout < 0 || r.MakerUnwindBps < 0 {
+		errs = append(errs, errors.New("risk: makerUnwindTimeout and makerUnwindBps must not be negative"))
 	}
 	if r.FlattenDebounce < 0 {
 		errs = append(errs, errors.New("risk.flattenDebounce must not be negative"))

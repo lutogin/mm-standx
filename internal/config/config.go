@@ -164,6 +164,15 @@ type UptimeTier struct {
 	Multiplier   float64 `koanf:"multiplier"`
 }
 
+// Политики закрытия залива.
+const (
+	// FlattenImmediateMarket — маркет IOC сразу: быстро и всегда 4 bps тейкера.
+	FlattenImmediateMarket = "immediate_market"
+	// FlattenMakerThenMarket — post-only лимит на вершине стакана, по таймауту
+	// остаток маркетом.
+	FlattenMakerThenMarket = "maker_then_market"
+)
+
 // Risk — общие для всех инструментов ограничения риска.
 type Risk struct {
 	MaxDailyLossUSD float64 `koanf:"maxDailyLossUsd"`
@@ -175,16 +184,24 @@ type Risk struct {
 	// по нехватке средств. Прежде жило константой в коде актора — предел риска,
 	// который нельзя было ни увидеть в работающем процессе, ни поправить
 	// без пересборки образа, в отличие от каждого соседнего предела здесь.
-	UtilizationPct       float64            `koanf:"utilizationPct"`
-	MaxFillsPerHour      int                `koanf:"maxFillsPerHour"`
-	MarginMode           trading.MarginMode `koanf:"marginMode"`
-	FlattenPolicy        string             `koanf:"flattenPolicy"`
-	FlattenDebounce      time.Duration      `koanf:"flattenDebounce"`
-	PostFillCooldown     time.Duration      `koanf:"postFillCooldown"`
-	FillBurstLimit       int                `koanf:"fillBurstLimit"`
-	FillBurstWindow      time.Duration      `koanf:"fillBurstWindow"`
-	FillBurstCooldown    time.Duration      `koanf:"fillBurstCooldown"`
-	KillSwitchOnDrawdown bool               `koanf:"killSwitchOnDrawdown"`
+	UtilizationPct  float64            `koanf:"utilizationPct"`
+	MaxFillsPerHour int                `koanf:"maxFillsPerHour"`
+	MarginMode      trading.MarginMode `koanf:"marginMode"`
+	// FlattenPolicy — чем закрывать залив: FlattenImmediateMarket или
+	// FlattenMakerThenMarket.
+	FlattenPolicy string `koanf:"flattenPolicy"`
+	// MakerUnwindTimeout — сколько мейкерскому закрытию дано стоять в стакане,
+	// прежде чем остаток уйдёт маркетом.
+	MakerUnwindTimeout time.Duration `koanf:"makerUnwindTimeout"`
+	// MakerUnwindBps — дистанция от mark для мейкерского закрытия. Ноль —
+	// на вершину стакана (лучшая цена, остающаяся post-only).
+	MakerUnwindBps       float64       `koanf:"makerUnwindBps"`
+	FlattenDebounce      time.Duration `koanf:"flattenDebounce"`
+	PostFillCooldown     time.Duration `koanf:"postFillCooldown"`
+	FillBurstLimit       int           `koanf:"fillBurstLimit"`
+	FillBurstWindow      time.Duration `koanf:"fillBurstWindow"`
+	FillBurstCooldown    time.Duration `koanf:"fillBurstCooldown"`
+	KillSwitchOnDrawdown bool          `koanf:"killSwitchOnDrawdown"`
 	// KillSwitchCooldown — сколько остановка по дневному убытку держится,
 	// прежде чем снимется сама. Ноль оставляет прежнее поведение: до полуночи
 	// UTC. Остановки по внешней причине это не касается — они сами не снимаются.

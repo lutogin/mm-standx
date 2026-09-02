@@ -329,6 +329,13 @@ type Engine struct {
 	// flattenAttempts — сколько раз позиция закрывалась повтором в текущем
 	// эпизоде. Задаёт шаг замедления и обнуляется вместе с эпизодом.
 	flattenAttempts int
+	// makerClose — стоящий в стакане мейкерский закрывающий ордер, если он есть.
+	//
+	// Пока он жив и его срок не вышел, восстановление по позиции ждёт: второе
+	// закрытие поверх первого стоило бы комиссии, а reduce-only спасает только
+	// от переворота. По истечении срока ордер снимается и остаток добивается
+	// маркетом — ровно как у стороннего бота (makerThenMarketClose).
+	makerClose *makerClose
 
 	// thinSide помнит, о какой стороне уже напечатано, что стакан тонок.
 	// Переход печатается один раз: строка на каждом такте утопила бы лог.
@@ -1130,14 +1137,22 @@ func (e *Engine) onOrder(ctx context.Context, ev events.OrderUpdated) {
 // Пропустить этот ордер в общий путь учёта значит посчитать один залив дважды
 // и оставить эпизод незакрытым навсегда.
 func (e *Engine) onFlattenUpdate(ctx context.Context, o trading.Order) {
+	asMaker := e.makerClose != nil && e.makerClose.id == o.ClOrdID
 	if o.FilledQty.IsPositive() {
 		e.deps.Log.Info("flatten order filled",
 			"symbol", e.symbol, "side", o.Side,
-			"qty", o.FilledQty, "price", o.AvgFillPrice,
+			"qty", o.FilledQty, "price", o.AvgFillPrice, "as_maker", asMaker,
 			"venue_ts", o.UpdatedAt, "venue_lag", e.venueLag(o))
 	}
 	if o.Status.IsTerminal() {
 		delete(e.flattenOrders, o.ClOrdID)
+		if asMaker {
+			// Ордер кончился — исполнением или снятием. Что бы ни осталось
+			// от позиции, дальше решает обычный путь по PositionUpdated,
+			// и ждать ему больше нечего.
+			e.makerClose = nil
+			e.flattenRetryAt = time.Time{}
+		}
 		// Частичное исполнение оставляет позицию открытой. Повтор назначает
 		// служебный тик, который увидит ненулевую позицию.
 		if o.Qty.IsPositive() && o.FilledQty.Lt(o.Qty) {
@@ -1162,6 +1177,14 @@ func (e *Engine) pruneFlattenOrders(now time.Time) {
 
 // flattenMemory — сколько помнить отправленный закрывающий ордер.
 const flattenMemory = 5 * time.Minute
+
+// makerClose — мейкерское закрытие в стакане.
+type makerClose struct {
+	id       trading.ClOrdID
+	side     market.Side
+	qty      money.Qty
+	deadline time.Time
+}
 
 // flattenOrder — отправленный закрывающий ордер.
 //
@@ -1215,6 +1238,18 @@ func (e *Engine) onOrderRejected(ctx context.Context, ev events.OrderRejected) {
 	// тот же ответ.
 	if _, ours := e.flattenOrders[ev.ClOrdID]; ours {
 		delete(e.flattenOrders, ev.ClOrdID)
+		// Мейкерское закрытие отвергнуто — почти всегда как post-only, который
+		// пересёк бы стакан: цена ушла за время круга. Это не тревога, а
+		// штатная развилка, и ответ на неё — маркет немедленно, без ожидания
+		// таймаута, которого ордер так и не начал.
+		if e.makerClose != nil && e.makerClose.id == ev.ClOrdID {
+			e.deps.Log.Warn("maker close rejected, closing at market instead",
+				"symbol", e.symbol, "cl_ord_id", ev.ClOrdID, "code", ev.Code, "reason", ev.Reason)
+			e.makerClose = nil
+			e.flattenRetryAt = time.Time{}
+			e.flatten(ctx)
+			return
+		}
 		// Отказ «размер reduce-only превышает позицию» означает ровно обратное
 		// тревоге: позиция закрыта, а этот ордер — обогнавший её повтор.
 		// Строка уровня ERROR с текстом «позиция осталась открытой» была здесь

@@ -8,6 +8,7 @@ import (
 	"github.com/oklog/ulid/v2"
 	"github.com/shopspring/decimal"
 
+	"github.com/nd/mm-standx/internal/config"
 	"github.com/nd/mm-standx/internal/domain/market"
 	"github.com/nd/mm-standx/internal/domain/money"
 	"github.com/nd/mm-standx/internal/domain/policy"
@@ -1002,6 +1003,23 @@ func (e *Engine) flatten(ctx context.Context) {
 		return
 	}
 
+	// Мейкерское закрытие ещё в силе: ему дан срок, и второй ордер поверх
+	// него стоил бы комиссии. По истечении срока оно снимается, и остаток
+	// позиции уходит маркетом ниже.
+	if mc := e.makerClose; mc != nil {
+		if now.Before(mc.deadline) {
+			return
+		}
+		e.deps.Log.Warn("maker close timed out, falling back to market",
+			"symbol", e.symbol, "cl_ord_id", mc.id, "qty", mc.qty,
+			"waited", now.Sub(mc.deadline.Add(-e.risk.MakerUnwindTimeout)).Truncate(time.Millisecond).String())
+		if err := e.deps.Gateway.Cancel(ctx, mc.id, ports.PrioritySafety); err != nil {
+			e.deps.Log.Warn("cancel of the maker close failed",
+				"symbol", e.symbol, "cl_ord_id", mc.id, "error", err)
+		}
+		e.makerClose = nil
+	}
+
 	if now.Before(e.flattenRetryAt) {
 		return
 	}
@@ -1011,7 +1029,7 @@ func (e *Engine) flatten(ctx context.Context) {
 		side = market.Buy
 	}
 
-	if !e.submitFlatten(ctx, side, position.Abs(), now, "position reconciliation") {
+	if !e.submitMarketClose(ctx, side, position.Abs(), now, "position reconciliation") {
 		return
 	}
 	// Повтор замедляется, но не прекращается.
@@ -1073,13 +1091,116 @@ func (e *Engine) flattenBackoff() time.Duration {
 	return min(step, flattenBackoffCap)
 }
 
-// submitFlatten sends one reduce-only IOC close and remembers its identity.
+// submitFlatten закрывает исполнение по настроенной политике.
+//
+// ЧТО СТОИТ ЗАЛИВ. Разбор 2 сентября 2026, 12 заливов за утро: комиссии
+// 31.86 USD, проскальзывание 1.50. Из комиссий 24.8 — тейкерские 4 bps
+// на ОДНОМ маркет-закрытии 14.363 XAU (62 000 USD нотионала). Закрыли за
+// 350 мс с отклонением 0.1 USD — и заплатили за скорость, которая была
+// не нужна: цена после залива в этом эпизоде никуда не ушла.
+//
+// Политика maker_then_market ставит вместо маркета post-only лимит на вершину
+// стакана с нашей стороны и даёт ему срок. Исполнился — комиссия 1 bps
+// вместо 4 (а при MM1/MM2 — рибейт). Не исполнился — снимается, остаток
+// уходит маркетом. Так же закрывается сторонний бот (makerThenMarketClose).
+//
+// Позиция при этом открыта дольше — на срок ожидания. Это осознанный размен:
+// 3 bps нотионала за каждые несколько секунд экспозиции.
+func (e *Engine) submitFlatten(
+	ctx context.Context,
+	side market.Side,
+	qty money.Qty,
+	now time.Time,
+	reason string,
+) bool {
+	if !side.Valid() || !qty.IsPositive() {
+		return false
+	}
+	if e.risk.FlattenPolicy == config.FlattenMakerThenMarket && e.makerClose == nil {
+		if e.submitMakerClose(ctx, side, qty, now, reason) {
+			return true
+		}
+		// Мейкером не вышло (стакан не читается, отправка не удалась) —
+		// закрываем как раньше.
+	}
+	return e.submitMarketClose(ctx, side, qty, now, reason)
+}
+
+// submitMakerClose ставит reduce-only post-only лимит на вершину стакана.
+//
+// Цена: лучшая, при которой ордер остаётся мейкером. Для покупки это
+// лучший аск минус буфер post-only, для продажи — лучший бид плюс буфер.
+// MakerUnwindBps > 0 вместо этого считает цену от mark на заданной дистанции,
+// как у стороннего бота (MAKER_UNWIND_BPS), и всё равно зажимает её post-only.
+func (e *Engine) submitMakerClose(
+	ctx context.Context,
+	side market.Side,
+	qty money.Qty,
+	now time.Time,
+	reason string,
+) bool {
+	var want money.Price
+	if e.risk.MakerUnwindBps > 0 {
+		want = market.PriceAtDistance(e.mark, side, money.Bps(e.risk.MakerUnwindBps))
+	} else {
+		var ok bool
+		if side == market.Buy {
+			want, ok = e.book.BestAsk()
+		} else {
+			want, ok = e.book.BestBid()
+		}
+		if !ok {
+			return false
+		}
+	}
+	price := e.spec.SnapPrice(
+		market.ClampPostOnly(want, side, e.book, e.spec, e.cfg.Quote.PostOnlyBufferTicks), side)
+	if !price.IsPositive() || e.book.WouldCross(side, price) {
+		return false
+	}
+
+	id := trading.ClOrdID(ulid.Make().String())
+	e.flattenOrders[id] = flattenOrder{at: now, qty: qty}
+	err := e.deps.Gateway.Place(ctx, ports.PlaceRequest{
+		ClOrdID:     id,
+		Symbol:      e.symbol,
+		Side:        side,
+		Type:        trading.Limit,
+		TimeInForce: trading.ALO,
+		Price:       price,
+		Qty:         qty,
+		ReduceOnly:  true,
+		MarginMode:  e.risk.MarginMode,
+		Leverage:    e.cfg.SymbolRisk.Leverage,
+		Priority:    ports.PrioritySafety,
+	})
+	if err != nil {
+		delete(e.flattenOrders, id)
+		e.deps.Log.Warn("maker close failed to send, closing at market",
+			"symbol", e.symbol, "side", side, "qty", qty, "error", err)
+		return false
+	}
+
+	deadline := now.Add(e.risk.MakerUnwindTimeout)
+	e.makerClose = &makerClose{id: id, side: side, qty: qty, deadline: deadline}
+	// Восстановление по позиции ждёт весь срок мейкерского ордера.
+	e.flattenRetryAt = deadline
+	if until := now.Add(e.risk.PostFillCooldown); until.After(e.cooldownUntil) {
+		e.cooldownUntil = until
+	}
+	e.deps.Log.Info("closing the position as maker",
+		"symbol", e.symbol, "side", side, "qty", qty, "price", price,
+		"until", deadline.UTC().Format(time.RFC3339Nano), "reason", reason, "cl_ord_id", id)
+	return true
+}
+
+// submitMarketClose sends one reduce-only IOC close and remembers its identity.
 //
 // The identifier is stored before the request: its fill report must be
 // recognized as a close rather than as a new quote fill. flattenRetryAt is set
 // even on a transport error because placement errors can be ambiguous; the
 // position-based path waits for reconciliation before risking a duplicate.
-func (e *Engine) submitFlatten(
+func (e *Engine) submitMarketClose(
 	ctx context.Context,
 	side market.Side,
 	qty money.Qty,

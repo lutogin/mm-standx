@@ -86,10 +86,14 @@ func defaults() *Config {
 			// Консервативнее боевого значения намеренно, как и остальной блок:
 			// умолчания не должны быть агрессивнее того, что явно прописано
 			// в файле.
-			UtilizationPct:       70,
-			MaxFillsPerHour:      6,
-			MarginMode:           trading.Isolated,
-			FlattenPolicy:        "immediate_market",
+			UtilizationPct:  70,
+			MaxFillsPerHour: 6,
+			MarginMode:      trading.Isolated,
+			FlattenPolicy:   "immediate_market",
+			// Три секунды, как у стороннего бота (MAKER_UNWIND_TIMEOUT_MS):
+			// достаточно, чтобы вершину стакана прошёл встречный поток,
+			// и мало, чтобы позиция успела уехать.
+			MakerUnwindTimeout:   3 * time.Second,
 			FlattenDebounce:      0,
 			PostFillCooldown:     3 * time.Second,
 			FillBurstLimit:       2,

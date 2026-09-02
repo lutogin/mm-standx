@@ -240,10 +240,19 @@ func TestBlockingCallsOnTheActorPathAreFrozen(t *testing.T) {
 		"execute -> Cancel":             true,
 		"place -> Place":                true,
 		"sendWithdrawal -> Cancel":      true,
-		"submitFlatten -> Place":        true,
 		"reconcile -> CancelBatch":      true,
 		"clearRemaining -> Sleep":       true,
 		"sendWithdrawal -> CancelBatch": true,
+		// Закрытие залива, 2 сентября 2026. Прежний единственный вызов
+		// «submitFlatten -> Place» разделён по политике: маркет IOC остался
+		// в submitMarketClose, post-only лимит живёт в submitMakerClose.
+		// Это тот же поход наружу, что и раньше, а не новый — просто
+		// у него теперь два тела. Cancel во flatten — снятие мейкерского
+		// закрытия по истечении срока перед добиванием маркетом: без него
+		// в стакане висели бы два закрывающих ордера на одну позицию.
+		"submitMarketClose -> Place": true,
+		"submitMakerClose -> Place":  true,
+		"flatten -> Cancel":          true,
 	}
 	// Что считается блокирующим: поход наружу или сон.
 	sinks := map[string]bool{
