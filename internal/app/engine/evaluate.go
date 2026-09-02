@@ -9,6 +9,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"github.com/nd/mm-standx/internal/config"
+	"github.com/nd/mm-standx/internal/domain/liquidity"
 	"github.com/nd/mm-standx/internal/domain/market"
 	"github.com/nd/mm-standx/internal/domain/money"
 	"github.com/nd/mm-standx/internal/domain/policy"
@@ -284,21 +285,51 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 // Считается один раз за такт: вердикт нужен и съёму, и запрету на размещение,
 // а строка о переходе обязана появиться ровно однажды.
 func (e *Engine) thinSides(now time.Time) map[market.Side]bool {
-	out := map[market.Side]bool{}
+	// Замер посторонен: он говорит, какая именно сторона провалилась, и это
+	// нужно в логе. Решение — общее, см. ниже.
+	verdict := map[market.Side]liquidity.Verdict{}
+	thin := false
 	for _, side := range []market.Side{market.Buy, market.Sell} {
 		v := e.liq.Verdict(side, now)
-		out[side] = v.Thin
-		if v.Thin == e.thinSide[side] {
+		verdict[side] = v
+		thin = thin || v.Thin
+	}
+
+	// РЕШЕНИЕ СИММЕТРИЧНО.
+	//
+	// Программа считает замер как min(bid, ask) — reward.Program.Sample, и
+	// спецификация говорит то же прямым текстом: one-sided quoting does not
+	// qualify. Пустая сторона обнуляет зачёт целиком, а оставшаяся продолжает
+	// нести полный риск залива. Из трёх исходов это строго худший:
+	//
+	//	держим обе    — полный зачёт, риск на тонкой стороне
+	//	снимаем обе   — зачёт ноль, риска нет
+	//	снимаем одну  — зачёт ноль, риск на оставшейся      <- было так
+	//
+	// Возврат от симметрии не замедляется. Час начнёт считаться только когда
+	// встанут ОБЕ стороны, а новому ордеру всё равно нужны три секунды
+	// до зачёта; тонкая сторона выставляется заново в любом случае и остаётся
+	// узким местом. Снятая вместе с ней вторая восстанавливается параллельно
+	// и укладывается в то же окно.
+	//
+	// Замер 2 сентября 2026: односторонним котирование было 405 тактов
+	// из ~4400 (9% суток), в час 19:00 — 22%. Весь этот зачёт был нулевым
+	// по построению.
+	out := map[market.Side]bool{market.Buy: thin, market.Sell: thin}
+
+	for _, side := range []market.Side{market.Buy, market.Sell} {
+		if out[side] == e.thinSide[side] {
 			continue
 		}
-		e.thinSide[side] = v.Thin
-		if v.Thin {
-			e.deps.Log.Warn("book depth collapsed on this side",
-				"symbol", e.symbol, "side", side,
+		e.thinSide[side] = out[side]
+		v := verdict[side]
+		if out[side] {
+			e.deps.Log.Warn("book depth collapsed, leaving the book",
+				"symbol", e.symbol, "side", side, "collapsed_here", v.Thin,
 				"depth_usd", int64(v.DepthUSD), "median_usd", int64(v.MedianUSD),
 				"threshold_usd", int64(v.ThresholdUSD))
 		} else {
-			e.deps.Log.Info("book depth recovered, quoting the side again",
+			e.deps.Log.Info("book depth recovered, quoting again",
 				"symbol", e.symbol, "side", side,
 				"depth_usd", int64(v.DepthUSD), "median_usd", int64(v.MedianUSD))
 		}

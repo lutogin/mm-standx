@@ -55,8 +55,9 @@ func TestThinSideStopsPlacingWhileTheOtherKeepsQuoting(t *testing.T) {
 	e.liq.Observe(market.Sell, 1_380_000, clk.now)
 	e.liq.Observe(market.Buy, 6_000_000, clk.now)
 
-	require.True(t, e.thinSides(clk.now)[market.Sell])
-	require.False(t, e.thinSides(clk.now)[market.Buy])
+	thin := e.thinSides(clk.now)
+	require.True(t, thin[market.Sell], "the collapsed side")
+	require.True(t, thin[market.Buy], "and the healthy one with it")
 }
 
 // Обычный стакан ничего не запрещает.
@@ -121,8 +122,8 @@ func TestPullOnThinCanBeTurnedOff(t *testing.T) {
 	require.NotContains(t, gw.cancelled, trading.ClOrdID("ask-0"))
 }
 
-// Тонкий аск не трогает бид: глубина — свойство стороны.
-func TestThinPullLeavesTheHealthySideAlone(t *testing.T) {
+// Тонкий аск уводит и бид: в одиночку он не зачитывается, а риск несёт.
+func TestThinPullTakesBothSides(t *testing.T) {
 	ctx := context.Background()
 	e, gw, clk := thinEngine(t)
 	e.cfg.Liquidity.PullOnThin = true
@@ -139,21 +140,27 @@ func TestThinPullLeavesTheHealthySideAlone(t *testing.T) {
 	// по своим причинам, и тогда тест мерил бы не то, что проверяет.
 	gw.cancelled = nil
 	require.True(t, e.pullThin(ctx, e.thinSides(clk.now), clk.now))
-	require.Contains(t, gw.cancelled, trading.ClOrdID("ask-0"))
-	require.NotContains(t, gw.cancelled, trading.ClOrdID("bid-0"))
+	require.Contains(t, gw.cancelled, trading.ClOrdID("ask-0"), "the collapsed side")
+	require.Contains(t, gw.cancelled, trading.ClOrdID("bid-0"),
+		"and the healthy one: min(bid, ask) makes a lone side worth nothing")
 }
 
 // Сводка обязана показывать запрет: не котирующая сторона иначе выглядит
 // в логе так же, как сторона, которой просто нечего делать.
-func TestThinSummaryNamesTheClosedSide(t *testing.T) {
+//
+// Значений теперь два, а не четыре: решение симметрично, и «ask» без «bid»
+// невозможно. Какая именно сторона провалилась, остаётся в строке лога
+// (поле collapsed_here), а не в сводке.
+func TestThinSummaryShowsBothOrNeither(t *testing.T) {
 	e, _, clk := thinEngine(t)
 	primeDepth(e, 6_000_000, clk.now.Add(-2*time.Minute), 60)
 
-	e.liq.Observe(market.Sell, 500_000, clk.now)
+	e.liq.Observe(market.Sell, 5_900_000, clk.now)
+	e.liq.Observe(market.Buy, 6_100_000, clk.now)
 	e.thinSides(clk.now)
-	require.Equal(t, "ask", e.thinSummary())
+	require.Equal(t, "no", e.thinSummary())
 
-	e.liq.Observe(market.Buy, 500_000, clk.now)
+	e.liq.Observe(market.Sell, 500_000, clk.now)
 	e.thinSides(clk.now)
 	require.Equal(t, "both", e.thinSummary())
 }
@@ -163,4 +170,38 @@ func TestGateStaysOpenUntilTheWindowIsMature(t *testing.T) {
 	e, _, clk := thinEngine(t)
 	e.liq.Observe(market.Sell, 1, clk.now)
 	require.False(t, e.thinSides(clk.now)[market.Sell])
+}
+
+// Тонкая сторона уводит из стакана ОБЕ.
+//
+// Программа считает замер как min(bid, ask): пустая сторона обнуляет зачёт
+// целиком. Оставшаяся не приносит ничего и продолжает нести риск залива —
+// это строго худший исход, чем снять обе. Замер 2 сентября 2026: односторонним
+// котирование было 9% суток, и весь этот зачёт был нулевым.
+func TestThinOnOneSideClosesBoth(t *testing.T) {
+	e, _, clk := thinEngine(t)
+	primeDepth(e, 6_000_000, clk.now.Add(-2*time.Minute), 60)
+
+	// Обвалился только аск; бид здоров.
+	e.liq.Observe(market.Sell, 500_000, clk.now)
+	e.liq.Observe(market.Buy, 6_100_000, clk.now)
+
+	thin := e.thinSides(clk.now)
+	require.True(t, thin[market.Sell], "the collapsed side")
+	require.True(t, thin[market.Buy],
+		"and the healthy one too: alone it earns nothing and still risks a fill")
+	require.Equal(t, "both", e.thinSummary())
+}
+
+// Здоровый стакан по-прежнему не закрывает ничего.
+func TestHealthyBookClosesNeither(t *testing.T) {
+	e, _, clk := thinEngine(t)
+	primeDepth(e, 6_000_000, clk.now.Add(-2*time.Minute), 60)
+
+	e.liq.Observe(market.Sell, 5_900_000, clk.now)
+	e.liq.Observe(market.Buy, 6_100_000, clk.now)
+
+	thin := e.thinSides(clk.now)
+	require.False(t, thin[market.Buy])
+	require.False(t, thin[market.Sell])
 }
