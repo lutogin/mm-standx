@@ -301,6 +301,7 @@ type Symbol struct {
 	Quote      Quote      `koanf:"quote"`
 	Appetite   Appetite   `koanf:"appetite"`
 	Volatility Volatility `koanf:"volatility"`
+	Liquidity  Liquidity  `koanf:"liquidity"`
 	Program    Program    `koanf:"program"`
 	Uptime     Uptime     `koanf:"uptime"`
 	SymbolRisk SymbolRisk `koanf:"risk"`
@@ -447,6 +448,24 @@ type Appetite struct {
 }
 
 // Volatility — параметры оценщика скачка.
+// Liquidity — когда стакан слишком тонок, чтобы в нём стоять.
+//
+// Единственная настройка контура, смотрящего на ликвидность, а не на цену.
+// См. liquidity.Config.
+type Liquidity struct {
+	// Window — горизонт, по которому считается норма глубины.
+	Window time.Duration `koanf:"window"`
+	// SampleEvery — минимальный промежуток между замерами. Без него окно
+	// меряет частоту рыночных событий, а не время. См. liquidity.Config.
+	SampleEvery time.Duration `koanf:"sampleEvery"`
+	// MinSamples — сколько замеров нужно, чтобы норме верить. В замерах,
+	// а не в минутах: вместе с SampleEvery это и задаёт время.
+	MinSamples int `koanf:"minSamples"`
+	// ThinFraction — доля медианы окна, ниже которой сторона не котируется.
+	// Ноль отключает проверку.
+	ThinFraction float64 `koanf:"thinFraction"`
+}
+
 type Volatility struct {
 	// Window — глубина скользящего окна.
 	Window time.Duration `koanf:"window"`

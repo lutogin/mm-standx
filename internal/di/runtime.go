@@ -29,6 +29,7 @@ import (
 	"github.com/nd/mm-standx/internal/app/watchdog"
 	"github.com/nd/mm-standx/internal/config"
 	"github.com/nd/mm-standx/internal/domain/economics"
+	"github.com/nd/mm-standx/internal/domain/liquidity"
 	"github.com/nd/mm-standx/internal/domain/market"
 	"github.com/nd/mm-standx/internal/domain/money"
 	"github.com/nd/mm-standx/internal/domain/policy"
@@ -399,6 +400,12 @@ func provideEngines(
 					ReentryDeadBandBps: symCfg.Appetite.ReentryDeadBandBps,
 				},
 				Bounds: policy.Bounds{MinBps: symCfg.Appetite.MinBps, MaxBps: symCfg.Appetite.MaxBps},
+				Liquidity: liquidity.Config{
+					Window:       symCfg.Liquidity.Window,
+					SampleEvery:  symCfg.Liquidity.SampleEvery,
+					MinSamples:   symCfg.Liquidity.MinSamples,
+					ThinFraction: symCfg.Liquidity.ThinFraction,
+				},
 				Volatility: volatility.Config{
 					Window:               symCfg.Volatility.Window,
 					MinSamples:           symCfg.Volatility.MinSamples,

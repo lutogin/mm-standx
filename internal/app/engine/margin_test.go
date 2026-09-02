@@ -194,6 +194,8 @@ func TestUtilizationFromConfigScalesTheQuotedSize(t *testing.T) {
 	e.evaluate(ctx, true)
 	require.NotEmpty(t, gw.placed)
 	half := gw.placed[0].Qty
+	gw.confirmQuotes(e, clk.now)
+	gw.releaseQuotes(e, clk.now)
 
 	gw.placed = nil
 	e.risk.UtilizationPct = 100

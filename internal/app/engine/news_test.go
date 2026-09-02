@@ -224,6 +224,11 @@ func TestDisabledGuardIgnoresTheCalendarEntirely(t *testing.T) {
 	clk.now = start.Add(30 * time.Minute) // ровно момент публикации
 	primeVolatility(t, e, clk)
 	clk.now = start.Add(30 * time.Minute)
+	// Ордера, выставленные при сборке стенда, биржа подтверждает: иначе через
+	// полчаса модельного времени они выглядят потерянными и отзываются, а тест
+	// начинает мерить путь восстановления вместо выключенного блэкаута.
+	gw.confirmQuotes(e, clk.now)
+	gw.placed, gw.cancelled = nil, nil
 
 	e.evaluate(context.Background(), true)
 

@@ -60,6 +60,41 @@ func (g *recordingGateway) CancelBatch(_ context.Context, ids []trading.ClOrdID,
 	return nil
 }
 
+// confirmQuotes marks every limit order the gateway received as live.
+//
+// Реальная биржа отвечает на размещение, и ступень уходит из Placing в Live.
+// Заглушка молчит, поэтому без этого вызова ступень остаётся в полёте — а
+// с тех пор как неподтверждённое размещение отзывается вместо забвения
+// (Ladder.Plan), молчание заглушки перестало быть безобидным: тест начинал
+// мерить путь восстановления вместо того, ради чего написан.
+func (g *recordingGateway) confirmQuotes(e *Engine, at time.Time) {
+	for _, req := range g.placed {
+		if req.Type != trading.Limit {
+			continue
+		}
+		e.ladderFor(req.Side).OnOrderUpdate(
+			trading.Order{ClOrdID: req.ClOrdID, Status: trading.StatusOpen}, at)
+	}
+}
+
+// releaseQuotes reports every limit order the gateway received as terminal,
+// which frees its rung.
+//
+// Нужен там, где тест хочет увидеть СЛЕДУЮЩЕЕ размещение. Раньше ступень
+// освобождалась сама — истёкшим AckTimeout, — и тесты размера опирались
+// именно на это. Опора была на неисправность: тот же путь стирал ClOrdID
+// живого ордера и плодил сирот (Ladder.Plan). Освобождать ступень должен
+// ответ биржи, и в стенде тоже.
+func (g *recordingGateway) releaseQuotes(e *Engine, at time.Time) {
+	for _, req := range g.placed {
+		if req.Type != trading.Limit {
+			continue
+		}
+		e.ladderFor(req.Side).OnOrderUpdate(
+			trading.Order{ClOrdID: req.ClOrdID, Status: trading.StatusCanceled}, at)
+	}
+}
+
 // marketOrders returns only the closing orders: quotes are limit orders.
 func (g *recordingGateway) marketOrders() []ports.PlaceRequest {
 	var out []ports.PlaceRequest

@@ -19,6 +19,7 @@ import (
 	"github.com/nd/mm-standx/internal/config"
 	"github.com/nd/mm-standx/internal/domain/calendar"
 	"github.com/nd/mm-standx/internal/domain/economics"
+	"github.com/nd/mm-standx/internal/domain/liquidity"
 	"github.com/nd/mm-standx/internal/domain/market"
 	"github.com/nd/mm-standx/internal/domain/money"
 	"github.com/nd/mm-standx/internal/domain/policy"
@@ -98,6 +99,7 @@ type Params struct {
 	Appetite   policy.Appetite
 	Bounds     policy.Bounds
 	Volatility volatility.Config
+	Liquidity  liquidity.Config
 	Economics  economics.Gate
 
 	// ReferenceStaleAfter — сколько молчания внешнего ориентира возвращает
@@ -137,6 +139,8 @@ type Engine struct {
 	bids *quotes.Ladder
 	asks *quotes.Ladder
 	vol  *volatility.Estimator
+	// liq судит, достаточно ли в стакане глубины, чтобы стоять в нём.
+	liq  *liquidity.Estimator
 	hour *uptime.Tracker
 
 	// Рыночное состояние.
@@ -326,6 +330,10 @@ type Engine struct {
 	// эпизоде. Задаёт шаг замедления и обнуляется вместе с эпизодом.
 	flattenAttempts int
 
+	// thinSide помнит, о какой стороне уже напечатано, что стакан тонок.
+	// Переход печатается один раз: строка на каждом такте утопила бы лог.
+	thinSide map[market.Side]bool
+
 	// pendingWithdraw — ордера, снятие которых не удалось отправить.
 	//
 	// Съём котировок — аварийный путь, и молчаливая потеря команды на нём
@@ -393,9 +401,11 @@ func New(p Params, deps Deps) *Engine {
 			RefillLockout:        p.Config.Quote.RefillLockout,
 			BalanceRejectBackoff: p.Config.Quote.BalanceRejectBackoff,
 		},
-		bids: quotes.New(market.Buy, layers),
-		asks: quotes.New(market.Sell, layers),
-		vol:  volatility.New(p.Volatility),
+		bids:     quotes.New(market.Buy, layers),
+		asks:     quotes.New(market.Sell, layers),
+		vol:      volatility.New(p.Volatility),
+		liq:      liquidity.New(p.Liquidity),
+		thinSide: map[market.Side]bool{},
 		hour: uptime.New(p.Program, uptime.Policy{
 			TargetPct:         p.Config.Uptime.TargetPct,
 			HardFloorPct:      p.Config.Uptime.HardFloorPct,

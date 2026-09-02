@@ -48,6 +48,11 @@ func TestQuotedSizeFollowsTheBalance(t *testing.T) {
 	e.evaluate(ctx, true)
 	require.NotEmpty(t, gw.placed, "a funded account quotes")
 	small := gw.placed[0].Qty
+	// Биржа подтверждает размещение и затем снимает его: ступень свободна,
+	// и следующий такт котирует новым размером. Без ответа биржи ступень
+	// осталась бы в полёте, а такт ушёл бы на её отзыв.
+	gw.confirmQuotes(e, clk.now)
+	gw.releaseQuotes(e, clk.now)
 
 	gw.placed = nil
 	e.handle(ctx, balanceEvent("10000", "10000", "0"))

@@ -98,6 +98,14 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 		return
 	}
 
+	// Глубина замеряется здесь, где стакан заведомо двусторонний, и до всякого
+	// раннего выхода: норма обязана продолжать накапливаться и тогда, когда
+	// актор не котирует, иначе после каждой паузы окно оказывалось бы пустым
+	// ровно в тот момент, когда судить о стакане нужнее всего.
+	bidUSD, askUSD := e.bookDepth()
+	e.liq.Observe(market.Buy, bidUSD, now)
+	e.liq.Observe(market.Sell, askUSD, now)
+
 	if now.Before(e.fillBurstUntil) {
 		reason := fmt.Sprintf("fill burst cooldown is active until %s", e.fillBurstUntil.UTC().Format(time.RFC3339))
 		blocked(reason)
@@ -257,8 +265,39 @@ func (e *Engine) evaluate(ctx context.Context, allowPlace bool) {
 		if len(actions) > 0 {
 			e.lastAction = now
 		}
-		e.execute(ctx, side, actions, allowPlace, plan.Rungs)
+		e.execute(ctx, side, actions, allowPlace && !e.thinBook(side, now), plan.Rungs)
 	}
+}
+
+// thinBook запрещает ставить НОВЫЕ ордера на сторону, у которой из стакана
+// ушла глубина.
+//
+// Запрет только на размещение. Уже стоящие ступени остаются под обычными
+// правилами: они уже засчитываются программе, а снимать их по тонкому стакану
+// значило бы платить присутствием за состояние, которое чаще всего проходит
+// само. Опасность подхода цены к ним по-прежнему судит аварийный путь.
+//
+// Замер 1 сентября 2026 объясняет, почему запрет именно на размещение. Оба
+// самых дорогих залива того дня пришли по ордерам, ВЫСТАВЛЕННЫМ в уже тонкий
+// стакан: сель 22:00:33 прожил 1.76 секунды при глубине 0.62 от нормы, второй
+// такой же — при 0.23. Реагировать там было не на что: ордер родился в рынок,
+// который его сразу забрал.
+func (e *Engine) thinBook(side market.Side, now time.Time) bool {
+	v := e.liq.Verdict(side, now)
+	if v.Thin != e.thinSide[side] {
+		e.thinSide[side] = v.Thin
+		if v.Thin {
+			e.deps.Log.Warn("book too thin to quote into, holding placements",
+				"symbol", e.symbol, "side", side,
+				"depth_usd", int64(v.DepthUSD), "median_usd", int64(v.MedianUSD),
+				"threshold_usd", int64(v.ThresholdUSD))
+		} else {
+			e.deps.Log.Info("book depth recovered, quoting the side again",
+				"symbol", e.symbol, "side", side,
+				"depth_usd", int64(v.DepthUSD), "median_usd", int64(v.MedianUSD))
+		}
+	}
+	return v.Thin
 }
 
 // quotingBounds сужает полосу, пока актор вне рынка.
@@ -1042,6 +1081,7 @@ func (e *Engine) reportStatus(
 		"mark", e.mark,
 		"half_spread", conditions.HalfSpreadBps,
 		"depth_bid_usd", fmt.Sprintf("%.0f", bidDepth),
+		"thin_book", e.thinSummary(),
 		"depth_ask_usd", fmt.Sprintf("%.0f", askDepth),
 		"jump", estimate.JumpBps,
 		"jump_effective", conditions.JumpBps,
@@ -1180,6 +1220,24 @@ func (e *Engine) blockedReason(quote policy.Quote) string {
 		return e.blocked
 	}
 	return quote.Reason
+}
+
+// thinSummary — какие стороны сейчас закрыты по глубине стакана.
+//
+// В сводке нужно потому, что запрет наблюдаем только по отсутствию: сторона,
+// которая не котируется из-за тонкого стакана, выглядит в логе ровно так же,
+// как сторона, которой просто нечего делать.
+func (e *Engine) thinSummary() string {
+	switch {
+	case e.thinSide[market.Buy] && e.thinSide[market.Sell]:
+		return "both"
+	case e.thinSide[market.Buy]:
+		return "bid"
+	case e.thinSide[market.Sell]:
+		return "ask"
+	default:
+		return "no"
+	}
 }
 
 // bookReadable сообщает, читается ли стакан обеими сторонами.

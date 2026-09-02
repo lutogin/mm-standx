@@ -301,6 +301,7 @@ func (s Symbol) validate(name string, band money.Bps, tiers []UptimeTier, live b
 			prefix, s.Uptime.HardFloorPct, tiers[0].ThresholdPct))
 	}
 	errs = append(errs, s.Volatility.validate(prefix+".volatility")...)
+	errs = append(errs, validateLiquidity(s.Liquidity, prefix)...)
 	// Checked for disabled instruments too, for the same reason as the shutdown
 	// window: a typo would otherwise surface when the instrument is switched on.
 	errs = append(errs, s.Reference.validate(prefix+".reference")...)
@@ -367,6 +368,41 @@ func (q Quote) validate(prefix string) []error {
 	}
 	if q.PostOnlyBufferTicks < 0 {
 		errs = append(errs, fmt.Errorf("%s.postOnlyBufferTicks must not be negative", prefix))
+	}
+	return errs
+}
+
+// validateLiquidity сверяет ворота по глубине стакана.
+//
+// Ноль в ThinFraction — законное значение: оно выключает проверку. Единица
+// и больше означали бы «тонко всегда», то есть молчание вместо котирования,
+// и это почти наверняка опечатка.
+func validateLiquidity(l Liquidity, prefix string) []error {
+	var errs []error
+	if l.ThinFraction < 0 || l.ThinFraction >= 1 {
+		errs = append(errs, fmt.Errorf(
+			"%s.liquidity.thinFraction must be within [0, 1), got %.2f", prefix, l.ThinFraction))
+	}
+	if l.ThinFraction == 0 {
+		return errs
+	}
+	if l.Window <= 0 {
+		errs = append(errs, fmt.Errorf(
+			"%s.liquidity.window must be positive when thinFraction is set", prefix))
+	}
+	if l.SampleEvery < 0 {
+		errs = append(errs, fmt.Errorf(
+			"%s.liquidity.sampleEvery must not be negative", prefix))
+	}
+	if l.SampleEvery > 0 && l.Window > 0 &&
+		time.Duration(l.MinSamples)*l.SampleEvery > l.Window {
+		errs = append(errs, fmt.Errorf(
+			"%s.liquidity: minSamples x sampleEvery (%s) exceeds the window (%s), the estimate can never mature",
+			prefix, time.Duration(l.MinSamples)*l.SampleEvery, l.Window))
+	}
+	if l.MinSamples < 1 {
+		errs = append(errs, fmt.Errorf(
+			"%s.liquidity.minSamples must be at least 1 when thinFraction is set", prefix))
 	}
 	return errs
 }
