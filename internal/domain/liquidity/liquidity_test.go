@@ -179,3 +179,104 @@ func TestThrottledEstimateStillGates(t *testing.T) {
 	e.Observe(market.Sell, 1_380_000, at)
 	require.True(t, e.Verdict(market.Sell, at).Thin)
 }
+
+// ---- Два порога и гистерезис -------------------------------------------------
+
+func twoTier() Config {
+	return Config{
+		Window: 10 * time.Minute, SampleEvery: time.Second, MinSamples: 60,
+		ThinFraction: 0.70, SevereFraction: 0.35, ThinAfter: 3 * time.Second,
+		RecoverFraction: 0.85, RecoverAfter: 10 * time.Second,
+	}
+}
+
+// Обвал закрывает сторону немедленно: упреждение, ради которого фильтр заведён.
+func TestSevereCollapseClosesAtOnce(t *testing.T) {
+	e := New(twoTier())
+	at := fill(e, market.Sell, 6_000_000, 120)
+	e.Observe(market.Sell, 528_000, at) // 9% нормы — эпизод 05:30:37
+	require.True(t, e.Verdict(market.Sell, at).Thin)
+}
+
+// Мягкая просадка требует выдержки: секундный провал — шум.
+func TestMildDipNeedsToPersist(t *testing.T) {
+	e := New(twoTier())
+	at := fill(e, market.Sell, 6_000_000, 120)
+
+	e.Observe(market.Sell, 3_900_000, at) // 0.65 — ниже 0.70, выше 0.35
+	require.False(t, e.Verdict(market.Sell, at).Thin, "one second below the line is not an event")
+
+	at = at.Add(3 * time.Second)
+	e.Observe(market.Sell, 3_900_000, at)
+	require.True(t, e.Verdict(market.Sell, at).Thin, "three seconds is")
+}
+
+// Дрожание вокруг порога не дёргает сторону: замер 2 сентября — 515 эпизодов
+// медианой в секунду.
+func TestFlappingAroundTheThresholdDoesNotToggle(t *testing.T) {
+	e := New(twoTier())
+	at := fill(e, market.Sell, 6_000_000, 120)
+	for i := range 20 {
+		dep := 3_900_000.0 // 0.65
+		if i%2 == 1 {
+			dep = 4_500_000 // 0.75
+		}
+		at = at.Add(time.Second)
+		e.Observe(market.Sell, dep, at)
+		require.False(t, e.Verdict(market.Sell, at).Thin, "tick %d", i)
+	}
+}
+
+// Возврат — по более высокому порогу и с выдержкой.
+func TestRecoveryNeedsHigherDepthHeldForAWhile(t *testing.T) {
+	e := New(twoTier())
+	at := fill(e, market.Sell, 6_000_000, 120)
+	e.Observe(market.Sell, 500_000, at)
+	require.True(t, e.Verdict(market.Sell, at).Thin)
+
+	// 0.80 — выше thin, ниже recover: не возвращаемся.
+	at = at.Add(time.Second)
+	e.Observe(market.Sell, 4_800_000, at)
+	require.True(t, e.Verdict(market.Sell, at).Thin, "above thin is not yet recovered")
+
+	// 0.90 — выше recover, но всего секунду.
+	at = at.Add(time.Second)
+	e.Observe(market.Sell, 5_400_000, at)
+	require.True(t, e.Verdict(market.Sell, at).Thin, "recovery must hold")
+
+	at = at.Add(10 * time.Second)
+	e.Observe(market.Sell, 5_400_000, at)
+	require.False(t, e.Verdict(market.Sell, at).Thin, "held long enough")
+}
+
+// Провал во время восстановления сбрасывает выдержку.
+func TestDipDuringRecoveryResetsTheHold(t *testing.T) {
+	e := New(twoTier())
+	at := fill(e, market.Sell, 6_000_000, 120)
+	e.Observe(market.Sell, 500_000, at)
+	require.True(t, e.Verdict(market.Sell, at).Thin)
+
+	for i := range 8 {
+		at = at.Add(time.Second)
+		e.Observe(market.Sell, 5_400_000, at)
+		require.True(t, e.Verdict(market.Sell, at).Thin, "tick %d", i)
+	}
+	at = at.Add(time.Second)
+	e.Observe(market.Sell, 4_000_000, at) // снова ниже recover
+	require.True(t, e.Verdict(market.Sell, at).Thin)
+
+	at = at.Add(9 * time.Second)
+	e.Observe(market.Sell, 5_400_000, at)
+	require.True(t, e.Verdict(market.Sell, at).Thin, "the clock restarted at the dip")
+}
+
+// Нули в новых полях возвращают прежнее поведение — один порог, без выдержек.
+func TestZeroExtrasReduceToTheSingleThreshold(t *testing.T) {
+	e := New(Config{Window: 10 * time.Minute, MinSamples: 40, ThinFraction: 0.70})
+	at := fill(e, market.Sell, 6_000_000, 60)
+	e.Observe(market.Sell, 3_900_000, at)
+	require.True(t, e.Verdict(market.Sell, at).Thin, "no ThinAfter: closes at once")
+	at = at.Add(time.Second)
+	e.Observe(market.Sell, 4_500_000, at)
+	require.False(t, e.Verdict(market.Sell, at).Thin, "no RecoverAfter: reopens at once above thin")
+}

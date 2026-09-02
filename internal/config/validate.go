@@ -386,6 +386,20 @@ func validateLiquidity(l Liquidity, prefix string) []error {
 	if l.ThinFraction == 0 {
 		return errs
 	}
+	if l.SevereFraction < 0 || l.SevereFraction >= l.ThinFraction {
+		errs = append(errs, fmt.Errorf(
+			"%s.liquidity.severeFraction must be within [0, thinFraction=%.2f), got %.2f",
+			prefix, l.ThinFraction, l.SevereFraction))
+	}
+	if l.RecoverFraction != 0 && (l.RecoverFraction <= l.ThinFraction || l.RecoverFraction >= 1) {
+		errs = append(errs, fmt.Errorf(
+			"%s.liquidity.recoverFraction must be within (thinFraction=%.2f, 1) or 0, got %.2f",
+			prefix, l.ThinFraction, l.RecoverFraction))
+	}
+	if l.ThinAfter < 0 || l.RecoverAfter < 0 {
+		errs = append(errs, fmt.Errorf(
+			"%s.liquidity: thinAfter and recoverAfter must not be negative", prefix))
+	}
 	if l.Window <= 0 {
 		errs = append(errs, fmt.Errorf(
 			"%s.liquidity.window must be positive when thinFraction is set", prefix))

@@ -54,8 +54,24 @@ type Config struct {
 	// именно время: 300 при замере раз в секунду — это пять минут.
 	MinSamples int
 	// ThinFraction — доля медианы окна, ниже которой сторона объявляется
-	// тонкой. Ноль отключает проверку целиком.
+	// тонкой, если просадка продержалась ThinAfter. Ноль отключает проверку
+	// целиком.
 	ThinFraction float64
+	// SevereFraction — доля медианы, ниже которой сторона объявляется тонкой
+	// НЕМЕДЛЕННО, без выдержки. Обвал, а не просадка. Ноль отключает
+	// немедленный путь.
+	SevereFraction float64
+	// ThinAfter — сколько мягкая просадка обязана продержаться, прежде чем
+	// сторона закроется. Ноль — закрывать сразу.
+	ThinAfter time.Duration
+	// RecoverFraction — доля медианы, выше которой глубина считается
+	// восстановившейся. Обязана быть выше ThinFraction: иначе порог один,
+	// и глубина, дрожащая вокруг него, дёргает сторону туда-обратно.
+	// Ноль — восстановление по ThinFraction.
+	RecoverFraction float64
+	// RecoverAfter — сколько глубина обязана простоять выше RecoverFraction,
+	// прежде чем сторона откроется. Ноль — открывать сразу.
+	RecoverAfter time.Duration
 }
 
 // Verdict — что известно о стороне прямо сейчас.
@@ -85,13 +101,31 @@ type Estimator struct {
 	cfg  Config
 	bids []sample
 	asks []sample
+	// gate — состояние гистерезиса по сторонам. Вердикт с памятью: сторона,
+	// объявленная тонкой, остаётся тонкой, пока глубина не восстановится
+	// заметно и надолго, а не на один замер.
+	gate [2]gateState
 	// scratch переиспользуется под сортировку: медиана считается на каждом
 	// такте по обеим сторонам, и аллокация здесь была бы чистым мусором.
 	scratch []float64
 }
 
+// gateState — память ворот одной стороны.
+type gateState struct {
+	thin      bool
+	thinSince time.Time // с какого момента держится мягкая просадка
+	okSince   time.Time // с какого момента глубина выше порога восстановления
+}
+
 // New создаёт оценку по конфигурации.
 func New(cfg Config) *Estimator { return &Estimator{cfg: cfg} }
+
+func (e *Estimator) gateOf(s market.Side) *gateState {
+	if s == market.Buy {
+		return &e.gate[0]
+	}
+	return &e.gate[1]
+}
 
 func (e *Estimator) sideOf(s market.Side) *[]sample {
 	if s == market.Buy {
@@ -124,13 +158,31 @@ func (e *Estimator) Observe(side market.Side, depthUSD float64, at time.Time) {
 	}
 }
 
-// Verdict судит сторону по последнему замеру.
+// Verdict судит сторону по последнему замеру — с памятью.
+//
+// ДВА ПОРОГА И ВЫДЕРЖКА, А НЕ ОДИН ГОЛЫЙ. Первая версия сравнивала глубину
+// с одной долей медианы и дёргала сторону при каждом пересечении. Замер
+// 2 сентября 2026 за полдня: 515 эпизодов «тонко», медиана длительности
+// ОДНА секунда, 90% короче пяти, 379 съёмов стороны. Глубина дрожит вокруг
+// порога — сторона снимается и возвращается по кругу, и каждый круг стоит
+// четырёх запросов и дыры в присутствии.
+//
+// Тот же замер показывает, что настоящие обвалы ни с чем не спутать: аск
+// в 90 499 USD при норме 7M (1.3%), 528 000 при 6M (9%). Это доля
+// SevereFraction, и на неё сторона закрывается немедленно — упреждение
+// в сотни миллисекунд, ради которого фильтр и заведён, здесь сохраняется.
+// Мягкая просадка до ThinFraction закрывает сторону только продержавшись
+// ThinAfter: секундный провал до 65% нормы — это не событие, а шум.
+//
+// Возврат асимметричен, как и везде в этом контуре: уходим по порогу
+// и сразу, возвращаемся по более высокому порогу и с выдержкой.
 //
 // Пустое окно и незрелая оценка дают Thin=false: проверка существует, чтобы
 // убирать актора из опасного стакана, а не чтобы держать его вне рынка, пока
 // нечего сказать.
-func (e *Estimator) Verdict(side market.Side, _ time.Time) Verdict {
+func (e *Estimator) Verdict(side market.Side, now time.Time) Verdict {
 	q := *e.sideOf(side)
+	g := e.gateOf(side)
 	if len(q) == 0 {
 		return Verdict{}
 	}
@@ -141,7 +193,44 @@ func (e *Estimator) Verdict(side market.Side, _ time.Time) Verdict {
 	v.Ready = true
 	v.MedianUSD = e.median(q)
 	v.ThresholdUSD = v.MedianUSD * e.cfg.ThinFraction
-	v.Thin = v.MedianUSD > 0 && v.DepthUSD < v.ThresholdUSD
+	if v.MedianUSD <= 0 {
+		return v
+	}
+	ratio := v.DepthUSD / v.MedianUSD
+
+	if g.thin {
+		recover := e.cfg.RecoverFraction
+		if recover <= e.cfg.ThinFraction {
+			recover = e.cfg.ThinFraction
+		}
+		if ratio >= recover {
+			if g.okSince.IsZero() {
+				g.okSince = now
+			}
+			if now.Sub(g.okSince) >= e.cfg.RecoverAfter {
+				g.thin, g.okSince, g.thinSince = false, time.Time{}, time.Time{}
+			}
+		} else {
+			g.okSince = time.Time{}
+		}
+		v.Thin = g.thin
+		return v
+	}
+
+	switch {
+	case e.cfg.SevereFraction > 0 && ratio < e.cfg.SevereFraction:
+		g.thin, g.thinSince, g.okSince = true, time.Time{}, time.Time{}
+	case ratio < e.cfg.ThinFraction:
+		if g.thinSince.IsZero() {
+			g.thinSince = now
+		}
+		if now.Sub(g.thinSince) >= e.cfg.ThinAfter {
+			g.thin, g.thinSince = true, time.Time{}
+		}
+	default:
+		g.thinSince = time.Time{}
+	}
+	v.Thin = g.thin
 	return v
 }
 

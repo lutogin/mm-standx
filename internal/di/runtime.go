@@ -401,10 +401,14 @@ func provideEngines(
 				},
 				Bounds: policy.Bounds{MinBps: symCfg.Appetite.MinBps, MaxBps: symCfg.Appetite.MaxBps},
 				Liquidity: liquidity.Config{
-					Window:       symCfg.Liquidity.Window,
-					SampleEvery:  symCfg.Liquidity.SampleEvery,
-					MinSamples:   symCfg.Liquidity.MinSamples,
-					ThinFraction: symCfg.Liquidity.ThinFraction,
+					Window:          symCfg.Liquidity.Window,
+					SampleEvery:     symCfg.Liquidity.SampleEvery,
+					MinSamples:      symCfg.Liquidity.MinSamples,
+					ThinFraction:    symCfg.Liquidity.ThinFraction,
+					SevereFraction:  symCfg.Liquidity.SevereFraction,
+					ThinAfter:       symCfg.Liquidity.ThinAfter,
+					RecoverFraction: symCfg.Liquidity.RecoverFraction,
+					RecoverAfter:    symCfg.Liquidity.RecoverAfter,
 				},
 				Volatility: volatility.Config{
 					Window:               symCfg.Volatility.Window,

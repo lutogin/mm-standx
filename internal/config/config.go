@@ -461,9 +461,19 @@ type Liquidity struct {
 	// MinSamples — сколько замеров нужно, чтобы норме верить. В замерах,
 	// а не в минутах: вместе с SampleEvery это и задаёт время.
 	MinSamples int `koanf:"minSamples"`
-	// ThinFraction — доля медианы окна, ниже которой сторона не котируется.
-	// Ноль отключает проверку.
+	// ThinFraction — доля медианы окна, ниже которой сторона объявляется
+	// тонкой, продержавшись ThinAfter. Ноль отключает проверку.
 	ThinFraction float64 `koanf:"thinFraction"`
+	// SevereFraction — доля медианы, ниже которой сторона закрывается сразу,
+	// без выдержки. Ноль отключает немедленный путь.
+	SevereFraction float64 `koanf:"severeFraction"`
+	// ThinAfter — выдержка мягкой просадки до закрытия стороны.
+	ThinAfter time.Duration `koanf:"thinAfter"`
+	// RecoverFraction — доля медианы, выше которой глубина считается
+	// восстановившейся. Выше ThinFraction, иначе порог один и сторона дребезжит.
+	RecoverFraction float64 `koanf:"recoverFraction"`
+	// RecoverAfter — сколько глубина держится выше RecoverFraction до открытия.
+	RecoverAfter time.Duration `koanf:"recoverAfter"`
 	// PullOnThin — снимать ли уже стоящие ступени, когда сторона объявлена
 	// тонкой. Ложь оставляет только запрет на новые ордера.
 	PullOnThin bool `koanf:"pullOnThin"`
