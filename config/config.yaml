@@ -392,7 +392,7 @@ defaults:
     # mm_realized_pnl_usd, делённого на зачтённые часы.
     breakEvenUsdPerMakerHour: 0.25
   quote:
-    ladderLayers: 3 # лесенка компенсирует отсутствие amend в API
+    ladderLayers: 2 # лесенка компенсирует отсутствие amend в API
     # The reward band is only 10 bps wide and ends abruptly, so the width of
     # the ladder comes straight out of the distance budget: at 1.0 the three
     # rungs took 2 of those 10 bps. They buy no risk diversification in return
@@ -571,7 +571,29 @@ defaults:
     # 0.5 pulls when the market has eaten half the way to the quote: at a target
     # of 7.4 bps that is 3.7 instead of ~1. Cost is presence — a withdrawn side
     # scores nothing until it returns, and re-entry is bounded by minRest.
-    panicFraction: 0.5
+    # Поднято с 0.5 по заливу 2 сентября 2026, 11:54. Полторы минуты рынок
+    # стоял на месте (max_tick_move 0, оценка скачка сползла к 0.63), лесенка
+    # упёрлась в пол 7.0/7.4/7.8 — и затем 7.6 bps за несколько секунд.
+    #
+    # Порог паники = max(halfSpread + jump, panicFraction x цель). В спокойном
+    # рынке первая часть ничтожна (0.75), решает вторая: 0.5 x 7.0 = 3.5 bps.
+    # То есть оценка должна была подойти к ордеру на 3.9 bps, прежде чем
+    # сторона снималась. Быстрый сигнал показал +1.3 bps в 11:54:21.597 и +3.9
+    # только в 11:54:22.667 — а биржа свела сделку в 11:54:22.561. Съём ушёл
+    # на 106 мс позже сведения.
+    #
+    # При 0.75 порог 5.25 bps: хватило бы +1.85 bps по оценке, и по ходу
+    # того же движения это 11:54:22.0-22.2, то есть за 350-550 мс до сделки
+    # при круге запроса в десятки миллисекунд.
+    #
+    # Почему это НЕ помогло бы 28 августа и почему тогда не поднимали: там
+    # jump был 4-5 bps, и физическая часть порога (halfSpread + jump ≈ 6.4)
+    # заведомо перекрывала дробную. Рычаг работает только в спокойном режиме
+    # — ровно там, где лесенка стоит на полу и запаса нет.
+    #
+    # Цена — больше аварийных съёмов, каждый с refillLockout в 3 с. В спокойном
+    # режиме они редки; смотреть по счётчику «price approaching».
+    panicFraction: 0.75
     # Мёртвая зона для решения «котировать или нет», а не для дистанции.
     #
     # Порог осуществимости был единственным решением в контуре без гистерезиса,

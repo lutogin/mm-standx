@@ -579,7 +579,10 @@ func (e *Engine) place(
 	}
 	qty := rungs[action.Slot]
 
-	price := e.spec.SnapPrice(market.PriceAtDistance(e.mark, side, action.Distance), side)
+	price, ok := e.placementPrice(side, action.Distance)
+	if !ok {
+		return
+	}
 	if err := e.spec.ValidateQty(qty); err != nil {
 		e.deps.Log.Warn("size rejected", "symbol", e.symbol, "error", err)
 		return
@@ -633,6 +636,56 @@ func (e *Engine) place(
 		"price", price, "qty", qty, "distance", action.Distance, "reason", action.Reason)
 
 	e.ladderFor(side).OnPlaceSent(action.Slot, id, price, qty, now)
+}
+
+// placementPrice считает цену новой ступени так, чтобы она стояла не ближе
+// заданной дистанции НИ ОТ ОФИЦИАЛЬНОГО MARK, НИ ОТ БЫСТРОЙ ОЦЕНКИ.
+//
+// СНЯЛ И ПОСТАВИЛ ТУДА ЖЕ. Опасность судится по быстрому сигналу (Engine.
+// classifier), а цена ступени считалась только от официального mark. Когда
+// ориентир уже ушёл, а mark ещё стоит, эти два взгляда расходятся, и бот
+// делал ровно то, что видно в логе 2 сентября 2026:
+//
+//	11:53:29.194  cancelled sell slot 0 — closer than target range
+//	11:53:29.811  placed    sell slot 0 @ 4334.9      <- та же цена
+//	11:53:30.229  cancelled sell slot 0 — closer than target range
+//	11:53:30.570  placed    sell slot 0 @ 4334.9      <- та же цена
+//	11:53:31.151  cancelled sell slot 0 — closer than target range
+//
+// Классификатор по оценке говорил «слишком близко», планировщик по mark
+// отвечал «вот правильное место» — и это было то же самое место. За день
+// таких пар 32 из 240, каждая — два запроса и ноль перестановки. В 11:54:22
+// сторона была снята тем же способом за 106 мс ПОСЛЕ сведения сделки.
+//
+// Правило простое: якорем служит тот из двух ориентиров, что ближе к ордеру.
+// Для продажи — больший, для покупки — меньший. Оценка может только отодвинуть
+// ступень, но никогда не придвинуть: если ориентир ушёл в другую сторону,
+// цена считается от mark, как и раньше.
+//
+// Полоса награды при этом по-прежнему судится по официальному mark — так её
+// считает биржа. Если отодвинутая ступень выходит за край полосы, она не
+// ставится вовсе: ордер, который не стоит ничего, нечем оправдывать.
+func (e *Engine) placementPrice(side market.Side, distance money.Bps) (money.Price, bool) {
+	anchor := e.mark
+	if est := e.markEstimate(); est.IsPositive() {
+		ahead := est.Cmp(e.mark) > 0
+		if (side == market.Sell && ahead) || (side == market.Buy && !ahead) {
+			anchor = est
+		}
+	}
+	price := e.spec.SnapPrice(market.PriceAtDistance(anchor, side, distance), side)
+	if anchor.Cmp(e.mark) == 0 {
+		return price, true
+	}
+
+	official, err := market.DistanceBps(e.mark, side, price)
+	if err != nil || official > e.bounds.MaxBps {
+		e.deps.Log.Info("skipping a quote the fast estimate pushed out of the band",
+			"symbol", e.symbol, "side", side, "mark", e.mark, "estimate", anchor,
+			"price", price, "distance_from_mark", official, "band", e.bounds.MaxBps)
+		return price, false
+	}
+	return price, true
 }
 
 // clampPostOnly отодвигает цену от вершины стакана и решает, стоит ли отправлять
