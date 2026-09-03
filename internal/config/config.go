@@ -486,6 +486,9 @@ type Liquidity struct {
 	SevereFraction float64 `koanf:"severeFraction"`
 	// ThinAfter — выдержка мягкой просадки до закрытия стороны.
 	ThinAfter time.Duration `koanf:"thinAfter"`
+	// ShortWindow — окно сглаживания для проверки восстановления. Вход
+	// намеренно не сглаживается: медиана не успевает за обвалом.
+	ShortWindow time.Duration `koanf:"shortWindow"`
 	// RecoverFraction — доля медианы, выше которой глубина считается
 	// восстановившейся. Выше ThinFraction, иначе порог один и сторона дребезжит.
 	RecoverFraction float64 `koanf:"recoverFraction"`

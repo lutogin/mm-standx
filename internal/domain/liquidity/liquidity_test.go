@@ -280,3 +280,103 @@ func TestZeroExtrasReduceToTheSingleThreshold(t *testing.T) {
 	e.Observe(market.Sell, 4_500_000, at)
 	require.False(t, e.Verdict(market.Sell, at).Thin, "no RecoverAfter: reopens at once above thin")
 }
+
+// ---- Сглаживание только на выходе -------------------------------------------
+
+func shipped() Config {
+	// Боевые значения после развёртки 3 сентября 2026.
+	return Config{
+		Window: 10 * time.Minute, SampleEvery: time.Second, MinSamples: 60,
+		ThinFraction: 0.65, SevereFraction: 0, ThinAfter: 0,
+		ShortWindow: 30 * time.Second, RecoverFraction: 0.75, RecoverAfter: 5 * time.Second,
+	}
+}
+
+// Вход мгновенный: обвал ловится в том же такте, где он виден.
+//
+// Развёртка по 1 и 3 сентября 2026: любая задержка или сглаживание на входе
+// роняет предотвращённый объём с 99% до 51%. Пропускался залив 22:00:35
+// на 10 XAU при мгновенных 0.62, когда медиана ещё стояла на месте.
+func TestEntryIsInstant(t *testing.T) {
+	e := New(shipped())
+	at := fill(e, market.Sell, 6_000_000, 120)
+
+	e.Observe(market.Sell, 3_720_000, at) // 0.62 — тот самый случай
+	require.True(t, e.Verdict(market.Sell, at).Thin,
+		"a collapse must be caught on the tick it appears")
+}
+
+// Выход сглажен: одиночный высокий замер не возвращает в стакан.
+func TestRecoveryIgnoresASingleGoodSample(t *testing.T) {
+	e := New(shipped())
+	at := fill(e, market.Sell, 6_000_000, 120)
+	e.Observe(market.Sell, 2_000_000, at)
+	require.True(t, e.Verdict(market.Sell, at).Thin)
+
+	// Один замер на 1.0 при тридцатисекундной медиане около 0.33.
+	at = at.Add(time.Second)
+	e.Observe(market.Sell, 6_000_000, at)
+	for range 6 {
+		at = at.Add(time.Second)
+		e.Observe(market.Sell, 2_000_000, at)
+		e.Verdict(market.Sell, at)
+	}
+	require.True(t, e.Verdict(market.Sell, at).Thin,
+		"one good tick is not a recovered book")
+}
+
+// Устойчивое восстановление возвращает сторону.
+func TestSustainedRecoveryReopens(t *testing.T) {
+	e := New(shipped())
+	at := fill(e, market.Sell, 6_000_000, 120)
+	e.Observe(market.Sell, 2_000_000, at)
+	require.True(t, e.Verdict(market.Sell, at).Thin)
+
+	for range 40 { // сорок секунд здоровой глубины
+		at = at.Add(time.Second)
+		e.Observe(market.Sell, 6_000_000, at)
+		e.Verdict(market.Sell, at) // ворота двигаются только здесь, как в бою
+	}
+	require.False(t, e.Verdict(market.Sell, at).Thin)
+}
+
+// Прежняя защёлка не воспроизводится: треть плохих тактов не мешает возврату.
+//
+// 3 сентября выход требовал десяти ЧИСТЫХ секунд выше 0.85, а ниже 0.85 была
+// треть тактов. Вероятность около 2%, и состояние залипало: 247 минут
+// в тонком стакане и три часа подряд с тиром 0.00x.
+func TestNoiseDoesNotLatchTheGate(t *testing.T) {
+	e := New(shipped())
+	at := fill(e, market.Sell, 6_000_000, 120)
+	e.Observe(market.Sell, 2_000_000, at)
+	require.True(t, e.Verdict(market.Sell, at).Thin)
+
+	for i := range 90 {
+		dep := 6_200_000.0
+		if i%3 == 0 {
+			dep = 4_600_000 // каждый третий такт ниже прежнего порога 0.85
+		}
+		at = at.Add(time.Second)
+		e.Observe(market.Sell, dep, at)
+		e.Verdict(market.Sell, at)
+	}
+	require.False(t, e.Verdict(market.Sell, at).Thin,
+		"a third of noisy ticks must not hold the gate shut")
+}
+
+// Нулевое окно сглаживания возвращает сравнение по последнему замеру.
+func TestZeroShortWindowComparesTheLatestSample(t *testing.T) {
+	c := shipped()
+	c.ShortWindow = 0
+	e := New(c)
+	at := fill(e, market.Sell, 6_000_000, 120)
+	e.Observe(market.Sell, 2_000_000, at)
+	require.True(t, e.Verdict(market.Sell, at).Thin)
+
+	at = at.Add(6 * time.Second)
+	e.Observe(market.Sell, 6_000_000, at)
+	e.Verdict(market.Sell, at)
+	at = at.Add(6 * time.Second)
+	e.Observe(market.Sell, 6_000_000, at)
+	require.False(t, e.Verdict(market.Sell, at).Thin)
+}

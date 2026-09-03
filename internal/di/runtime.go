@@ -407,6 +407,7 @@ func provideEngines(
 					ThinFraction:    symCfg.Liquidity.ThinFraction,
 					SevereFraction:  symCfg.Liquidity.SevereFraction,
 					ThinAfter:       symCfg.Liquidity.ThinAfter,
+					ShortWindow:     symCfg.Liquidity.ShortWindow,
 					RecoverFraction: symCfg.Liquidity.RecoverFraction,
 					RecoverAfter:    symCfg.Liquidity.RecoverAfter,
 				},
