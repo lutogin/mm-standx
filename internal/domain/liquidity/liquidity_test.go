@@ -380,3 +380,67 @@ func TestZeroShortWindowComparesTheLatestSample(t *testing.T) {
 	e.Observe(market.Sell, 6_000_000, at)
 	require.False(t, e.Verdict(market.Sell, at).Thin)
 }
+
+// ---- Возврат только в живой стакан ------------------------------------------
+
+// Сглаженная медиана здорова, а текущая плотность на дне — не возвращаемся.
+//
+// Замер счёта v3 за 8 сентября 2026: 425 «восстановлений» из 9860 приходились
+// на моменты, когда сырое отношение было ниже порога входа; минимум 0.022.
+// С включённым съёмом это давало цикл «сняли — вернули в пустой стакан —
+// сняли» и рост объёма заливов в шестьсот раз.
+func TestRecoveryRefusesWhileCurrentDepthIsGone(t *testing.T) {
+	e := New(shipped())
+	at := fill(e, market.Sell, 6_000_000, 120)
+
+	e.Observe(market.Sell, 400_000, at) // обвал до 0.066
+	require.True(t, e.Verdict(market.Sell, at).Thin)
+
+	// Тридцатисекундная медиана ещё помнит здоровый стакан, выдержка проходит,
+	// но текущая плотность так и не вернулась.
+	for range 8 {
+		at = at.Add(time.Second)
+		e.Observe(market.Sell, 400_000, at)
+		require.True(t, e.Verdict(market.Sell, at).Thin,
+			"a stale median must not reopen a side into an empty book")
+	}
+}
+
+// Как только текущая плотность вернулась, сторона открывается тем же тактом —
+// выдержка уже отсчитана, второй раз её ждать не надо.
+func TestRecoveryFiresTheTickCurrentDepthReturns(t *testing.T) {
+	e := New(shipped())
+	at := fill(e, market.Sell, 6_000_000, 120)
+	e.Observe(market.Sell, 400_000, at)
+	require.True(t, e.Verdict(market.Sell, at).Thin)
+
+	// Восемь секунд низкой плотности: сглаженная выше порога, сырая нет.
+	for range 8 {
+		at = at.Add(time.Second)
+		e.Observe(market.Sell, 400_000, at)
+		e.Verdict(market.Sell, at)
+	}
+	// Плотность вернулась — открываемся немедленно.
+	at = at.Add(time.Second)
+	e.Observe(market.Sell, 6_000_000, at)
+	require.False(t, e.Verdict(market.Sell, at).Thin,
+		"the hold was already served; the tick depth returns is the tick we requote")
+}
+
+// Обычное восстановление не замедлилось: обе величины растут вместе.
+func TestNormalRecoveryStillTakesOnlyTheHold(t *testing.T) {
+	e := New(shipped())
+	at := fill(e, market.Sell, 6_000_000, 120)
+	e.Observe(market.Sell, 2_000_000, at)
+	require.True(t, e.Verdict(market.Sell, at).Thin)
+
+	for i := range 40 {
+		at = at.Add(time.Second)
+		e.Observe(market.Sell, 6_000_000, at)
+		if !e.Verdict(market.Sell, at).Thin {
+			require.Less(t, i, 12, "a healthy book must reopen within the hold, not later")
+			return
+		}
+	}
+	t.Fatal("a fully recovered book never reopened")
+}
