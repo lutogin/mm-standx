@@ -344,6 +344,7 @@ func provideEngines(
 	clk ports.Clock,
 	m ports.Metrics,
 	beacon *liveness.Beacon,
+	store ports.StateStore,
 	log *slog.Logger,
 ) ([]ports.Runnable, error) {
 	symbols := sortedSymbols(cfg)
@@ -443,6 +444,7 @@ func provideEngines(
 				Clock:    clk,
 				Metrics:  m,
 				Liveness: beacon,
+				Store:    store,
 				Log:      log,
 			},
 		))

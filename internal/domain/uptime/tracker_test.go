@@ -325,3 +325,95 @@ func TestMidHourStartStillCountsTheMissedSlotsAsZero(t *testing.T) {
 	require.Equal(t, 1801, len(tr.samples))
 	require.Equal(t, 1, tr.nonZero, "a restart must never manufacture uptime")
 }
+
+// ---- Снимок часа переживает перезапуск --------------------------------------
+
+// Деплой после середины часа больше не обнуляет набранное присутствие.
+//
+// Замер v1 за 9 сентября 2026: рестарт в 11:29 — и через минуту
+// "no economically eligible uptime tier remains reachable", час закрылся
+// на 0.00x. Биржа при этом считала книгу непрерывно и о подмене процесса
+// не знала.
+func TestSnapshotSurvivesRestartWithinTheHour(t *testing.T) {
+	hourStart := time.Date(2026, 9, 9, 11, 0, 0, 0, time.UTC)
+	policy := Policy{
+		TargetPct: 80, HardFloorPct: 72, ReservePct: 8,
+		SampleInterval: time.Second, MaxCarryGap: 5 * time.Second,
+	}
+
+	before := New(program(), policy)
+	at := hourStart
+	for range 1800 { // тридцать минут присутствия
+		before.Sample(at, decimal.NewFromInt(60))
+		at = at.Add(time.Second)
+	}
+	banked := before.Assess(at).BankedPct
+	require.InDelta(t, 50, banked, 1, "half the hour is banked")
+
+	// Процесс подменили: новый трекер поднимает снимок.
+	after := New(program(), policy)
+	restartAt := at.Add(10 * time.Second)
+	require.True(t, after.Restore(before.Snapshot(), restartAt))
+
+	got := after.Assess(restartAt)
+	require.InDelta(t, banked, got.BankedPct, 1, "the banked half must come back")
+	require.NotEqual(t, Lost, got.Mode, "an hour half secured is not a lost hour")
+}
+
+// Без снимка тот же рестарт объявляет час потерянным — это и была неисправность.
+func TestRestartWithoutSnapshotLosesTheHour(t *testing.T) {
+	hourStart := time.Date(2026, 9, 9, 11, 0, 0, 0, time.UTC)
+	policy := Policy{
+		TargetPct: 80, HardFloorPct: 72, ReservePct: 8,
+		SampleInterval: time.Second, MaxCarryGap: 5 * time.Second,
+	}
+	fresh := New(program(), policy)
+	require.Equal(t, Lost, fresh.Assess(hourStart.Add(31*time.Minute)).Mode)
+}
+
+// Простой между снимком и стартом ложится в сетку нулями, а не переносом:
+// на выходе котировки снимаются, и книга всё это время была пуста.
+func TestRestoreZeroesTheOutage(t *testing.T) {
+	hourStart := time.Date(2026, 9, 9, 11, 0, 0, 0, time.UTC)
+	policy := Policy{
+		TargetPct: 80, HardFloorPct: 72, ReservePct: 8,
+		SampleInterval: time.Second, MaxCarryGap: 30 * time.Second,
+	}
+	before := New(program(), policy)
+	at := hourStart
+	for range 600 { // десять минут
+		before.Sample(at, decimal.NewFromInt(60))
+		at = at.Add(time.Second)
+	}
+
+	after := New(program(), policy)
+	// Простой короче MaxCarryGap: обычный путь заполнения перенёс бы сюда
+	// последнее наблюдение, хотя ордеров в стакане не было.
+	restartAt := at.Add(20 * time.Second)
+	require.True(t, after.Restore(before.Snapshot(), restartAt))
+
+	got := after.Assess(restartAt)
+	require.InDelta(t, 10*100.0/60, got.BankedPct, 0.6,
+		"the outage must count as absence, not as carried presence")
+}
+
+// Снимок чужого часа не принимается: иначе он выдумал бы присутствие.
+func TestRestoreRefusesAnotherHour(t *testing.T) {
+	policy := Policy{TargetPct: 80, HardFloorPct: 72, ReservePct: 8, SampleInterval: time.Second}
+	before := New(program(), policy)
+	at := time.Date(2026, 9, 9, 11, 0, 0, 0, time.UTC)
+	for range 600 {
+		before.Sample(at, decimal.NewFromInt(60))
+		at = at.Add(time.Second)
+	}
+	after := New(program(), policy)
+	require.False(t, after.Restore(before.Snapshot(), at.Add(time.Hour)))
+	require.Zero(t, after.Assess(at.Add(time.Hour)).BankedPct)
+}
+
+// Пустой снимок — первый запуск, а не ошибка.
+func TestRestoreIgnoresAnEmptySnapshot(t *testing.T) {
+	policy := Policy{TargetPct: 80, HardFloorPct: 72, ReservePct: 8, SampleInterval: time.Second}
+	tr := New(program(), policy)
+	require.False(t, tr.Restore(State{}, time.Date(2026, 9, 9, 11, 0, 0, 0, time.UTC)))
+}
