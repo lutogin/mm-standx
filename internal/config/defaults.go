@@ -275,12 +275,11 @@ func defaults() *Config {
 				// нижнюю четверть в 5 с, выдержка в 10 с их склеивает.
 				RecoverFraction: 0.75,
 				RecoverAfter:    5 * time.Second,
-				// Снимать, а не только не доставлять. Замер 2 сентября 2026:
-				// вердикт по глубине опередил исполнение на 405 мс, а круг
-				// запроса на снятие — десятки миллисекунд. Ордер, выставленный
-				// до обвала, под запрет на размещение не подпадает и дожидается
-				// своей сделки.
-				PullOnThin: true,
+				// Off: only refuse new orders into a thin book. Pulling resting
+				// orders multiplied filled volume by ~600x on v3 (3-9 September
+				// 2026) for about forty cents a week of avoided one-sided risk.
+				// See pullOnThin in config/config.yaml.
+				PullOnThin: false,
 			},
 			Volatility: Volatility{
 				// Окно в двадцать минут при такте в три секунды даёт до 400

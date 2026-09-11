@@ -794,22 +794,32 @@ defaults:
     # встанут обе стороны, а тонкая выставляется заново в любом случае
     # и остаётся узким местом.
     #
-    # Снимать ли уже стоящие ступени, а не только запрещать новые.
+    # Whether a thin book also pulls the orders already resting, rather than
+    # only refusing new ones.
     #
-    # ЗАМЕР 2 СЕНТЯБРЯ 2026, первый час после выката ворот:
+    # OFF, AND DECIDED BY MEASUREMENT. The case for pulling was the 2 September
+    # episode: the depth verdict preceded a fill by 405 ms, and a resting order
+    # placed before the collapse was not covered by the placement gate.
     #
-    #   09:05:19.441  выставлен sell 4326.3
-    #   09:05:59.668  ворота: глубина аска 2.84M против порога 4.90M
-    #   09:06:00.073  биржа свела ЭТОТ ЖЕ ордер
-    #   09:06:11      jump вырос с 0.98 до 6.74
+    # Running it cost far more than it saved. Account v3, 3-9 September 2026:
     #
-    # Вердикт опередил исполнение на 405 мс, а обвал глубины опередил само
-    # движение на десяток секунд. Круг запроса на снятие — десятки
-    # миллисекунд, то есть запаса хватало с избытком. Не хватило права
-    # снимать: ордер стоял с 09:05:19 и под запрет на размещение не подпадал.
+    #   pullOnThin   hours   both sides   one side   empty   filled per hour
+    #   false          140       85%          4%       10%     0.002 XAU
+    #   true          18.5       75%          3%       21%     1.319 XAU
     #
-    # Ложь оставляет прежнее поведение — только запрет на новые ордера.
-    pullOnThin: true
+    # Every thin episode takes both sides out and puts two fresh orders back
+    # once it clears, and large fills arrive precisely on freshly placed
+    # orders. The benefit it was meant to buy is removing risk from a lone
+    # side during one-sided ticks; across v1 and v3 the volume filled on such
+    # ticks was 0.184 XAU in a week, about forty cents of fees.
+    #
+    # This value lives in the repository, not on the servers. The deploy
+    # pipeline replaces the whole config directory on every release
+    # (.github/workflows/ci-cd.yml, "Upload configuration"), so a flag flipped
+    # by hand on a host lasts only until the next deploy. That is exactly how
+    # all three accounts came back to `true` after being switched off on
+    # 9 September.
+    pullOnThin: false
 
   volatility:
     # Окно больше не задаёт длительность осторожности — с 19 августа это делает
