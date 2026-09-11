@@ -80,7 +80,12 @@ type Deps struct {
 	// отдельная горутина по своему таймеру, и заблокировавшийся актор
 	// при живом процессе выглядел здоровым — см. ports.Liveness.
 	Liveness ports.Liveness
-	Log      *slog.Logger
+	// Store переносит набранное присутствие текущего часа через перезапуск.
+	//
+	// Может быть nil: без каталога состояния бот работает как прежде, теряя
+	// остаток часа на каждом деплое после его середины (uptime.State).
+	Store ports.StateStore
+	Log   *slog.Logger
 }
 
 // Params — всё, что актор знает о своём инструменте на момент сборки.
@@ -433,6 +438,57 @@ func New(p Params, deps Deps) *Engine {
 	}
 }
 
+// hourStateName — имя снимка часа для этого инструмента.
+//
+// По инструменту, а не одно на процесс: часы у символов независимы, и общий
+// файл заставил бы их затирать друг друга.
+func (e *Engine) hourStateName() string { return "uptime-" + e.symbol.String() }
+
+// restoreHour поднимает набранное присутствие текущего часа.
+//
+// Любая неудача здесь не должна мешать старту: отсутствие снимка — штатный
+// первый запуск, а испорченный снимок хуже пустого только тем, что о нём
+// стоит написать в лог. В обоих случаях актор начинает час с нуля, то есть
+// ровно так, как он вёл себя до появления этого механизма.
+func (e *Engine) restoreHour() {
+	if e.deps.Store == nil {
+		return
+	}
+	var saved uptime.State
+	found, err := e.deps.Store.Load(e.hourStateName(), &saved)
+	if err != nil {
+		e.deps.Log.Warn("hourly presence snapshot unreadable, starting the hour empty",
+			"symbol", e.symbol, "error", err)
+		return
+	}
+	if !found {
+		return
+	}
+	now := e.deps.Clock.Now()
+	if !e.hour.Restore(saved, now) {
+		e.deps.Log.Info("hourly presence snapshot belongs to another hour, ignoring",
+			"symbol", e.symbol, "snapshot_hour", saved.Hour.UTC().Format(time.RFC3339))
+		return
+	}
+	assessed := e.hour.Assess(now)
+	e.deps.Log.Info("hourly presence restored across the restart",
+		"symbol", e.symbol,
+		"hour", saved.Hour.UTC().Format(time.RFC3339),
+		"banked_pct", fmt.Sprintf("%.0f", assessed.BankedPct),
+		"best_possible_pct", fmt.Sprintf("%.0f", assessed.BestPossiblePct))
+}
+
+// saveHour записывает снимок часа поверх прежнего.
+func (e *Engine) saveHour() {
+	if e.deps.Store == nil {
+		return
+	}
+	if err := e.deps.Store.Save(e.hourStateName(), e.hour.Snapshot()); err != nil {
+		e.deps.Log.Warn("could not persist the hourly presence snapshot",
+			"symbol", e.symbol, "error", err)
+	}
+}
+
 func (e *Engine) Name() string { return "engine[" + e.symbol.String() + "]" }
 
 // Start подписывается на события и запускает цикл.
@@ -448,6 +504,7 @@ func (e *Engine) Start(context.Context) error {
 		e.deps.Metrics.RiskLimit(prefix+"break_even_usd_per_maker_hour",
 			e.economics.BreakEvenUSDPerMakerHour)
 	}
+	e.restoreHour()
 	e.subscribe()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -478,6 +535,10 @@ func (e *Engine) Stop(ctx context.Context) error {
 	// стоила получаса на выяснение того, что вообще остановило актор: пустое
 	// основание не сужает поиск ни на один путь.
 	e.halted, e.haltReason = true, "process is stopping"
+
+	// Снимок часа берётся ДО снятия котировок: он обязан описывать час таким,
+	// каким его видела биржа, а не таким, каким он стал после уборки.
+	e.saveHour()
 
 	e.withdraw(ctx, ports.CauseShutdown, "process is stopping")
 	e.clearRemaining(ctx)

@@ -71,6 +71,75 @@ type Tracker struct {
 	lastSlot int
 }
 
+// State is the scoring hour as it stood when the process last stopped.
+//
+// WHY THIS HAS TO SURVIVE A RESTART. Presence is banked per UTC hour, and the
+// tracker deliberately zeroes every slot before a mid-hour process start so
+// that a restart cannot manufacture uptime. That rule is right about the past
+// it did not observe and wrong about the past it did: the exchange samples the
+// book continuously and has no idea the process was replaced. A deploy at
+// minute 31 therefore left the actor believing the hour was empty while the
+// exchange had already counted half of it, and Assess retired the hour as
+// unreachable — see the Lost path.
+//
+// Measured on v1, 9 September 2026: a restart at 11:29 was followed one minute
+// later by "no economically eligible uptime tier remains reachable", and the
+// hour closed at 0.00x. Every deploy past the half hour costs the remainder of
+// that hour outright.
+type State struct {
+	// Hour is the UTC hour the samples belong to. A snapshot from any other
+	// hour is discarded rather than trusted.
+	Hour time.Time `json:"hour"`
+	// LastSlot is the last grid position that carries an observation.
+	LastSlot int `json:"last_slot"`
+	// Samples is the normalized grid, in order.
+	Samples []decimal.Decimal `json:"samples"`
+}
+
+// Snapshot exports the current hour for persistence.
+func (t *Tracker) Snapshot() State {
+	out := State{Hour: t.hour, LastSlot: t.lastSlot, Samples: make([]decimal.Decimal, len(t.samples))}
+	copy(out.Samples, t.samples)
+	return out
+}
+
+// Restore adopts a snapshot of the hour now in progress and reports whether it
+// was used.
+//
+// THE GAP IS ZEROED, NOT CARRIED. Between the snapshot and this call the
+// process was down, and shutdown withdraws the quotes before it exits
+// (Engine.Stop), so the book was empty for the whole interval. The ordinary
+// fill path would carry the last observation across a gap shorter than
+// MaxCarryGap, which is right for an actor that was merely late and wrong for
+// one that was not running: it would claim presence that was deliberately
+// removed. Restoring therefore closes the gap with zeros explicitly.
+//
+// A snapshot from another hour is refused. Nothing else needs checking: the
+// samples describe slots the exchange did observe, and the outage that follows
+// them lands in the grid as the absence it was.
+func (t *Tracker) Restore(s State, now time.Time) bool {
+	if len(s.Samples) == 0 || s.LastSlot < 0 {
+		return false
+	}
+	if !s.Hour.UTC().Equal(now.UTC().Truncate(time.Hour)) {
+		return false
+	}
+
+	t.hour = s.Hour.UTC()
+	t.samples = append(t.samples[:0], s.Samples...)
+	t.lastSlot = s.LastSlot
+	t.nonZero = 0
+	for _, v := range t.samples {
+		if v.IsPositive() {
+			t.nonZero++
+		}
+	}
+	// Простой между снимком и стартом — это отсутствие котировок, и в сетке
+	// он обязан выглядеть нулями.
+	t.fillWith(t.slot(now), decimal.Zero)
+	return true
+}
+
 // New creates an hourly tracker.
 func New(program reward.Program, policy Policy) *Tracker {
 	if policy.SampleInterval <= 0 {
