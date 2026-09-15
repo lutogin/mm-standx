@@ -370,10 +370,12 @@ func TestShippedSizingReachesTheHourlyCeilingOnTheLiveAccount(t *testing.T) {
 // концентрацией размера на ближней ступени. Здесь фиксируется только цена
 // в марже, которую видно из конфигурации.
 //
-// Замеренная ставка блокировки — величина неточная: 2.667% дала оценка того же
-// дня, 2.887% списала биржа. При верхнем значении трёхступенчатая лесенка
-// в бюджет уже не помещается и падает обратно под ограничение капитала,
-// то есть до потолка часа не доходит.
+// The measured margin lock rate is imprecise: the same day's estimate gave
+// 2.667%, the exchange charged 2.887%. With utilizationPct at 80 the upper rate
+// pushed the two- and three-rung ladders into the margin budget, short of the
+// hourly ceiling (59.36 and 57.12 of 60). Raising the budget to 90 on
+// 14 September 2026 brought every geometry back to the ceiling even at the
+// upper rate: three rungs then take 84.0% of the margin, a single order 77.9%.
 func TestFewerRungsBuyMarginHeadroomAtTheHourlyCeiling(t *testing.T) {
 	cfg := shippedConfig(t)
 	perSideCap := requireDecimal(t, cfg.Symbols["XAU-USD"].Program.PerSideCap).InexactFloat64()
@@ -391,14 +393,20 @@ func TestFewerRungsBuyMarginHeadroomAtTheHourlyCeiling(t *testing.T) {
 	require.InDelta(t, 0.927, shares[0]/shares[2], 0.005,
 		"один ордер берёт тот же зачёт примерно на 7%% меньшем нотионале")
 
-	// При верхней оценке ставки блокировки трёх ступеней бюджет уже не несёт.
-	three, distances := livePlan(t, cfg, 3, liveMarginPctObserved)
-	require.Contains(t, three.Reason, "margin budget")
-	require.Less(t, scoredSide(cfg, three, distances), perSideCap,
-		"под 2.887% трёхступенчатая лесенка до потолка часа не доходит")
-
-	one, oneDistances := livePlan(t, cfg, 1, liveMarginPctObserved)
-	require.Contains(t, one.Reason, "reward ceiling")
-	require.InDelta(t, perSideCap, scoredSide(cfg, one, oneDistances), 0.01,
-		"одиночный ордер доходит до потолка и под верхней оценкой ставки")
+	// At the upper lock rate every geometry must still reach the ceiling and fit
+	// the budget. If utilizationPct is lowered again, the widest ladder is the
+	// first to fall back under the margin budget, and this is where it shows.
+	var observed []float64
+	for layers := 1; layers <= 3; layers++ {
+		plan, distances := livePlan(t, cfg, layers, liveMarginPctObserved)
+		require.Contains(t, plan.Reason, "reward ceiling",
+			"under 2.887%% the %d-rung ladder must be capped by the reward ceiling, not the margin budget", layers)
+		require.InDelta(t, perSideCap, scoredSide(cfg, plan, distances), 0.01,
+			"under 2.887%% the %d-rung ladder must reach the hourly ceiling", layers)
+		observed = append(observed, marginShare(plan, liveMarginPctObserved))
+	}
+	require.Less(t, observed[0], observed[1])
+	require.Less(t, observed[1], observed[2])
+	require.Less(t, observed[2], cfg.Risk.UtilizationPct,
+		"the widest ladder must fit the margin budget under the upper lock rate")
 }
