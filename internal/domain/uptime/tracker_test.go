@@ -417,3 +417,71 @@ func TestRestoreIgnoresAnEmptySnapshot(t *testing.T) {
 	tr := New(program(), policy)
 	require.False(t, tr.Restore(State{}, time.Date(2026, 9, 9, 11, 0, 0, 0, time.UTC)))
 }
+
+// The cached estimate must follow every way the grid can change: an overwrite
+// of the current slot, completed slots appended by Assess itself, a restored
+// snapshot and the hour boundary. Each step is compared with the programme
+// formula on the same grid, and each step must actually move the result, so
+// a cache that never invalidates cannot pass.
+func TestAssessTracksEveryChangeToTheGrid(t *testing.T) {
+	tr := tracker(1)
+	assess := func(at time.Time) float64 {
+		got := tr.Assess(at).MakerHours
+		require.Equal(t, tr.program.MakerHours(tr.samples, at), got,
+			"the estimate at %s must match the grid it describes", at.Format(time.TimeOnly))
+		return got
+	}
+
+	at := hourStart()
+	for slot := 0; slot < 10; slot++ {
+		at = hourStart().Add(time.Duration(slot) * time.Second)
+		value := decimal.NewFromInt(1500)
+		if slot >= 7 {
+			value = decimal.Zero
+		}
+		tr.Sample(at, value)
+	}
+	partial := assess(at)
+	require.Equal(t, partial, assess(at), "an unchanged grid gives the same estimate")
+
+	tr.Sample(at, decimal.NewFromInt(1500))
+	overwritten := assess(at)
+	require.NotEqual(t, partial, overwritten, "overwriting the current slot must be seen")
+	snapshot := tr.Snapshot()
+
+	backfilled := assess(at.Add(20 * time.Second))
+	require.NotEqual(t, overwritten, backfilled, "slots completed while no sample arrived must be seen")
+
+	require.True(t, tr.Restore(snapshot, at.Add(time.Second)))
+	restored := assess(at.Add(time.Second))
+	require.NotEqual(t, backfilled, restored, "a restored snapshot must be seen")
+
+	nextHour := hourStart().Add(time.Hour + 5*time.Second)
+	require.NotEqual(t, restored, assess(nextHour), "the hour boundary must be seen")
+}
+
+// Assessing an unchanged hour must not sort it again. The actor assesses on
+// every evaluation, up to forty a second, and sorting the full grid each time
+// saturated the single-vCPU hosts late in every hour (15 September 2026).
+//
+// Allocations stand in for time here. The samples carry mixed decimal
+// exponents, as distance-weighted sizes do in production: comparing those
+// allocates, so an uncached assessment at minute 59 makes about 27 000
+// allocations and a cached one a handful. Whole numbers would hide the defect,
+// because equal exponents compare without allocating.
+func TestRepeatedAssessmentDoesNotResortTheHour(t *testing.T) {
+	tr := tracker(1)
+	sizes := []decimal.Decimal{
+		decimal.RequireFromString("63.614"), decimal.RequireFromString("63.62"),
+		decimal.RequireFromString("63.6251"), decimal.Zero, decimal.RequireFromString("47.7105"),
+	}
+	at := hourStart()
+	for slot := 0; slot < 59*60; slot++ {
+		at = hourStart().Add(time.Duration(slot) * time.Second)
+		tr.Sample(at, sizes[slot%len(sizes)])
+	}
+	tr.Assess(at)
+
+	allocs := testing.AllocsPerRun(100, func() { tr.Assess(at) })
+	require.Less(t, allocs, 100.0, "an unchanged full-hour grid was sorted again")
+}

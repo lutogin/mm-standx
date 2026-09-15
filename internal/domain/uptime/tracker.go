@@ -69,6 +69,14 @@ type Tracker struct {
 	samples  []decimal.Decimal
 	nonZero  int
 	lastSlot int
+
+	// version advances on every change to the grid. The cached programme
+	// estimate is valid only for the version and multiplier it was taken at.
+	version          uint64
+	cached           bool
+	cachedVersion    uint64
+	cachedMultiplier float64
+	cachedMakerHours float64
 }
 
 // State is the scoring hour as it stood when the process last stopped.
@@ -128,6 +136,7 @@ func (t *Tracker) Restore(s State, now time.Time) bool {
 	t.hour = s.Hour.UTC()
 	t.samples = append(t.samples[:0], s.Samples...)
 	t.lastSlot = s.LastSlot
+	t.version++
 	t.nonZero = 0
 	for _, v := range t.samples {
 		if v.IsPositive() {
@@ -166,6 +175,9 @@ func (t *Tracker) Sample(now time.Time, value decimal.Decimal) {
 		} else if !previous.IsPositive() && value.IsPositive() {
 			t.nonZero++
 		}
+		if !previous.Equal(value) {
+			t.version++
+		}
 		t.samples[len(t.samples)-1] = value
 		return
 	}
@@ -174,6 +186,7 @@ func (t *Tracker) Sample(now time.Time, value decimal.Decimal) {
 	if value.IsPositive() {
 		t.nonZero++
 	}
+	t.version++
 	t.lastSlot = slot
 }
 
@@ -184,6 +197,7 @@ func (t *Tracker) resetHour(now time.Time) {
 		t.samples = t.samples[:0]
 		t.nonZero = 0
 		t.lastSlot = -1
+		t.version++
 	}
 }
 
@@ -217,6 +231,7 @@ func (t *Tracker) fillWith(slot int, value decimal.Decimal) {
 			t.nonZero++
 		}
 		t.lastSlot = missing
+		t.version++
 	}
 }
 
@@ -264,7 +279,7 @@ func (t *Tracker) Assess(now time.Time) Snapshot {
 		ElapsedPct:      elapsedPct,
 		BankedPct:       bankedPct,
 		BestPossiblePct: bankedPct + (100 - elapsedPct),
-		MakerHours:      t.program.MakerHours(t.samples, now),
+		MakerHours:      t.makerHoursAt(now),
 		Multiplier:      t.program.Multiplier(now),
 	}
 	if len(t.samples) > 0 {
@@ -293,6 +308,33 @@ func (t *Tracker) Assess(now time.Time) Snapshot {
 		s.DowntimeBudget = time.Duration(slack / 100 * float64(time.Hour))
 	}
 	return s
+}
+
+// makerHoursAt returns the programme estimate for the current grid, reusing the
+// previous result while neither the grid nor the accrual multiplier changed.
+//
+// WHY THIS IS CACHED. MakerHours copies and sorts every sample of the hour, and
+// the actor assesses the hour on every evaluation: the book, the mark and the
+// reference feed, the last one alone up to forty times a second. The cost grows
+// with the elapsed hour, from 0.02 ms and 506 allocations per call at minute one
+// to 0.44 ms and 27 000 allocations (830 KB) at minute 59 on a development
+// machine. The production hosts have a single vCPU, and every hour the actor
+// climbed from about 10% of it to saturation in the last quarter. On v1,
+// 15 September 2026, user time stood at 96-98% from 16:40 to 17:00, the actor
+// fell behind its own acknowledgement timeout, and 76 of 78 placements between
+// 16:56 and 16:59 were cancelled as "placement was never acknowledged" long
+// before they could rest the three seconds the programme requires.
+//
+// The grid changes at most once per sample slot, so the sort now runs about
+// once a second however often the hour is assessed.
+func (t *Tracker) makerHoursAt(now time.Time) float64 {
+	multiplier := t.program.Multiplier(now)
+	if t.cached && t.cachedVersion == t.version && t.cachedMultiplier == multiplier {
+		return t.cachedMakerHours
+	}
+	t.cachedMakerHours = t.program.MakerHours(t.samples, now)
+	t.cachedVersion, t.cachedMultiplier, t.cached = t.version, multiplier, true
+	return t.cachedMakerHours
 }
 
 // bestTier returns the strongest eligible reachable tier and its active safety
